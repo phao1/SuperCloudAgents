@@ -1,0 +1,3 @@
+instruction: Refactor initials(names) using a helper named initial(name), preserve
+  stripping and empty-name behavior.
+verify_command: python verify.py

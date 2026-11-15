@@ -26,6 +26,8 @@ submit (repo + instruction + verify command)
 - [`docs/architecture.md`](docs/architecture.md): what it is, the decisions and their trade-offs, the roadmap.
 - [`docs/design.md`](docs/design.md): interfaces, data model, workflow, tests (the phase 1 baseline).
 - [`docs/design-phase2.md`](docs/design-phase2.md): each hardening component, what was verified and what was not.
+- [`docs/design-phase2b.md`](docs/design-phase2b.md), [`docs/design-phase3.md`](docs/design-phase3.md): designs for the work not started yet (multi-node, real CI, secrets, roles, cost budgets, operations; then a second scenario, design intent, memory, evaluation).
+- [`docs/handoff.md`](docs/handoff.md): where things stand, how to run everything, known pitfalls.
 
 Both are written in Chinese. In short: a modular monolith in Python; [Temporal](https://temporal.io)
 for durable orchestration; Postgres as the single source of truth with an append-only event log;
@@ -84,6 +86,15 @@ existing open-source software wherever possible. Optional services are compose p
 ```bash
 make up-all    # also start the optional services (needs a .env with provider keys for the gateway)
 ```
+
+## Phase 3
+
+| Area | What it adds | Enable with |
+| --- | --- | --- |
+| Second scenario | The kernel no longer knows about coding: a `data analysis` kind (upload files, get a reproducible report) runs on the same task engine. | `"kind": "analysis"`, `POST /v1/files` |
+| Design intent | An OpenAPI spec, a baseline screenshot or a linter config becomes context for the agent and executable checks. | `intents` in any task spec |
+| Memory | Project conventions distilled from reviewer feedback (or written by people), approved by a human, given to later tasks. | `/v1/memories`, `accept_memories` in a review |
+| Evaluation | Hidden acceptance checks, evaluation suites, per-case comparison of models / prompt versions, a regression gate. | `sca eval run|show|compare|gate`, `evals/` |
 
 ## Tests
 

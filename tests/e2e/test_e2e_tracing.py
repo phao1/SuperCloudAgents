@@ -38,13 +38,17 @@ async def test_one_trace_spans_api_workflow_and_activities(stack, source_repo):
     await stack.review(task_id, "approve")
     await stack.wait_for(task_id, "SUCCEEDED")
 
-    spans = [
-        s for s in exporter.get_finished_spans() if f"{s.context.trace_id:032x}" == trace_id
-    ]
+    spans = [s for s in exporter.get_finished_spans() if f"{s.context.trace_id:032x}" == trace_id]
     names = {s.name for s in spans}
     print("\nspans in the task's trace:", sorted(names))
     assert any(n.startswith("POST /v1/tasks") for n in names)  # the API request
     assert "StartWorkflow:CodingTaskWorkflow" in names  # API -> Temporal
     assert "RunWorkflow:CodingTaskWorkflow" in names  # the workflow, in the worker
-    for activity in ("prepare_workspace", "run_agent_turn", "run_verification", "publish"):
-        assert f"RunActivity:{activity}" in names  # activities, in the worker
+    # Activities, in the worker: kernel ones unprefixed, the scenario's prefixed with its kind.
+    for activity in (
+        "run_agent_turn",
+        "coding.prepare_workspace",
+        "coding.run_verification",
+        "coding.publish",
+    ):
+        assert f"RunActivity:{activity}" in names

@@ -17,3 +17,10 @@ class SubtaskInput:
 class MergeInput:
     task_id: str
     results: list[SubtaskResult]
+
+
+@dataclass
+class PlanningInput:
+    task_id: str
+    attempt: int = 1
+    feedback: str | None = None

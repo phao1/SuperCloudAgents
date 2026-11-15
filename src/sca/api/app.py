@@ -8,7 +8,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException
 
-from sca.api.auth import ChainAuthenticator, OidcAuthenticator, StaticTokenAuthenticator
+from sca.api.auth import (
+    ChainAuthenticator,
+    DatabaseTokenAuthenticator,
+    OidcAuthenticator,
+    StaticTokenAuthenticator,
+)
+from sca.api.authz import ForbiddenError
 from sca.api.routes import router
 from sca.config import get_settings
 from sca.core.errors import AuthError, ConflictError, InvalidTaskError, NotFoundError
@@ -60,7 +66,10 @@ def create_app(
     app.state.metrics = Metrics()
     instrument_app(app, app.state.metrics)
     app.state.orchestrator = orchestrator
-    authenticators: list[Authenticator] = [StaticTokenAuthenticator(settings.token_table())]
+    authenticators: list[Authenticator] = [
+        StaticTokenAuthenticator(settings.token_table()),
+        DatabaseTokenAuthenticator(app.state.store),
+    ]
     issuer = getattr(settings, "oidc_issuer", None)
     if issuer:
         audience = getattr(settings, "oidc_audience", None)
@@ -72,6 +81,8 @@ def create_app(
                 audience,
                 getattr(settings, "oidc_jwks_url", None) or issuer + "/keys",
                 getattr(settings, "oidc_tenant_claim", "tenant"),
+                settings.oidc_role_claim,
+                settings.oidc_default_role,
             )
         )
     app.state.authenticator = authenticator or ChainAuthenticator(authenticators)
@@ -91,13 +102,21 @@ def create_app(
         status, code = {
             QuotaExceededError: (429, "quota_exceeded"),
             AuthError: (401, "unauthorized"),
+            ForbiddenError: (403, "forbidden"),
             NotFoundError: (404, "not_found"),
             ConflictError: (409, "conflict"),
             InvalidTaskError: (422, "validation_error"),
         }[type(exc)]
         return JSONResponse({"error": {"code": code, "message": str(exc)}}, status_code=status)
 
-    for error in (QuotaExceededError, AuthError, NotFoundError, ConflictError, InvalidTaskError):
+    for error in (
+        ForbiddenError,
+        QuotaExceededError,
+        AuthError,
+        NotFoundError,
+        ConflictError,
+        InvalidTaskError,
+    ):
         app.add_exception_handler(error, domain_error)
 
     @app.exception_handler(RequestValidationError)
@@ -121,5 +140,10 @@ def create_app(
     async def index() -> FileResponse:
         return FileResponse(Path(__file__).parent / "static" / "index.html")
 
+    from sca.api.files import router as files_router
+    from sca.api.memories import router as memories_router
+
+    app.include_router(memories_router)
+    app.include_router(files_router)
     app.include_router(router)
     return app

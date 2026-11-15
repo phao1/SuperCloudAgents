@@ -1,0 +1,5 @@
+Your work will be accepted when this command exits with status 0, run from the repository root:
+
+    $command
+
+Run it yourself before you finish.

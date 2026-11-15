@@ -1,0 +1,5 @@
+Your work will be accepted when every one of these commands exits with status 0, each run from the repository root:
+
+$listing
+
+Run them yourself before you finish.

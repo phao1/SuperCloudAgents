@@ -6,17 +6,46 @@ import json
 import os
 import re
 import stat
-from pathlib import Path
+from collections.abc import AsyncIterator
+from ipaddress import ip_network
+from pathlib import Path, PurePosixPath
+from typing import Literal
+from uuid import uuid4
 
 from sca.core.errors import SandboxError
-from sca.core.models import SandboxSpec
+from sca.core.models import ExecEvent, SandboxSpec
 from sca.sandbox._exec import stream_exec
+from sca.sandbox._transfer import transfer
 from sca.sandbox.egress import SQUID_IMAGE, render_squid_conf
 
 UID, GID = os.getuid(), os.getgid()
 
 NETWORK = "sca.network"
 PROXY = {"sca.role": "egress"}
+
+
+def pool_hash(spec: SandboxSpec) -> str:
+    template = [spec.image, spec.cpus, spec.memory_mb, spec.network, spec.runtime]
+    return hashlib.sha256(json.dumps(template).encode()).hexdigest()[:32]
+
+
+def pool_env_allowed(env: dict[str, str]) -> bool:
+    return all(
+        key != "SCA_MODEL_KEY"
+        and (
+            key in {"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "CODEX_HOME"}
+            or key.startswith(("PIP_", "SCA_"))
+        )
+        for key in env
+    )
+
+
+def pool_compatible(spec: SandboxSpec) -> bool:
+    return (
+        spec.labels.get("sca.state_transport") == "sync"
+        and not spec.mounts
+        and pool_env_allowed(spec.env)
+    )
 
 
 def safe_name(name: str) -> str:
@@ -52,6 +81,7 @@ def pod_manifest(
     run_as_uid: int = UID,
     run_as_gid: int = GID,
     proxy_url: str | None = None,
+    node_selector: dict[str, str] | None = None,
 ) -> dict:
     env = dict(spec.env)
     if spec.network == "restricted" and proxy_url:
@@ -80,11 +110,21 @@ def pod_manifest(
         mounts.append(
             {"name": f"mount-{index}", "mountPath": mount.target, "readOnly": mount.read_only}
         )
+    sync = spec.labels.get("sca.state_transport") == "sync"
+    for target in ("/workspace", "/agent_home") if sync else ():
+        if not any(m["mountPath"] == target for m in mounts):
+            name_ = target.removeprefix("/").replace("_", "-")  # volume names are DNS labels
+            volumes.append({"name": name_, "emptyDir": {}})
+            mounts.append({"name": name_, "mountPath": target})
     pod = {
         "restartPolicy": "Never",
         "automountServiceAccountToken": False,
         "enableServiceLinks": False,
-        "securityContext": {"runAsUser": run_as_uid, "runAsGroup": run_as_gid},
+        "securityContext": {
+            "runAsUser": run_as_uid,
+            "runAsGroup": run_as_gid,
+            **({"fsGroup": run_as_gid} if sync else {}),
+        },
         "containers": [
             {
                 "name": "sandbox",
@@ -103,6 +143,26 @@ def pod_manifest(
         ],
         "volumes": volumes,
     }
+    if sync:
+        pod["initContainers"] = [
+            {
+                "name": "own-state",
+                "image": spec.image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["chown", f"{run_as_uid}:{run_as_gid}", "/workspace", "/agent_home"],
+                "volumeMounts": [
+                    m for m in mounts if m["mountPath"] in {"/workspace", "/agent_home"}
+                ],
+                "securityContext": {
+                    "runAsUser": 0,
+                    "runAsGroup": 0,
+                    "allowPrivilegeEscalation": False,
+                    "capabilities": {"drop": ["ALL"], "add": ["CHOWN"]},
+                },
+            }
+        ]
+    if node_selector:
+        pod["nodeSelector"] = node_selector
     if spec.runtime:
         pod["runtimeClassName"] = spec.runtime
     return {
@@ -126,8 +186,14 @@ def _policy(name: str, namespace: str, selector: dict, **spec) -> dict:
     }
 
 
-def isolation_manifests(namespace: str) -> list[dict]:
-    return [
+def isolation_manifests(
+    namespace: str,
+    *,
+    network_policy_flavor: Literal["standard", "calico"] = "standard",
+    blocked_cidrs: list[str] | None = None,
+) -> list[dict]:
+    blocked = list(dict.fromkeys(str(ip_network(c)) for c in blocked_cidrs or []))
+    manifests = [
         _policy(
             "sca-deny-egress",
             namespace,
@@ -149,9 +215,43 @@ def isolation_manifests(namespace: str) -> list[dict]:
         ),
     ]
 
+    if network_policy_flavor == "calico":
+        manifests.append(
+            {
+                "apiVersion": "crd.projectcalico.org/v1",
+                "kind": "NetworkPolicy",
+                "metadata": {"name": "sca-host-isolation", "namespace": namespace},
+                "spec": {
+                    "order": 0,
+                    "selector": "sca.role == 'sandbox' && sca.network in {'none', 'restricted'}",
+                    "types": ["Egress"],
+                    "egress": [
+                        *[
+                            {"action": "Deny", "destination": {"nets": nets}}
+                            for version in (4, 6)
+                            if (
+                                nets := [
+                                    c
+                                    for c in dict.fromkeys([*blocked, "169.254.169.254/32"])
+                                    if ip_network(c).version == version
+                                ]
+                            )
+                        ],
+                        {"action": "Deny", "protocol": "TCP", "destination": {"ports": [10250]}},
+                    ],
+                },
+            }
+        )
+    return manifests
+
 
 def egress_manifests(
-    allowlist: list[str], *, namespace: str = "sca-sandboxes", image: str = SQUID_IMAGE
+    allowlist: list[str],
+    *,
+    namespace: str = "sca-sandboxes",
+    image: str = SQUID_IMAGE,
+    network_policy_flavor: Literal["standard", "calico"] = "standard",
+    blocked_cidrs: list[str] | None = None,
 ) -> list[dict]:
     conf = render_squid_conf(allowlist)
     metadata = {"name": "sca-egress", "namespace": namespace}
@@ -164,8 +264,11 @@ def egress_manifests(
         "172.16.0.0/12",
         "192.168.0.0/16",
     ]
+    excluded = [ip_network(c) for c in blocked_cidrs or []]
     return [
-        *isolation_manifests(namespace),
+        *isolation_manifests(
+            namespace, network_policy_flavor=network_policy_flavor, blocked_cidrs=blocked_cidrs
+        ),
         {
             "apiVersion": "v1",
             "kind": "ConfigMap",
@@ -255,11 +358,30 @@ def egress_manifests(
             egress=[
                 {
                     "to": [
-                        {"ipBlock": {"cidr": "0.0.0.0/0", "except": private}},
+                        {
+                            "ipBlock": {
+                                "cidr": "0.0.0.0/0",
+                                "except": list(
+                                    dict.fromkeys(
+                                        [*private, *[str(n) for n in excluded if n.version == 4]]
+                                    )
+                                ),
+                            }
+                        },
                         {
                             "ipBlock": {
                                 "cidr": "::/0",
-                                "except": ["::/128", "::1/128", "fc00::/7", "fe80::/10"],
+                                "except": list(
+                                    dict.fromkeys(
+                                        [
+                                            "::/128",
+                                            "::1/128",
+                                            "fc00::/7",
+                                            "fe80::/10",
+                                            *[str(n) for n in excluded if n.version == 6],
+                                        ]
+                                    )
+                                ),
                             }
                         },
                     ]
@@ -296,11 +418,19 @@ class K8sSandboxProvider:
         egress_image=SQUID_IMAGE,
         run_as_uid=UID,
         run_as_gid=GID,
+        node_selector: dict[str, str] | None = None,
+        network_policy_flavor: Literal["standard", "calico"] = "standard",
+        blocked_cidrs: list[str] | None = None,
+        pool_size: int = 0,
     ):
         self.kubectl_bin, self.context, self.namespace = kubectl_bin, context, namespace
         self.egress_allowlist, self.egress_image = egress_allowlist or [], egress_image
         self.run_as_uid, self.run_as_gid = run_as_uid, run_as_gid
+        self.node_selector = node_selector
+        self.network_policy_flavor = network_policy_flavor
+        self.blocked_cidrs = [str(ip_network(c)) for c in blocked_cidrs or []]
         self._egress_lock = asyncio.Lock()
+        self.pool_size = pool_size
 
     def _command(self, *args):
         return [
@@ -344,32 +474,154 @@ class K8sSandboxProvider:
         # the controller that creates it runs asynchronously.
         await self._cli("wait", "--for=create", "serviceaccount/default", "--timeout=60s")
 
+    async def _isolation_settings(self) -> dict:
+        blocked = list(self.blocked_cidrs)
+        if self.network_policy_flavor == "calico":
+            _, address, _ = await self._cli(
+                "get",
+                "service",
+                "kubernetes",
+                "--namespace",
+                "default",
+                "-o",
+                "jsonpath={.spec.clusterIP}",
+            )
+            blocked.append(str(ip_network(address.strip())))
+        return {"network_policy_flavor": self.network_policy_flavor, "blocked_cidrs": blocked}
+
     async def ensure_egress(self):
         async with self._egress_lock:
             await self._namespace()
             await self._apply(
                 egress_manifests(
-                    self.egress_allowlist, namespace=self.namespace, image=self.egress_image
+                    self.egress_allowlist,
+                    namespace=self.namespace,
+                    image=self.egress_image,
+                    **await self._isolation_settings(),
                 )
             )
             await self._cli("rollout", "status", "deployment/sca-egress", "--timeout=180s")
             _, out, _ = await self._cli("get", "service", "sca-egress", "-o", "json")
             return f"http://{json.loads(out)['spec']['clusterIP']}:3128"
 
+    async def _pods(self, selector: str) -> list[dict]:
+        _, raw, _ = await self._cli("get", "pods", "-l", selector, "-o", "json")
+        return json.loads(raw).get("items", []) if raw.strip() else []
+
+    async def task_id(self, sandbox_id: str) -> str | None:
+        _, raw, _ = await self._cli("get", "pod", sandbox_id, "-o", "json")
+        return json.loads(raw)["metadata"].get("labels", {}).get("sca.task_id")
+
+    async def _claim(self, name: str, spec: SandboxSpec) -> str | None:
+        for pod in await self._pods(f"sca.pool={pool_hash(spec)},sca.state=idle"):
+            if pod.get("status", {}).get("phase") != "Running" or pod["metadata"].get(
+                "deletionTimestamp"
+            ):
+                continue
+            metadata = pod["metadata"]
+            patch = {
+                "metadata": {
+                    "resourceVersion": metadata["resourceVersion"],
+                    "labels": {
+                        **_labels(spec.labels),
+                        "sca.name": safe_name(name),
+                        "sca.state": "claimed",
+                    },
+                    "annotations": {
+                        "sca.pool-env": json.dumps(spec.env),
+                        "sca.workdir": spec.workdir,
+                    },
+                }
+            }
+            code, _, err = await self._cli(
+                "patch",
+                "pod",
+                metadata["name"],
+                "--type=merge",
+                "-p",
+                json.dumps(patch),
+                check=False,
+            )
+            if not code:
+                return metadata["name"]
+            if "Conflict" not in err and "NotFound" not in err:
+                raise SandboxError("Unable to claim pool pod")
+        return None
+
+    async def replenish(self, spec_template: SandboxSpec, size: int) -> None:
+        await self._namespace()
+        template_hash = pool_hash(spec_template)
+        idle = await self._pods("sca.pool,sca.state=idle")
+        current = []
+        for pod in idle:
+            metadata = pod["metadata"]
+            if (
+                size <= 0
+                or metadata["labels"]["sca.pool"] != template_hash
+                or pod.get("status", {}).get("phase") in {"Failed", "Succeeded"}
+            ):
+                # A concurrent claim must prevent deletion of a now-used sandbox.
+                options = {
+                    "apiVersion": "v1",
+                    "kind": "DeleteOptions",
+                    "preconditions": {
+                        "uid": metadata["uid"],
+                        "resourceVersion": metadata["resourceVersion"],
+                    },
+                }
+                code, _, err = await self._cli(
+                    "delete",
+                    "--raw",
+                    f"/api/v1/namespaces/{self.namespace}/pods/{metadata['name']}",
+                    "-f",
+                    "-",
+                    check=False,
+                    data=json.dumps(options).encode(),
+                )
+                if code and "Conflict" not in err and "NotFound" not in err:
+                    raise SandboxError("Unable to remove obsolete pool pod")
+            elif not metadata.get("deletionTimestamp"):
+                current.append(pod)
+        template = spec_template.model_copy(
+            update={
+                "env": {},
+                "mounts": [],
+                "workdir": "/workspace",
+                "labels": {
+                    "sca.state_transport": "sync",
+                    "sca.pool": template_hash,
+                    "sca.state": "idle",
+                },
+            }
+        )
+        for _ in range(max(0, size - len(current))):
+            await self.create(f"pool-{uuid4().hex}", template)
+
     async def create(self, name: str, spec: SandboxSpec) -> str:
         sid = safe_name(name)
+        if spec.labels.get("sca.state") != "idle":
+            existing = await self._pods(f"sca.name={sid},sca.state=claimed")
+            for pod in existing:
+                if pod.get("status", {}).get("phase") == "Running":
+                    return pod["metadata"]["name"]
         _, out, _ = await self._cli("get", "pod", sid, "--ignore-not-found", "-o", "json")
         if out.strip():
             if json.loads(out).get("status", {}).get("phase") == "Running":
                 return sid
             await self.destroy(sid)
             await self._cli("wait", "--for=delete", f"pod/{sid}", "--timeout=180s")
+        if self.pool_size > 0 and spec.labels.get("sca.state") != "idle" and pool_compatible(spec):
+            claimed = await self._claim(name, spec)
+            if claimed:
+                return claimed
         await self._namespace()
         proxy = None
         if spec.network == "restricted":
             proxy = await self.ensure_egress()
         elif spec.network == "none":
-            await self._apply(isolation_manifests(self.namespace))
+            await self._apply(
+                isolation_manifests(self.namespace, **await self._isolation_settings())
+            )
         # Create missing directories as the worker, not as the node's root kubelet.
         for mount in spec.mounts:
             source = Path(mount.source).resolve()
@@ -384,6 +636,7 @@ class K8sSandboxProvider:
                     run_as_uid=self.run_as_uid,
                     run_as_gid=self.run_as_gid,
                     proxy_url=proxy,
+                    node_selector=self.node_selector,
                 )
             ]
         )
@@ -397,6 +650,13 @@ class K8sSandboxProvider:
             )
             raise SandboxError(f"{err}\n{status}\n{events}")
         return sid
+
+    async def list(self, labels: dict[str, str]) -> list[str]:
+        selector = ",".join(key + ("=" + value if value else "") for key, value in labels.items())
+        _, out, _ = await self._cli(
+            "get", "pods", *(["-l", selector] if selector else []), "-o", "json"
+        )
+        return [item["metadata"]["name"] for item in json.loads(out)["items"]]
 
     async def exists(self, sandbox_id):
         _, out, _ = await self._cli("get", "pod", sandbox_id, "--ignore-not-found", "-o", "name")
@@ -413,7 +673,22 @@ class K8sSandboxProvider:
             "--wait=false",
         )
 
-    def exec(self, sandbox_id, argv, *, workdir=None, env=None, stdin=None, timeout_s=None):
+    async def exec(
+        self,
+        sandbox_id: str,
+        argv: list[str],
+        *,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+        stdin: bytes | None = None,
+        timeout_s: float | None = None,
+    ) -> AsyncIterator[ExecEvent]:
+        _, raw, _ = await self._cli("get", "pod", sandbox_id, "-o", "json")
+        annotations = json.loads(raw)["metadata"].get("annotations", {})
+        defaults = json.loads(annotations.get("sca.pool-env", "{}"))
+        env = {**defaults, **(env or {})}
+        workdir = workdir or annotations.get("sca.workdir")
+
         def command(wrapper, marker):
             setup = (
                 "import json\n"
@@ -428,4 +703,41 @@ class K8sSandboxProvider:
         async def cleanup(script, marker):
             await self._cli("exec", sandbox_id, "--", "python3", "-c", script, marker, check=False)
 
-        return stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+        async for event in stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s):
+            yield event
+
+    async def upload(self, sandbox_id: str, target_dir: str, archive: AsyncIterator[bytes]) -> None:
+        await self._cli("exec", sandbox_id, "--", "mkdir", "-p", "--", target_dir)
+        async for _ in transfer(
+            self._command(
+                "exec",
+                "-i",
+                sandbox_id,
+                "--",
+                "tar",
+                "--no-same-owner",
+                "-xf",
+                "-",
+                "-C",
+                target_dir,
+            ),
+            archive,
+        ):
+            pass
+
+    def download(self, sandbox_id: str, path: str) -> AsyncIterator[bytes]:
+        item = PurePosixPath(path)
+        return transfer(
+            self._command(
+                "exec",
+                sandbox_id,
+                "--",
+                "tar",
+                "-cf",
+                "-",
+                "-C",
+                str(item.parent),
+                "--",
+                item.name,
+            )
+        )

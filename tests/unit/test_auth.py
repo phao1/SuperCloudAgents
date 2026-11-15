@@ -149,3 +149,55 @@ async def test_oidc_fetch_off_event_loop(oidc, monkeypatch):
         headers={"kid": "test"},
     )
     assert (await auth.authenticate(token)).tenant_id == "a"
+
+
+@pytest.mark.parametrize(
+    "roles,expected",
+    [
+        (None, "member"),
+        ("viewer", "viewer"),
+        ("admin", "admin"),
+        (["viewer", "admin", "member"], "admin"),
+        (["unknown"], "member"),
+        ([], "member"),
+        (42, "member"),
+    ],
+)
+async def test_oidc_roles(oidc, roles, expected):
+    import time
+
+    import jwt
+
+    auth, key = oidc
+    claims = {
+        "iss": "http://issuer",
+        "aud": "sca",
+        "exp": time.time() + 60,
+        "sub": "user",
+        "tenant": "a",
+    }
+    if roles is not None:
+        claims["roles"] = roles
+    token = jwt.encode(claims, key, algorithm="RS256", headers={"kid": "test"})
+    assert (await auth.authenticate(token)).role == expected
+    auth.role_claim = "custom"
+    auth.default_role = "viewer"
+    assert (await auth.authenticate(token)).role == "viewer"
+
+
+@pytest.mark.parametrize(
+    "entry,role",
+    [
+        ("tenant", "admin"),
+        ("tenant:viewer", "viewer"),
+        ("tenant:member", "member"),
+        ("tenant:admin", "admin"),
+    ],
+)
+async def test_static_roles(entry, role):
+    from sca.config import Settings
+
+    auth = StaticTokenAuthenticator(Settings(api_tokens="secret:" + entry).token_table())
+    principal = await auth.authenticate("secret")
+    assert principal.tenant_id == "tenant"
+    assert principal.role == role

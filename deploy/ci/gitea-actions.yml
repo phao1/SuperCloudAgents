@@ -1,0 +1,29 @@
+# Example pipeline for Gitea Actions (act_runner in host mode, label sca-ci).
+# Copy to .gitea/workflows/sca.yml together with ci/report.sh.
+# Repository secrets: SCA_API_URL, SCA_CI_TOKEN (a token with scope ci:report).
+name: sca-ci
+on:
+  push:
+    branches: ["sca/**"]
+jobs:
+  check:
+    runs-on: sca-ci
+    steps:
+      - name: Check out
+        run: |
+          git -c http.extraHeader="Authorization: token ${{ github.token }}" clone --quiet \
+            --branch "$GITHUB_REF_NAME" "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" src
+          git -C src checkout --quiet "$GITHUB_SHA"
+      - name: Project checks
+        shell: bash
+        run: |
+          cd src
+          set -o pipefail
+          python3 -m pytest -q -p no:cacheprovider 2>&1 | tee -a ../ci.log
+          test -f CHANGELOG.md || { echo "changelog check: CHANGELOG.md is missing" | tee -a ../ci.log; exit 1; }
+      - name: Report to SuperCloudAgents
+        if: always()
+        env:
+          SCA_API_URL: ${{ secrets.SCA_API_URL }}
+          SCA_CI_TOKEN: ${{ secrets.SCA_CI_TOKEN }}
+        run: cd src && sh ci/report.sh "${{ job.status }}" < ../ci.log

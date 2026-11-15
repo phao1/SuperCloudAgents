@@ -1,7 +1,10 @@
 """Prometheus metrics and OpenTelemetry integration."""
 
 import asyncio
+import logging
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 
 from opentelemetry import trace
 from prometheus_client import CollectorRegistry, Counter, Gauge, Histogram, generate_latest
@@ -60,6 +63,11 @@ class Metrics:
         self.reviews = Counter(
             "sca_reviews_submitted_total", "Reviews submitted", registry=self.registry
         )
+        self.oldest_active = Gauge(
+            "sca_oldest_active_task_age_seconds",
+            "Oldest provisioning or running task",
+            registry=self.registry,
+        )
         self._expires = 0.0
         self._lock = asyncio.Lock()
 
@@ -72,6 +80,8 @@ class Metrics:
                             await session.execute(text("SELECT * FROM public.sca_task_counts()"))
                         ).all()
                     )
+                    age = await session.scalar(text("SELECT public.sca_oldest_active_task_age()"))
+                self.oldest_active.set(float(age or 0))
                 for state in TaskState:
                     self.states.labels(state=state).set(counts.get(state, 0))
                 self._expires = time.monotonic() + 3
@@ -96,3 +106,49 @@ def instrument_app(app, metrics: Metrics) -> None:
             template = route.path if route is not None else "unmatched"
             metrics.requests.labels(template, str(status)).inc()
             metrics.latency.labels(template, str(status)).observe(time.monotonic() - started)
+
+
+@contextmanager
+def metric_guard() -> Iterator[None]:
+    """Telemetry is best effort and must never change task outcomes."""
+    try:
+        yield
+    except Exception:
+        logging.getLogger(__name__).warning("Business metric recording failed", exc_info=True)
+
+
+class BusinessMetrics:
+    def __init__(self, registry: CollectorRegistry | None = None) -> None:
+        from prometheus_client import REGISTRY
+
+        registry = registry if registry is not None else REGISTRY
+        self.duration = Histogram(
+            "sca_task_duration_seconds",
+            "Task lifetime",
+            ["kind", "final_state"],
+            buckets=(1, 5, 15, 30, 60, 120, 300, 600, 1800, 3600, 7200, 21600, 86400),
+            registry=registry,
+        )
+        self.turns = Histogram(
+            "sca_task_turns",
+            "Turns per task",
+            ["kind"],
+            buckets=(0, 1, 2, 3, 5, 8, 13, 21, 34, 55, 100),
+            registry=registry,
+        )
+        self.tokens = Counter(
+            "sca_tokens_total", "Agent tokens", ["kind", "direction"], registry=registry
+        )
+        self.cost = Counter("sca_cost_usd_total", "Model spend", ["kind"], registry=registry)
+        self.verifications = Counter(
+            "sca_verifications_total",
+            "Verification outcomes",
+            ["kind", "passed"],
+            registry=registry,
+        )
+        self.sandbox_create = Histogram(
+            "sca_sandbox_create_seconds", "Sandbox creation time", ["driver"], registry=registry
+        )
+
+
+business_metrics = BusinessMetrics()

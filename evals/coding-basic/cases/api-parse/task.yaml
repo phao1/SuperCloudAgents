@@ -1,0 +1,3 @@
+instruction: Change parse_pair(text) to accept key=value with whitespace stripped,
+  split only at first equals, reject missing equals or empty key with ValueError.
+verify_command: python verify.py

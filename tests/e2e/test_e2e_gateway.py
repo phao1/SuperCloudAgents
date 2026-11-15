@@ -6,6 +6,8 @@ little on the provider account.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import os
 from pathlib import Path
 
@@ -58,9 +60,32 @@ async def gateway_keys(task_id: str) -> list[str]:
         r = await http.get("/key/list", params={"return_full_object": "true", "size": 100})
         r.raise_for_status()
         return [
-            k.get("key_alias") or "" for k in r.json().get("keys", [])
+            k.get("key_alias") or ""
+            for k in r.json().get("keys", [])
             if isinstance(k, dict) and task_id in (k.get("key_alias") or "")
         ]
+
+
+async def gateway_spend(task_id: str) -> float:
+    async with httpx.AsyncClient(
+        base_url=GATEWAY, headers={"Authorization": f"Bearer {MASTER_KEY}"}, timeout=20
+    ) as http:
+        for _ in range(16):
+            response = await http.get("/spend/logs")
+            response.raise_for_status()
+            data = response.json()
+            logs = data if isinstance(data, list) else data.get("data", [])
+            spend = 0.0
+            for log in logs:
+                metadata = log.get("metadata") or {}
+                if isinstance(metadata, str):
+                    metadata = json.loads(metadata)
+                if task_id in (metadata.get("user_api_key_alias") or ""):
+                    spend += float(log.get("spend") or 0)
+            if spend > 0:
+                return spend
+            await asyncio.sleep(1)
+    raise AssertionError("No LiteLLM spend logs found for the task")
 
 
 async def test_agent_works_with_a_per_turn_key_and_no_mounted_credential(stack, source_repo):
@@ -96,6 +121,27 @@ async def test_agent_works_with_a_per_turn_key_and_no_mounted_credential(stack, 
     await stack.review(task_id, "approve")
     task = await stack.wait_for(task_id, "SUCCEEDED")
     assert task["usage"].get("input_tokens", 0) > 0
+    assert task["usage"].get("cost_micro_usd", 0) > 0
+    assert task["usage"]["cost_micro_usd"] / 1e6 == pytest.approx(
+        await gateway_spend(task_id), rel=0.05, abs=0.000001
+    )
     assert not sandbox_running(task_id)
     assert git(source_repo, "show", "main:calc.py")  # the source repo is untouched (no push)
     print("\nusage:", task["usage"])
+
+
+async def test_tiny_cost_budget_stops_task(stack, source_repo):
+    task_id = await stack.submit(
+        {
+            "repo_url": str(source_repo),
+            "instruction": "Fix calc.add and run the tests. Explain the changes in detail.",
+            "verify_command": "python -m pytest -q",
+            "max_cost_usd": 0.00001,
+            "turn_timeout_s": 600,
+        }
+    )
+    task = await stack.wait_for(task_id, "FAILED", timeout=900)
+    assert "budget" in task["state_reason"].lower()
+    turns = [e for e in await stack.events(task_id) if e["type"] == "agent.turn_started"]
+    assert 1 <= len(turns) <= 2
+    assert await gateway_keys(task_id) == []

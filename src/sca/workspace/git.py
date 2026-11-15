@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from sca.core.errors import InvalidTaskError, WorkspaceError
+from sca.core.models import RepoCredential
+from sca.secrets import git_env, redact
 from sca.workspace.cache import RepoCache
 
 DEFAULT_EXCLUDES = (
@@ -37,7 +38,9 @@ class GitWorkspace:
         self.mirror = self.task_dir / "mirror.git"
         self.workspace = self.task_dir / "workspace"
 
-    async def _git(self, *args: str, invalid: bool = False) -> str:
+    async def _git(
+        self, *args: str, invalid: bool = False, credential: RepoCredential | None = None
+    ) -> str:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -45,9 +48,10 @@ class GitWorkspace:
                 "core.hooksPath=/dev/null",
                 "-c",
                 "core.fsmonitor=false",
+                *(["-c", "credential.helper="] if credential else []),
                 *args,
                 cwd=self.task_dir,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+                env=git_env(credential),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -58,13 +62,23 @@ class GitWorkspace:
                 await proc.wait()
                 raise
         except OSError as exc:
-            raise WorkspaceError(str(exc)) from exc
+            raise WorkspaceError(redact(str(exc), credential)) from exc
         if proc.returncode:
             error = InvalidTaskError if invalid else WorkspaceError
-            raise error(f"git {args[0]} failed: {err.decode(errors='replace').strip()}")
+            raise error(
+                f"git {args[0]} failed: {redact(err.decode(errors='replace').strip(), credential)}"
+            )
         return out.decode(errors="replace")
 
-    async def prepare(self, repo_url: str, base_ref: str, *, mirror_only: bool = False) -> Prepared:
+    async def prepare(
+        self,
+        repo_url: str,
+        base_ref: str,
+        *,
+        mirror_only: bool = False,
+        credential: RepoCredential | None = None,
+        tenant_id: str = "default",
+    ) -> Prepared:
         try:
             self.task_dir.mkdir(parents=True, exist_ok=True)
             (self.task_dir / "workspace.ready").unlink(missing_ok=True)
@@ -76,9 +90,19 @@ class GitWorkspace:
         except OSError as exc:
             raise WorkspaceError(f"Could not reset workspace: {exc}") from exc
         if self.cache is None:
-            await self._git("clone", "--mirror", "--", repo_url, str(self.mirror), invalid=True)
+            await self._git(
+                "clone",
+                "--mirror",
+                "--",
+                repo_url,
+                str(self.mirror),
+                invalid=True,
+                credential=credential,
+            )
         else:
-            async with self.cache.mirror(repo_url) as cached:
+            async with self.cache.mirror(
+                repo_url, tenant_id=tenant_id, credential=credential
+            ) as cached:
                 await self._git(
                     "clone",
                     "--mirror",
@@ -105,6 +129,7 @@ class GitWorkspace:
                 "--prune",
                 "origin",
                 invalid=True,
+                credential=credential,
             )
         base = await self._git(
             "--git-dir",
@@ -127,7 +152,7 @@ class GitWorkspace:
             shutil.rmtree(self.workspace)
         await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
         # Preparation is the only time the host touches the trusted, freshly cloned checkout.
-        await self._git("-C", str(self.workspace), "checkout", "-b", self.branch, commit)
+        await self._git("-C", str(self.workspace), "checkout", "-B", self.branch, commit)
         # Running the verify command leaves caches behind; a repo without a .gitignore
         # would otherwise get them committed into the result.
         exclude = self.workspace / ".git" / "info" / "exclude"
@@ -174,6 +199,20 @@ class GitWorkspace:
             await self._git("--git-dir", str(self.mirror), "rev-parse", f"refs/heads/{self.branch}")
         ).strip()
 
+    async def fetch_bundle(self, bundle: Path) -> str:
+        await self._git(
+            "--git-dir",
+            str(self.mirror),
+            "fetch",
+            "--no-tags",
+            "--",
+            str(bundle),
+            f"+HEAD:refs/heads/{self.branch}",
+        )
+        return (
+            await self._git("--git-dir", str(self.mirror), "rev-parse", f"refs/heads/{self.branch}")
+        ).strip()
+
     async def diff(self, base_sha: str) -> str:
         return await self._git(
             "--git-dir",
@@ -190,7 +229,7 @@ class GitWorkspace:
     async def changed(self, base_sha: str) -> bool:
         return bool(await self.diff(base_sha))
 
-    async def push(self, repo_url: str) -> None:
+    async def push(self, repo_url: str, credential: RepoCredential | None = None) -> None:
         await self._git(
             "--git-dir",
             str(self.mirror),
@@ -199,4 +238,5 @@ class GitWorkspace:
             "--",
             repo_url,
             f"refs/heads/{self.branch}:refs/heads/{self.branch}",
+            credential=credential,
         )

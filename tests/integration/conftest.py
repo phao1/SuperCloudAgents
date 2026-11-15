@@ -25,7 +25,17 @@ async def store():
 
         def migrate(conn):
             with Operations.context(MigrationContext.configure(conn)):
-                for revision in ("0001_initial", "0002_tenancy", "0003_archive_budget"):
+                for revision in (
+                    "0001_initial",
+                    "0002_tenancy",
+                    "0003_archive_budget",
+                    "0004_api_tokens",
+                    "0005_cost_budget",
+                    "0006_operations",
+                    "0007_files",
+                    "0008_memories",
+                    "0009_evaluation",
+                ):
                     import_module(f"sca.db.migrations.versions.{revision}").upgrade()
 
         async with engine.begin() as conn:

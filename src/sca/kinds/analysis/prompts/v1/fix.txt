@@ -1,0 +1,2 @@
+Verification failed (exit $exit_code). Fix the analysis and outputs.
+$output

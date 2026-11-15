@@ -1,0 +1,38 @@
+groups:
+  - name: sca
+    rules:
+      - alert: ScaTaskStuck
+        expr: sca_oldest_active_task_age_seconds > 2 * 3600
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: A task has been provisioning or running for more than two hours.
+      - alert: ScaTaskFailureRateHigh
+        expr: |
+          sum(increase(sca_task_duration_seconds_count{final_state="FAILED"}[1h]))
+            / clamp_min(sum(increase(sca_task_duration_seconds_count[1h])), 1) > 0.3
+          and sum(increase(sca_task_duration_seconds_count[1h])) >= 5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: More than 30% of the tasks that finished in the last hour failed.
+      - alert: ScaApiErrors
+        expr: |
+          sum(rate(sca_http_requests_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(sca_http_requests_total[5m])), 1e-9) > 0.02
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: More than 2% of API requests fail with a server error.
+      - alert: ScaActivityRetryStorm
+        expr: sum(rate(temporal_activity_execution_failed[10m])) > 0.2
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: Activities are failing and being retried unusually often.
+      - alert: ScaWorkerDown
+        expr: absent(up{job="sca-worker"} == 1)
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: No workflow worker is up; tasks are not making progress.

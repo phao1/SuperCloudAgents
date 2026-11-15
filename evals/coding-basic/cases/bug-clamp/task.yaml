@@ -1,0 +1,2 @@
+instruction: Fix clamp(value, low, high) to include both limits correctly.
+verify_command: python verify.py

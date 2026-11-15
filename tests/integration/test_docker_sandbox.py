@@ -1,6 +1,12 @@
+import asyncio
+
 import pytest
 from sandbox_contract import (  # noqa: F401
     sandbox_fixture,
+    test_archive_empty_directory,
+    test_archive_large_file,
+    test_archive_missing_path,
+    test_archive_round_trip,
     test_create_destroy,
     test_env_network_mounts_ownership,
     test_network_none,
@@ -14,7 +20,16 @@ pytestmark = pytest.mark.integration
 
 
 @pytest.fixture
-def provider():
+async def provider():
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "docker", "info", stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL
+        )
+        await asyncio.wait_for(proc.wait(), 10)
+    except (OSError, TimeoutError):
+        pytest.skip("Docker is unreachable")
+    if proc.returncode:
+        pytest.skip("Docker is unreachable")
     return DockerSandboxProvider()
 
 

@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from sca.kernel.spec import CommonSpec
 
 KIND = "coding"
 
@@ -19,13 +23,17 @@ class SubtaskSpec(BaseModel):
     instruction: str = Field(min_length=1)
 
 
-class CodingSpec(BaseModel):
+class CodingSpec(CommonSpec):
     model_config = ConfigDict(extra="forbid")
 
+    plan: Literal["none", "auto"] = "none"
+    plan_review: bool = False
     subtasks: list[SubtaskSpec] = Field(default_factory=list, max_length=8)
 
     @model_validator(mode="after")
     def validate_subtasks(self) -> CodingSpec:
+        if self.plan == "auto" and self.subtasks:
+            raise ValueError("automatic planning and explicit subtasks are mutually exclusive")
         names = [s.name for s in self.subtasks]
         if len(names) == 1 or len(names) != len(set(names)):
             raise ValueError("subtasks must contain zero or 2..8 uniquely named items")
@@ -41,6 +49,7 @@ class CodingSpec(BaseModel):
     # CI system to report back through the API.
     ci: CiSpec | None = None
     max_tokens: int | None = Field(default=None, ge=1)  # budget for the whole task
+    max_cost_usd: float | None = Field(default=None, ge=0, allow_inf_nan=False)
     setup_command: str | None = None
     push: bool = False
     max_fix_attempts: int = Field(default=2, ge=0, le=10)

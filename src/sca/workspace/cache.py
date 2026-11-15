@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hashlib
-import os
 import re
 import shutil
 from collections.abc import AsyncIterator
@@ -12,7 +11,8 @@ from pathlib import Path
 from urllib.parse import urlsplit, urlunsplit
 
 from sca.core.errors import InvalidTaskError, WorkspaceError
-from sca.core.models import Mount
+from sca.core.models import Mount, RepoCredential
+from sca.secrets import git_env, redact
 
 PIP_CACHE_ENV = {"PIP_CACHE_DIR": "/cache/pip"}
 
@@ -40,8 +40,8 @@ class RepoCache:
         self.root = root.resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def _path(self, repo_url: str) -> Path:
-        key = hashlib.sha256(_normalise(repo_url).encode()).hexdigest()
+    def _path(self, repo_url: str, tenant_id: str = "default") -> Path:
+        key = hashlib.sha256((tenant_id + "\0" + _normalise(repo_url)).encode()).hexdigest()
         return self.root / f"{key}.git"
 
     @asynccontextmanager
@@ -59,7 +59,7 @@ class RepoCache:
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
-    async def _git(self, *args: str) -> None:
+    async def _git(self, *args: str, credential: RepoCredential | None = None) -> None:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "git",
@@ -67,8 +67,9 @@ class RepoCache:
                 "core.hooksPath=/dev/null",
                 "-c",
                 "core.fsmonitor=false",
+                *(["-c", "credential.helper="] if credential else []),
                 *args,
-                env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+                env={**git_env(credential), "LC_ALL": "C"},
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -79,14 +80,18 @@ class RepoCache:
                 await proc.wait()
                 raise
         except OSError as exc:
-            raise WorkspaceError(str(exc)) from exc
+            raise WorkspaceError(redact(str(exc), credential)) from exc
         if proc.returncode:
-            raise InvalidTaskError(err.decode(errors="replace").strip())
+            raise InvalidTaskError(redact(err.decode(errors="replace").strip(), credential))
 
-    async def _ensure(self, repo_url: str, path: Path) -> None:
+    async def _ensure(
+        self, repo_url: str, path: Path, credential: RepoCredential | None = None
+    ) -> None:
         if path.exists():
             try:
-                await self._git("--git-dir", str(path), "fetch", "--prune", "origin")
+                await self._git(
+                    "--git-dir", str(path), "fetch", "--prune", "origin", credential=credential
+                )
             except InvalidTaskError as exc:
                 # Network/auth failures must not destroy a usable mirror.
                 network = (
@@ -111,7 +116,7 @@ class RepoCache:
                 path.touch()
                 return
         try:
-            await self._git("clone", "--mirror", "--", repo_url, str(path))
+            await self._git("clone", "--mirror", "--", repo_url, str(path), credential=credential)
         except BaseException:
             if path.exists():
                 await asyncio.to_thread(shutil.rmtree, path)
@@ -119,14 +124,18 @@ class RepoCache:
         path.touch()
 
     @asynccontextmanager
-    async def mirror(self, repo_url: str) -> AsyncIterator[Path]:
-        path = self._path(repo_url)
+    async def mirror(
+        self, repo_url: str, *, tenant_id: str = "default", credential: RepoCredential | None = None
+    ) -> AsyncIterator[Path]:
+        path = self._path(repo_url, tenant_id)
         async with self._lock(path):
-            await self._ensure(repo_url, path)
+            await self._ensure(repo_url, path, credential)
             yield path
 
-    async def ensure(self, repo_url: str) -> Path:
-        async with self.mirror(repo_url) as path:
+    async def ensure(
+        self, repo_url: str, *, tenant_id: str = "default", credential: RepoCredential | None = None
+    ) -> Path:
+        async with self.mirror(repo_url, tenant_id=tenant_id, credential=credential) as path:
             return path
 
     async def prune(self, max_entries: int) -> None:

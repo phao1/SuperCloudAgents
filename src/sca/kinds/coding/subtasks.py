@@ -60,7 +60,15 @@ class ChildObjects:
     def __init__(self, objects: ObjectStore, name: str) -> None:
         self.objects, self.name = objects, name
 
+    def _key(self, key: str) -> str:
+        return key.replace("/state/", f"/subtasks/{self.name}/state/")
+
+    async def get(self, key: str) -> bytes:
+        return await self.objects.get(self._key(key))
+
     async def put(self, key: str, *args: Any) -> str:
+        if "/state/" in key:
+            return await self.objects.put(self._key(key), *args)
         path = Path(key)
         return await self.objects.put(
             str(path.with_name(f"subtask-{self.name}-{path.name}")), *args
@@ -76,6 +84,7 @@ class ChildActivities(CodingActivities):
             agent=parent.agent,
             objects=ChildObjects(parent.objects, name),
             gateway=parent.gateway,
+            secrets=parent.secrets,
         )
         self.name = name
 

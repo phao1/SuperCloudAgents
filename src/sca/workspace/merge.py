@@ -27,6 +27,7 @@ async def merge_subtasks(
     base: str,
     branch: str,
     children: list[tuple[Path, SubtaskResult]],
+    task_id: str = "",
 ) -> tuple[str, list[SubtaskResult]]:
     async def git(*args: str, conflict_ok: bool = False) -> tuple[int, str]:
         proc = await asyncio.create_subprocess_exec(
@@ -87,7 +88,14 @@ async def merge_subtasks(
             continue
         tree = output.split("\0", 1)[0].strip()
         _, commit = await git(
-            "commit-tree", tree, "-p", current, "-p", child.commit, "-m", f"sca: merge {child.name}"
+            "commit-tree",
+            tree,
+            "-p",
+            current,
+            "-p",
+            child.commit,
+            "-m",
+            f"sca: merge {child.name}\n\nSca-Task-Id: {task_id}",
         )
         current = commit.strip()
         await git("update-ref", f"refs/heads/{branch}", current)

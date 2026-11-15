@@ -26,9 +26,17 @@ from sca.kinds.coding.activities import (
     VerifyResult,
     WorkspaceInfo,
 )
+from sca.kinds.coding.kind import prompt_activities, workflow_spec
+from sca.kinds.coding.prompts import planning_prompt
 from sca.kinds.coding.spec import CodingSpec
-from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskInput
-from sca.kinds.coding.workflow import REVIEW_SIGNAL, CodingSubtaskWorkflow, CodingTaskWorkflow
+from sca.kinds.coding.subtask_inputs import MergeInput, PlanningInput, SubtaskInput
+from sca.kinds.coding.workflow import (
+    REVIEW_SIGNAL,
+    CodingAfterVerify,
+    CodingBeforeTurn,
+    CodingSubtaskWorkflow,
+    CodingTaskWorkflow,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -37,6 +45,12 @@ pytestmark = pytest.mark.integration
 class Fakes:
     """Scripted activities that record what the workflow asked for."""
 
+    plan: str = "none"
+    plan_review: bool = False
+    plans: list = field(default_factory=list)
+    planning_feedback: list = field(default_factory=list)
+    planning_prompts: list[str] = field(default_factory=list)
+    plan_rejections: list = field(default_factory=list)
     subtasks: list[dict] = field(default_factory=list)
     child_started: list[str] = field(default_factory=list)
     child_finished: list[str] = field(default_factory=list)
@@ -50,6 +64,9 @@ class Fakes:
     max_fix_attempts: int = 2
     fail_prepare: bool = False
     turn_blocks: bool = False
+    turn_fails: bool = False
+    budget_checks: int = 0
+    over_budget_check: int | None = None
     review_idle_release_s: float = 600
     released: int = 0
     ci: dict | None = None
@@ -70,20 +87,24 @@ class Fakes:
         @activity.defn(name="load_task")
         async def load_task(task_id: str) -> dict:
             spec = CodingSpec(
+                plan=fakes.plan,
+                plan_review=fakes.plan_review,
                 subtasks=fakes.subtasks,
                 repo_url="x",
                 instruction="do it",
                 verify_command="pytest",
                 max_fix_attempts=fakes.max_fix_attempts,
             ).model_dump()
-            return {**spec, "ci": fakes.ci, "review_idle_release_s": fakes.review_idle_release_s}
+            return workflow_spec(
+                {**spec, "ci": fakes.ci, "review_idle_release_s": fakes.review_idle_release_s}
+            )
 
         @activity.defn(name="set_state")
         async def set_state(inp: SetStateInput) -> None:
             fakes.states.append(inp.state)
             fakes.reasons.append(inp.reason)
 
-        @activity.defn(name="prepare_workspace")
+        @activity.defn(name="coding.prepare_workspace")
         async def prepare_workspace(task_id: str) -> WorkspaceInfo:
             if fakes.fail_prepare:
                 raise ApplicationError("no such repo", type="InvalidTaskError", non_retryable=True)
@@ -97,36 +118,41 @@ class Fakes:
         async def run_agent_turn(inp: TurnInput) -> TurnResult:
             fakes.prompts.append(inp.prompt)
             fakes.sessions.append(inp.session_id)
+            if fakes.turn_fails:
+                raise ApplicationError("gateway refused", non_retryable=True)
             while fakes.turn_blocks:
                 activity.heartbeat()
                 await asyncio.sleep(0.2)
             return TurnResult(session_id="sess-1", final_message="done")
 
-        @activity.defn(name="checkpoint_workspace")
+        @activity.defn(name="coding.checkpoint_workspace")
         async def checkpoint_workspace(inp: StepInput) -> CheckpointResult:
             return CheckpointResult(commit="c", changed=True)
 
-        @activity.defn(name="run_verification")
+        @activity.defn(name="coding.run_verification")
         async def run_verification(inp: StepInput) -> VerifyResult:
             passed = fakes.verify_results.pop(0) if fakes.verify_results else True
             return VerifyResult(passed=passed, exit_code=0 if passed else 1, output_tail="E boom")
 
-        @activity.defn(name="publish")
+        @activity.defn(name="coding.publish")
         async def publish(inp: PublishInput) -> None:
             fakes.published.append(inp.verification_passed)
 
         @activity.defn(name="check_budget")
         async def check_budget(inp: StepInput) -> str | None:
-            if fakes.over_budget_after_turn and inp.turn >= fakes.over_budget_after_turn:
+            fakes.budget_checks += 1
+            if fakes.over_budget_check == fakes.budget_checks:
+                return "cost budget exhausted"
+            if fakes.over_budget_after_turn and len(fakes.prompts) >= fakes.over_budget_after_turn:
                 return "task used 11 tokens of 10"
             return None
 
-        @activity.defn(name="request_ci")
+        @activity.defn(name="coding.request_ci")
         async def request_ci(inp: StepInput) -> CiRequest:
             fakes.commits += 1
             return CiRequest(commit=f"c{fakes.commits}", branch="sca/x")
 
-        @activity.defn(name="record_ci")
+        @activity.defn(name="coding.record_ci")
         async def record_ci(outcome: CiOutcome) -> None:
             fakes.ci_recorded.append((outcome.commit, outcome.passed, outcome.timed_out))
 
@@ -142,15 +168,15 @@ class Fakes:
         async def destroy_sandbox(task_id: str) -> None:
             fakes.destroyed += 1
 
-        @activity.defn(name="prepare_mirror")
+        @activity.defn(name="coding.prepare_mirror")
         async def prepare_mirror(task_id: str) -> WorkspaceInfo:
             return WorkspaceInfo("base", "sca/x")
 
-        @activity.defn(name="build_merged_workspace")
+        @activity.defn(name="coding.build_merged_workspace")
         async def build_merged_workspace(task_id: str) -> None:
             pass
 
-        @activity.defn(name="subtask_step")
+        @activity.defn(name="coding.subtask_step")
         async def subtask_step(inp: SubtaskInput) -> dict:
             if inp.action == "run_agent_turn":
                 fakes.child_started.append(inp.name)
@@ -172,7 +198,7 @@ class Fakes:
                 return {"passed": not fakes.child_fails, "exit_code": 1, "output_tail": "bad"}
             return {}
 
-        @activity.defn(name="merge_subtasks")
+        @activity.defn(name="coding.merge_subtasks")
         async def merge_subtasks(inp: MergeInput) -> list[dict]:
             fakes.child_results = inp.results
             return [
@@ -189,7 +215,23 @@ class Fakes:
                 for i, r in enumerate(inp.results)
             ]
 
+        @activity.defn(name="coding.plan_task")
+        async def plan_task(inp: PlanningInput) -> dict | None:
+            fakes.planning_feedback.append(inp.feedback)
+            fakes.planning_prompts.append(planning_prompt("do it", inp.feedback))
+            result = fakes.plans.pop(0)
+            if isinstance(result, str):
+                fakes.plan_rejections.append(result)
+                return None
+            return result
+
+        @activity.defn(name="coding.reject_plan")
+        async def reject_plan(inp: PlanningInput) -> None:
+            fakes.plan_rejections.append(inp.feedback)
+
         return [
+            plan_task,
+            reject_plan,
             prepare_mirror,
             build_merged_workspace,
             subtask_step,
@@ -221,8 +263,13 @@ class Harness:
         self.worker = Worker(
             self.client,
             task_queue=self.queue,
-            workflows=[CodingTaskWorkflow, CodingSubtaskWorkflow],
-            activities=self.fakes.all(),
+            workflows=[
+                CodingTaskWorkflow,
+                CodingSubtaskWorkflow,
+                CodingBeforeTurn,
+                CodingAfterVerify,
+            ],
+            activities=self.fakes.all() + prompt_activities(),
         )
         self._task = asyncio.create_task(self.worker.run())
         task_id = str(uuid.uuid4())
@@ -504,5 +551,70 @@ async def test_crashed_children_are_reported_for_review(client):
         assert fakes.published == [False]
         assert all(not r.passed and "child crashed" in r.reason for r in fakes.child_results)
         assert sorted(fakes.child_destroyed) == ["one", "two"]
+        await h.review("approve")
+        assert await h.handle.result() == "SUCCEEDED"
+
+
+async def test_budget_checked_before_second_turn(client):
+    fakes = Fakes(verify_results=[False], over_budget_check=3)
+    async with Harness(client, fakes) as h:
+        with pytest.raises(WorkflowFailureError):
+            await h.handle.result()
+    assert len(fakes.prompts) == 1
+    assert fakes.states[-1] == "FAILED"
+    assert "budget" in fakes.reasons[-1]
+
+
+async def test_failed_turn_over_budget_is_not_retried(client):
+    fakes = Fakes(turn_fails=True, over_budget_check=2)
+    async with Harness(client, fakes) as h:
+        with pytest.raises(WorkflowFailureError):
+            await h.handle.result()
+    assert len(fakes.prompts) == 1
+    assert fakes.states[-1] == "FAILED"
+    assert "cost budget exhausted" in fakes.reasons[-1]
+
+
+@pytest.mark.parametrize("outcome", ["accepted", "no_split", "overlap"])
+async def test_automatic_planning_routes(client, outcome):
+    plan = {"split": True, "subtasks": SUBTASKS, "reason": "independent"}
+    result = (
+        plan
+        if outcome == "accepted"
+        else (
+            {"split": False, "reason": "coupled", "subtasks": []}
+            if outcome == "no_split"
+            else "overlapping paths: calc.py"
+        )
+    )
+    fakes = Fakes(plan="auto", plans=[result])
+    async with Harness(client, fakes) as h:
+        await h.wait_state("AWAITING_REVIEW")
+        assert bool(fakes.child_started) == (outcome == "accepted")
+        assert bool(fakes.prompts) == (outcome != "accepted")
+        assert bool(fakes.plan_rejections) == (outcome == "overlap")
+        await h.review("approve")
+        assert await h.handle.result() == "SUCCEEDED"
+
+
+@pytest.mark.parametrize("decision", ["approve", "request_changes", "reject"])
+async def test_automatic_plan_review(client, decision):
+    plan = {"split": True, "subtasks": SUBTASKS, "reason": "independent"}
+    fakes = Fakes(plan="auto", plan_review=True, plans=[plan, plan])
+    async with Harness(client, fakes) as h:
+        await h.wait_state("AWAITING_REVIEW")
+        assert not fakes.child_started and not fakes.prompts
+        await h.review(decision, "separate the tests")
+        if decision == "reject":
+            assert await h.handle.result() == "CANCELLED"
+            assert not fakes.child_started
+            return
+        if decision == "request_changes":
+            await h.wait_state("AWAITING_REVIEW", 2)
+            assert fakes.planning_feedback == [None, "separate the tests"]
+            assert "separate the tests" in fakes.planning_prompts[1]
+            await h.review("approve")
+        await h.wait_state("AWAITING_REVIEW", 3 if decision == "request_changes" else 2)
+        assert sorted(fakes.child_started) == ["one", "two"]
         await h.review("approve")
         assert await h.handle.result() == "SUCCEEDED"

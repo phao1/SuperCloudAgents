@@ -20,10 +20,13 @@ from sca.core.models import (
 
 class FakeBackend:
     name = "fake"
+    state_transport = "mount"
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         home = Path(ctx.agent_home_host)
         home.mkdir(parents=True, exist_ok=True)
+        if self.state_transport == "sync":
+            return SandboxAdditions()
         return SandboxAdditions(mounts=[Mount(source=str(home.resolve()), target=ctx.agent_home)])
 
     async def run_turn(

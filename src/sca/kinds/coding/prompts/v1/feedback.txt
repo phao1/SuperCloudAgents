@@ -1,0 +1,10 @@
+A reviewer looked at your changes and asked for the following:
+
+$feedback
+
+Make those changes.
+
+Rules:
+- Work only inside the current directory, which is a git checkout of the repository.
+- Do not commit, push, or change git configuration; the platform records your changes.
+- When you are done, reply with a short summary of what you changed and why.

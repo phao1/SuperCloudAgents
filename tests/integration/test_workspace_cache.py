@@ -115,3 +115,19 @@ async def test_different_urls_do_not_share_lock(tmp_path: Path):
             with pytest.raises(asyncio.CancelledError):
                 await waiting
     assert await cache.ensure(str(first))
+
+
+async def test_credentials_are_not_persisted_and_cache_is_tenant_scoped(tmp_path: Path):
+    from sca.core.models import RepoCredential
+
+    source = await source_repo(tmp_path / "source")
+    cache = RepoCache(tmp_path / "cache")
+    credential = RepoCredential(username="git-user", password="b4-never-persist-this")
+    for tenant in ("one", "two"):
+        ws = GitWorkspace(tmp_path / tenant, f"sca/{tenant}", cache)
+        await ws.prepare(source.as_uri(), "main", tenant_id=tenant, credential=credential)
+        assert credential.password not in (ws.mirror / "config").read_text()
+        assert (
+            credential.password not in (cache._path(source.as_uri(), tenant) / "config").read_text()
+        )
+    assert cache._path(source.as_uri(), "one") != cache._path(source.as_uri(), "two")

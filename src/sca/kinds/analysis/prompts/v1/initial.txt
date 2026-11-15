@@ -1,0 +1,12 @@
+Answer this question using the input files in data/:
+$question
+
+Do not modify data/. Write analysis.py, a deterministic Python entry point that reads
+those inputs and regenerates output/report.md, output/results.json (the key numerical
+results in the report), and any figures under output/figures/. Reference figures using
+relative Markdown image links. Never invent numerical results. The report must be
+nonempty. Verification reruns python analysis.py in a clean checkout, removes previous
+outputs, and compares report.md and results.json byte for byte. Use stable ordering and
+formatting. Additional checks: $checks.
+Requested report format: $report_format; always provide report.md
+for verification and review; also provide output/report.html when HTML is requested.

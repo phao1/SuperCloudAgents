@@ -6,12 +6,14 @@ from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError, RPCStatusCode
 
+from sca.kinds import builtin as _builtin_kinds
+
+_builtin_kinds.load()
 from sca.config import Settings
-from sca.core.errors import ConflictError, InvalidTaskError
+from sca.core.errors import ConflictError
+from sca.kernel.kind import get
 from sca.observability import tracing_interceptors
 
-# kind -> workflow name. A new scenario registers its workflow here.
-WORKFLOWS = {"coding": "CodingTaskWorkflow"}
 REVIEW_SIGNAL = "submit_review"
 PAUSE_SIGNAL = "pause"
 RESUME_SIGNAL = "resume"
@@ -37,11 +39,10 @@ class TemporalOrchestrator:
         return cls(client, settings.task_queue)
 
     async def start_task(self, task_id: str, kind: str) -> None:
-        if kind not in WORKFLOWS:
-            raise InvalidTaskError(f"unknown task kind: {kind}")
+        workflow_name = get(kind).workflow_name
         try:
             await self.client.start_workflow(
-                WORKFLOWS[kind],
+                workflow_name,
                 str(task_id),
                 id=workflow_id(str(task_id)),
                 task_queue=self.task_queue,

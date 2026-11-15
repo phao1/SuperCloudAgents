@@ -1,0 +1,3 @@
+instruction: 'Add merge_counts(*mappings): sum values by key into a fresh dictionary,
+  leave inputs unchanged.'
+verify_command: python verify.py

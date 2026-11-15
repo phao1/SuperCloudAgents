@@ -9,6 +9,7 @@ from pathlib import Path
 from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, SandboxSpec
 from sca.sandbox._exec import stream_exec
+from sca.sandbox._transfer import transfer
 from sca.sandbox.egress import SQUID_IMAGE, SQUID_PORT, render_squid_conf
 
 
@@ -165,6 +166,15 @@ class DockerSandboxProvider:
         await self._cli(*args, spec.image, "sleep", "infinity")
         return sandbox_id
 
+    async def list(self, labels: dict[str, str]) -> list[str]:
+        filters = [
+            arg
+            for key, value in labels.items()
+            for arg in ("--filter", "label=" + key + ("=" + value if value else ""))
+        ]
+        _, out, _ = await self._cli("ps", "-a", *filters, "--format", "{{.Names}}")
+        return out.split()
+
     async def exists(self, sandbox_id: str) -> bool:
         code, _, err = await self._cli("inspect", sandbox_id, check=False)
         if code and "no such" not in err.lower():
@@ -198,3 +208,18 @@ class DockerSandboxProvider:
             await self._cli("exec", sandbox_id, "python3", "-c", script, marker, check=False)
 
         return stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+
+    async def upload(self, sandbox_id: str, target_dir: str, archive: AsyncIterator[bytes]) -> None:
+        # docker cp extracts as root; fix ownership using the configured container user.
+        _, user, _ = await self._cli("inspect", "--format", "{{.Config.User}}", sandbox_id)
+        await self._cli("exec", "--user", "0", sandbox_id, "mkdir", "-p", "--", target_dir)
+        async for _ in transfer(
+            [self.docker_bin, "cp", "-", f"{sandbox_id}:{target_dir}"], archive
+        ):
+            pass
+        await self._cli(
+            "exec", "--user", "0", sandbox_id, "chown", "-R", "--", user.strip(), target_dir
+        )
+
+    def download(self, sandbox_id: str, path: str) -> AsyncIterator[bytes]:
+        return transfer([self.docker_bin, "cp", f"{sandbox_id}:{path}", "-"])

@@ -36,16 +36,31 @@ def agent_backend() -> str:
 
 
 @pytest.fixture
-def settings_overrides() -> dict:
+def settings_overrides():
     if not _up(S3_URL):
         pytest.skip("S3 service is not running")
-    return {
+    bucket = f"sca-e2e-{uuid.uuid4().hex[:8]}"
+    yield {
         "object_store": "s3",
         "s3_endpoint_url": S3_URL,
-        "s3_bucket": f"sca-e2e-{uuid.uuid4().hex[:8]}",
+        "s3_bucket": bucket,
         "s3_access_key": "any",
         "s3_secret_key": "any",
     }
+    # SeaweedFS allocates volumes per bucket; leftover test buckets exhaust them.
+    import boto3
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=S3_URL,
+        aws_access_key_id="any",
+        aws_secret_access_key="any",
+        region_name="us-east-1",
+    )
+    for page in client.get_paginator("list_objects_v2").paginate(Bucket=bucket):
+        for item in page.get("Contents", []):
+            client.delete_object(Bucket=bucket, Key=item["Key"])
+    client.delete_bucket(Bucket=bucket)
 
 
 async def test_full_task_with_artifacts_in_s3(stack, source_repo):
@@ -96,4 +111,6 @@ async def test_dex_issued_token_is_accepted():
     with pytest.raises(AuthError):
         await auth.authenticate(token[:-6] + "AAAAAA")
     with pytest.raises(AuthError):
-        await OidcAuthenticator(DEX, "another-client", conf["jwks_uri"], "email").authenticate(token)
+        await OidcAuthenticator(DEX, "another-client", conf["jwks_uri"], "email").authenticate(
+            token
+        )

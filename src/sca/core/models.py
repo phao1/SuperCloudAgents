@@ -82,6 +82,9 @@ class Task(BaseModel):
 
 class EventType(StrEnum):
     SUBTASKS_MERGED = "subtasks.merged"
+    TASK_CANCEL_REQUESTED = "task.cancel_requested"
+    TASK_PAUSE_REQUESTED = "task.pause_requested"
+    TASK_RESUME_REQUESTED = "task.resume_requested"
     TASK_CREATED = "task.created"
     TASK_STATE_CHANGED = "task.state_changed"
     WORKSPACE_PREPARED = "workspace.prepared"
@@ -103,6 +106,9 @@ class EventType(StrEnum):
     CI_REQUESTED = "ci.requested"
     CI_COMPLETED = "ci.completed"
     BUDGET_EXCEEDED = "budget.exceeded"
+    PLAN_STARTED = "plan.started"
+    PLAN_COMPLETED = "plan.completed"
+    PLAN_REJECTED = "plan.rejected"
     REVIEW_REQUESTED = "review.requested"
     REVIEW_SUBMITTED = "review.submitted"
 
@@ -127,6 +133,9 @@ class Artifact(BaseModel):
 class Principal(BaseModel):
     tenant_id: str
     subject: str
+    role: Literal["viewer", "member", "admin"] = "admin"
+    scopes: list[str] = Field(default_factory=list)
+    repo_url: str | None = None
 
 
 ReviewDecision = Literal["approve", "request_changes", "reject"]
@@ -235,3 +244,9 @@ def tail(text: str, limit: int = OUTPUT_TAIL_BYTES) -> str:
     if len(data) <= limit:
         return text
     return "…" + data[-limit:].decode("utf-8", "ignore")
+
+
+class RepoCredential(BaseModel):
+    username: str = Field(repr=False)
+    password: str = Field(repr=False)
+    expires_at: datetime | None = None

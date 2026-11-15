@@ -26,6 +26,9 @@ dependencies = [
   "opentelemetry-exporter-otlp-proto-http>=1.27",
   "opentelemetry-instrumentation-fastapi>=0.48b0",
   "prometheus-client>=0.21",
+  "pathspec>=0.12",  # validating path scopes of automatically planned subtasks
+  "hvac>=2.3",  # OpenBao / Vault client for repository credentials
+  "werkzeug>=3.0",  # streaming multipart parser for file uploads (no full read into memory)
 ]
 
 [project.optional-dependencies]
@@ -46,7 +49,7 @@ markers = [
   "e2e: needs the full stack running",
   "codex: needs a logged-in Codex CLI and spends model tokens",
   "k8s: needs the local kind cluster (deploy/kind)",
-  "live: needs the optional compose services (profiles s3, oidc)",
+  "live: needs optional services (compose profiles s3, oidc, temporal-pg, gitea; a GitHub runner)",
   "gateway: needs the LiteLLM gateway (compose profile `gateway`) and a provider key in .env",
 ]
 

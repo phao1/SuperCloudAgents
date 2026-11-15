@@ -1,5 +1,15 @@
 name: sca
 services:
+  openbao:
+    image: openbao/openbao:2.4.3
+    profiles: [openbao]
+    command: server -dev -dev-listen-address=0.0.0.0:8200
+    environment:
+      BAO_DEV_ROOT_TOKEN_ID: ${OPENBAO_DEV_ROOT_TOKEN:-sca-dev-root}
+    ports:
+      - "127.0.0.1:8200:8200"
+    mem_limit: 200m
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -61,7 +71,7 @@ services:
     profiles: ["s3"]
     image: chrislusf/seaweedfs:latest
     container_name: sca-seaweedfs
-    command: ["server", "-s3", "-dir=/data", "-volume.max=20", "-master.volumeSizeLimitMB=256"]
+    command: ["server", "-s3", "-dir=/data", "-volume.max=100", "-master.volumeSizeLimitMB=256"]
     ports: ["127.0.0.1:8333:8333"]
     volumes: ["s3data:/data"]
     mem_limit: 400m
@@ -76,7 +86,80 @@ services:
     volumes: ["./dex/config.yaml:/etc/dex/config.yaml:ro"]
     mem_limit: 200m
 
+  # Local Git hosting with Actions (phase 2b: real CI, private repositories). Profile: gitea.
+  # Set up with deploy/gitea/setup.sh, which also registers the runner.
+  gitea:
+    profiles: ["gitea"]
+    image: gitea/gitea:1.22
+    container_name: sca-gitea
+    restart: unless-stopped
+    environment:
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__server__ROOT_URL: http://localhost:3000/
+      GITEA__server__SSH_DISABLE: "true"
+      GITEA__actions__ENABLED: "true"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__service__DISABLE_REGISTRATION: "true"
+    ports: ["127.0.0.1:3000:3000"]
+    volumes: ["giteadata:/data"]
+    mem_limit: 300m
+
+  gitea-runner:
+    profiles: ["gitea"]
+    build: {context: ./gitea, dockerfile: runner.Dockerfile}
+    image: sca-gitea-runner:latest
+    container_name: sca-gitea-runner
+    restart: unless-stopped  # it exits if Gitea is not up yet
+    network_mode: host  # jobs reach Gitea and the platform API on localhost
+    environment:
+      CONFIG_FILE: /config.yaml
+      GITEA_INSTANCE_URL: http://localhost:3000
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_TOKEN:-}
+      GITEA_RUNNER_NAME: sca-local
+    volumes: ["./gitea/runner.yaml:/config.yaml:ro", "gitearunner:/data"]
+    mem_limit: 300m
+    depends_on: [gitea]
+
+  # Observability backends (phase 2b). Profile: obs. Host network so they reach the API and
+  # worker metrics on localhost and the platform reaches Jaeger's OTLP endpoint on :4318.
+  prometheus:
+    profiles: ["obs"]
+    image: prom/prometheus:v2.53.2
+    container_name: sca-prometheus
+    network_mode: host
+    command: ["--config.file=/etc/prometheus/prometheus.yml", "--storage.tsdb.retention.time=7d",
+              "--web.listen-address=127.0.0.1:9090"]
+    volumes: ["./obs/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
+              "./obs/alerts.yml:/etc/prometheus/alerts.yml:ro"]
+    mem_limit: 300m
+
+  grafana:
+    profiles: ["obs"]
+    image: grafana/grafana:11.2.0
+    container_name: sca-grafana
+    network_mode: host
+    environment:
+      GF_SERVER_HTTP_ADDR: 127.0.0.1
+      GF_SERVER_HTTP_PORT: "3001"  # 3000 is Gitea
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes: ["./obs/grafana/provisioning:/etc/grafana/provisioning:ro",
+              "./obs/grafana/dashboards:/var/lib/grafana/dashboards:ro"]
+    mem_limit: 250m
+
+  jaeger:
+    profiles: ["obs"]
+    image: jaegertracing/all-in-one:1.60
+    container_name: sca-jaeger
+    network_mode: host
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+      MEMORY_MAX_TRACES: "20000"
+    mem_limit: 300m
+
 volumes:
   pgdata:
   temporaldata:
   s3data:
+  giteadata:
+  gitearunner:

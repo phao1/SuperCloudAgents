@@ -72,6 +72,7 @@ GATEWAY_KEY_ENV = "SCA_MODEL_KEY"
 
 class CodexBackend:
     name = "codex"
+    state_transport = "mount"
 
     def __init__(self, bin_dir: Path, auth_file: Path | None, default_model: str):
         """auth_file=None is gateway mode: no credential is mounted, and each turn must
@@ -87,6 +88,12 @@ class CodexBackend:
             Mount(source=str(self.bin_dir), target="/opt/codex", read_only=True),
             Mount(source=str(home.resolve()), target=ctx.agent_home),
         ]
+        if self.state_transport == "sync":
+            if self.auth_file:
+                import shutil
+
+                shutil.copyfile(self.auth_file, home / "auth.json")
+            return SandboxAdditions(env={"CODEX_HOME": ctx.agent_home})
         if self.auth_file:
             placeholder = home / "auth.json"
             if not placeholder.exists():
@@ -135,7 +142,11 @@ class CodexBackend:
         completed = False
         result = None
         async for output in sandbox.exec(
-            sandbox_id, argv, workdir=ctx.workdir, env=env, stdin=prompt.encode(),
+            sandbox_id,
+            argv,
+            workdir=ctx.workdir,
+            env=env,
+            stdin=prompt.encode(),
             timeout_s=timeout_s,
         ):
             if isinstance(output, ExecExit):

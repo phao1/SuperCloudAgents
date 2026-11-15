@@ -127,3 +127,111 @@ async def test_network_none(sandbox):
         timeout_s=10,
     )
     assert result[-1].exit_code != 0
+
+
+async def test_archive_round_trip(sandbox, tmp_path):
+    import tempfile
+
+    from sca.workspace.tarsafe import chunks, extract, pack, receive
+
+    provider, sid, *_ = sandbox
+    source = tmp_path / "upload"
+    source.mkdir()
+    (source / "binary").write_bytes(bytes(range(256)) * 1024)
+    (source / "binary").chmod(0o755)
+    (source / "link").symlink_to("binary")
+    (source / "empty").mkdir()
+    with tempfile.TemporaryFile() as tar:
+        pack(source, tar)
+        tar.seek(0)
+        await provider.upload(sid, "/tmp/roundtrip", chunks(tar))
+    with tempfile.TemporaryFile() as tar:
+        await receive(provider.download(sid, "/tmp/roundtrip"), tar)
+        extract(tar, tmp_path / "download")
+    restored = tmp_path / "download/roundtrip"
+    assert (restored / "binary").read_bytes() == (source / "binary").read_bytes()
+    assert (restored / "binary").stat().st_mode & 0o111 == 0o111
+    assert (restored / "link").is_symlink()
+    assert (restored / "link").read_bytes() == (source / "binary").read_bytes()
+    assert list((restored / "empty").iterdir()) == []
+    result = await collect(
+        provider,
+        sid,
+        [
+            "sh",
+            "-c",
+            'test -w /tmp/roundtrip/binary && test "$(stat -c %u /tmp/roundtrip/binary)" = "$(id -u)"',
+        ],
+    )
+    assert result[-1].exit_code == 0
+
+
+async def test_archive_large_file(sandbox, tmp_path):
+    import hashlib
+    import tempfile
+    import tracemalloc
+
+    from sca.workspace.tarsafe import chunks, extract, pack, receive
+
+    provider, sid, *_ = sandbox
+    source = tmp_path / "large"
+    source.mkdir()
+    block = bytes(range(256)) * 256
+    expected = hashlib.sha256()
+    with (source / "large.bin").open("wb") as file:
+        for _ in range(1600):
+            file.write(block)
+            expected.update(block)
+    with tempfile.TemporaryFile() as tar:
+        pack(source, tar)
+        tar.seek(0)
+        tracemalloc.start()
+        try:
+            await provider.upload(sid, "/tmp/large", chunks(tar))
+            with tempfile.TemporaryFile() as downloaded:
+                await receive(provider.download(sid, "/tmp/large"), downloaded)
+                extract(downloaded, tmp_path / "received")
+            _, peak = tracemalloc.get_traced_memory()
+            assert peak < 20 * 1024 * 1024
+        finally:
+            tracemalloc.stop()
+    actual = hashlib.sha256()
+    with (tmp_path / "received/large/large.bin").open("rb") as file:
+        while chunk := file.read(65536):
+            actual.update(chunk)
+    assert actual.digest() == expected.digest()
+    assert (tmp_path / "received/large/large.bin").stat().st_size == 100 * 1024 * 1024
+
+
+async def test_archive_missing_path(sandbox):
+    from sca.core.errors import SandboxError
+
+    provider, sid, *_ = sandbox
+    with pytest.raises(SandboxError):
+        async for _ in provider.download(sid, "/does-not-exist"):
+            pass
+
+
+async def test_archive_empty_directory(sandbox, tmp_path):
+    import tempfile
+
+    from sca.workspace.tarsafe import chunks, extract, pack, receive
+
+    provider, sid, *_ = sandbox
+    source = tmp_path / "empty-source"
+    source.mkdir()
+    with tempfile.TemporaryFile() as tar:
+        pack(source, tar)
+        tar.seek(0)
+        await provider.upload(sid, "/tmp/empty-target", chunks(tar))
+    with tempfile.TemporaryFile() as tar:
+        await receive(provider.download(sid, "/tmp/empty-target"), tar)
+        extract(tar, tmp_path / "empty-result")
+    assert list((tmp_path / "empty-result/empty-target").iterdir()) == []
+
+
+async def test_list_labels(sandbox):
+    provider, sid, *_ = sandbox
+    assert sid in await provider.list({"sca.test": "true"})
+    assert sid in await provider.list({"sca.test": ""})
+    assert sid not in await provider.list({"sca.test": "true", "sca.absent": "yes"})

@@ -1,0 +1,17 @@
+The verification command failed after your last change.
+
+Command: $verify_command
+Exit status: $exit_code
+
+End of its output:
+
+```
+$output
+```
+
+Find the cause and fix it so the command passes. Do not weaken or delete tests to make it pass.
+
+Rules:
+- Work only inside the current directory, which is a git checkout of the repository.
+- Do not commit, push, or change git configuration; the platform records your changes.
+- When you are done, reply with a short summary of what you changed and why.

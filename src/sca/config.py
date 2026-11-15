@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +19,7 @@ class Settings(BaseSettings):
     temporal_namespace: str = "default"
     task_queue: str = "sca-coding"
     data_dir: Path = Path("./.data")
+    state_transport: Literal["mount", "sync"] = "mount"
     api_tokens: str = "dev-token:default"
     api_url: str = "http://localhost:8000"
     api_token: str = "dev-token"  # used by the CLI
@@ -29,6 +32,10 @@ class Settings(BaseSettings):
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None
     oidc_tenant_claim: str = "tenant"
+    oidc_role_claim: str = "roles"
+    oidc_default_role: Literal["viewer", "member", "admin"] = "member"
+
+    max_upload_mb: int = Field(default=200, ge=1)
 
     object_store: str = "local"  # local | s3
     s3_bucket: str = "sca"
@@ -37,9 +44,21 @@ class Settings(BaseSettings):
     s3_secret_key: str | None = None
     s3_region: str = "us-east-1"
 
+    worker_metrics_port: int | None = None
+    archive_after_days: int = 30
+    repo_cache_max_entries: int = 200
+    maintenance_interval_s: int = 3600
+    maintenance_schedule: bool = True
+
     otlp_endpoint: str | None = None  # e.g. http://localhost:4318
 
     # Caches under data_dir/cache: bare mirrors of repositories, and pip downloads per tenant.
+    secret_provider: Literal["host", "openbao"] = "host"
+    openbao_url: str = "http://127.0.0.1:8200"
+    openbao_token: str = ""
+    openbao_mount: str = "secret"
+    openbao_prefix: str = "sca/tenants"
+
     repo_cache: bool = True
     pip_cache: bool = True
 
@@ -50,6 +69,16 @@ class Settings(BaseSettings):
 
     agent_backend: str = "codex"
     default_model: str = "gpt-6.1-sol"
+
+    # Which sandbox driver the worker uses. The model gateway is supported with docker only.
+    sandbox_driver: Literal["docker", "k8s"] = "docker"
+    kubectl_bin: str = "kubectl"
+    k8s_pool_size: int = 0
+    k8s_context: str | None = None
+    k8s_namespace: str = "sca-sandboxes"
+    k8s_node_selector: dict[str, str] = {}
+    k8s_network_policy_flavor: Literal["standard", "calico"] = "standard"
+    k8s_blocked_cidrs: list[str] = []
 
     docker_bin: str = "docker"
     sandbox_image: str = "sca-sandbox:latest"

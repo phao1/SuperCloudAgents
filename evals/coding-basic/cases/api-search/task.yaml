@@ -1,0 +1,3 @@
+instruction: Change find(items, target) to return all matching zero-based indices
+  as a list; missing returns empty list.
+verify_command: python verify.py

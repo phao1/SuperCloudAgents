@@ -1,0 +1,6 @@
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 120
+description: Twelve small deterministic Python edits; hidden checks cover edge cases.
+kind: coding
+name: coding-basic

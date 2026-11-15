@@ -63,7 +63,17 @@ async def test_parallel_subtasks_merge(stack, source_repo):
     elapsed = (
         datetime.fromisoformat(merged["created_at"]) - datetime.fromisoformat(start["created_at"])
     ).total_seconds()
-    assert elapsed < 9, elapsed
+    print(f"\nRUNNING -> merged: {elapsed:.1f} s (a serial run needs at least 10 s of agent work)")
+    # Parallel means the two turns overlap: both started before either finished. (A wall-clock
+    # bound is too tight in sync mode, where uploads and downloads add a few seconds.)
+    started = [e for e in events if e["type"] == "agent.turn_started" and "subtask" in e["payload"]]
+    finished = [
+        e for e in events if e["type"] == "agent.turn_completed" and "subtask" in e["payload"]
+    ]
+    assert len(started) == len(finished) == 2
+    assert max(datetime.fromisoformat(e["created_at"]) for e in started) < min(
+        datetime.fromisoformat(e["created_at"]) for e in finished
+    )
     assert not [
         e for e in events if e["type"] == "agent.turn_started" and "subtask" not in e["payload"]
     ]

@@ -1,0 +1,22 @@
+# Two-node cluster for testing the Kubernetes sandbox provider locally.
+# Phase 2 mounts workspaces with hostPath, so the paths the worker uses on the
+# host must exist at the same paths inside the kind node.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: sca
+networking:
+  disableDefaultCNI: true
+  podSubnet: 192.168.0.0/16
+nodes:
+  - role: control-plane
+    extraMounts:
+      - hostPath: /tmp/pytest-of-ubuntu
+        containerPath: /tmp/pytest-of-ubuntu
+      - hostPath: ./.data
+        containerPath: /home/ubuntu/projects/SuperCLoudAgent/.data
+  - role: worker
+    extraMounts:
+      - hostPath: /tmp/pytest-of-ubuntu
+        containerPath: /tmp/pytest-of-ubuntu
+      - hostPath: ./.data
+        containerPath: /home/ubuntu/projects/SuperCLoudAgent/.data

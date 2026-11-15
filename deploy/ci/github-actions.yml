@@ -1,0 +1,26 @@
+# Example pipeline for GitHub Actions on a self-hosted runner that can reach the platform API.
+# Copy to .github/workflows/sca.yml together with ci/report.sh.
+# Repository secrets: SCA_API_URL, SCA_CI_TOKEN (a token with scope ci:report).
+# Never attach a self-hosted runner to a public repository: anyone opening a pull request could
+# run code on that machine.
+name: sca-ci
+on:
+  push:
+    branches: ["sca/**"]
+jobs:
+  check:
+    runs-on: [self-hosted, sca-ci]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Project checks
+        shell: bash
+        run: |
+          set -o pipefail
+          python3 -m pytest -q -p no:cacheprovider 2>&1 | tee -a "$RUNNER_TEMP/ci.log"
+          test -f CHANGELOG.md || { echo "changelog check: CHANGELOG.md is missing" | tee -a "$RUNNER_TEMP/ci.log"; exit 1; }
+      - name: Report to SuperCloudAgents
+        if: always()
+        env:
+          SCA_API_URL: ${{ secrets.SCA_API_URL }}
+          SCA_CI_TOKEN: ${{ secrets.SCA_CI_TOKEN }}
+        run: sh ci/report.sh "${{ job.status }}" < "$RUNNER_TEMP/ci.log"

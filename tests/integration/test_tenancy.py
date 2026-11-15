@@ -112,7 +112,10 @@ async def test_api_quota(api, store):  # noqa: F811
     assert (await submit(client)).status_code == 201
 
 
-async def test_api_oidc(api_store, store, monkeypatch):
+@pytest.mark.parametrize(
+    "roles,status", [(None, 201), ("viewer", 403), ("member", 201), (["viewer", "admin"], 201)]
+)
+async def test_api_oidc(api_store, store, monkeypatch, roles, status):
     import time
 
     import jwt
@@ -130,6 +133,7 @@ async def test_api_oidc(api_store, store, monkeypatch):
             "sub": "user",
             "tenant": "a",
             "exp": time.time() + 60,
+            "roles": roles,
         },
         key,
         algorithm="RS256",
@@ -145,8 +149,9 @@ async def test_api_oidc(api_store, store, monkeypatch):
             "/v1/tasks",
             json={"kind": "coding", "spec": {"repo_url": "/tmp/repo", "instruction": "fix"}},
         )
-        assert response.status_code == 201
-        assert response.json()["tenant_id"] == "a"
+        assert response.status_code == status
+        if status == 201:
+            assert response.json()["tenant_id"] == "a"
 
 
 async def test_concurrent_api_submits(api, store):  # noqa: F811

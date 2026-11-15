@@ -7,16 +7,29 @@ each; phase 2 swaps implementations without touching callers.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import Protocol, runtime_checkable
+from pathlib import Path
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from sca.core.models import (
     AgentContext,
     AgentEvent,
     ExecEvent,
+    Mount,
     Principal,
+    RepoCredential,
     SandboxAdditions,
     SandboxSpec,
 )
+
+if TYPE_CHECKING:
+    from sca.workspace.git import GitWorkspace
+
+
+class StateTransport(Protocol):
+    def mounts(self, task_dir: Path) -> list[Mount]: ...
+    async def push(self, sandbox_id: str, task_dir: Path) -> None: ...
+    async def pull_commit(self, sandbox_id: str, ws: GitWorkspace) -> str: ...
+    async def pull_agent_home(self, sandbox_id: str, task_dir: Path) -> None: ...
 
 
 @runtime_checkable
@@ -40,6 +53,16 @@ class SandboxProvider(Protocol):
         On timeout the whole process group in the sandbox is killed and the final
         event is ExecExit(exit_code=124, timed_out=True).
         """
+        ...
+
+    async def upload(
+        self, sandbox_id: str, target_dir: str, archive: AsyncIterator[bytes]
+    ) -> None: ...
+
+    def download(self, sandbox_id: str, path: str) -> AsyncIterator[bytes]: ...
+
+    async def list(self, labels: dict[str, str]) -> list[str]:
+        """List sandbox ids matching all labels; an empty value selects label presence."""
         ...
 
     async def exists(self, sandbox_id: str) -> bool: ...
@@ -77,7 +100,9 @@ class AgentBackend(Protocol):
 
 @runtime_checkable
 class ObjectStore(Protocol):
-    async def put(self, key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
+    async def put(
+        self, key: str, data: bytes, content_type: str = "application/octet-stream"
+    ) -> str:
         """Store data and return its URI."""
         ...
 
@@ -124,6 +149,8 @@ class ModelGateway(Protocol):
 
     sandbox_url: str
 
+    async def complete(self, messages: list[dict[str, str]], model: str) -> str: ...
+
     async def issue_key(
         self,
         alias: str,
@@ -136,6 +163,12 @@ class ModelGateway(Protocol):
         """Create a key. Idempotent by alias: an existing key with that alias is replaced."""
         ...
 
+    async def list_aliases(self, prefix: str) -> list[str]: ...
+
     async def revoke_key(self, alias: str) -> float | None:
         """Delete the key (missing is fine). Returns its spend in USD when known."""
         ...
+
+
+class SecretProvider(Protocol):
+    async def repo_credential(self, tenant_id: str, repo_url: str) -> RepoCredential | None: ...

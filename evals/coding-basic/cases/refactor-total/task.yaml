@@ -1,0 +1,3 @@
+instruction: Refactor total(lines) to avoid explicit loops, preserving all behavior
+  and leaving inputs unchanged.
+verify_command: python verify.py

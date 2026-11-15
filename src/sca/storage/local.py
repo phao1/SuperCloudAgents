@@ -1,4 +1,6 @@
 import asyncio
+import os
+import threading
 from pathlib import Path
 from uuid import UUID
 
@@ -34,7 +36,10 @@ class LocalObjectStore:
 
         def write() -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            # Readers must never see a half-written object (the task state manifest relies on it).
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
 
         await asyncio.to_thread(write)
         return path.as_uri()

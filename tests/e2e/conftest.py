@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
 import pytest
+from sqlalchemy import text
 from temporalio.client import Client
 
 from sca.api.app import create_app
@@ -27,7 +29,10 @@ TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
 def git(cwd: Path, *args: str) -> str:
     return subprocess.run(
         ["git", "-c", "user.name=test", "-c", "user.email=test@example.invalid", *args],
-        cwd=cwd, check=True, capture_output=True, text=True,
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
 
 
@@ -53,10 +58,12 @@ class Stack:
     http: httpx.AsyncClient
     settings: Settings
     store: Store
+    submitted: list[str] = field(default_factory=list)
 
     async def submit(self, spec: dict) -> str:
         r = await self.http.post("/v1/tasks", json={"kind": "coding", "spec": spec})
         assert r.status_code == 201, r.text
+        self.submitted.append(r.json()["id"])
         return r.json()["id"]
 
     async def task(self, task_id: str) -> dict:
@@ -83,15 +90,19 @@ class Stack:
             while True:
                 task = await self.task(task_id)
                 entered = [
-                    e for e in await self.events(task_id)
-                    if e["type"] == "task.state_changed" and e["seq"] > since_seq
+                    e
+                    for e in await self.events(task_id)
+                    if e["type"] == "task.state_changed"
+                    and e["seq"] > since_seq
                     and e["payload"]["to"] == state
                 ]
                 if entered and task["state"] == state:
                     return task
                 if task["state"] in TERMINAL and task["state"] != state:
                     tail = [(e["type"], e["payload"]) for e in (await self.events(task_id))[-6:]]
-                    raise AssertionError(f"task ended {task['state']}: {task['state_reason']}\n{tail}")
+                    raise AssertionError(
+                        f"task ended {task['state']}: {task['state_reason']}\n{tail}"
+                    )
                 await asyncio.sleep(0.5)
 
     async def review(self, task_id: str, decision: str, feedback: str | None = None) -> None:
@@ -104,6 +115,11 @@ class Stack:
         r = await self.http.get(f"/v1/tasks/{task_id}/artifacts/changes.patch")
         r.raise_for_status()
         return r.text
+
+
+@pytest.fixture
+def state_transport() -> str:
+    return os.environ.get("SCA_E2E_STATE_TRANSPORT", os.environ.get("SCA_STATE_TRANSPORT", "mount"))
 
 
 @pytest.fixture
@@ -130,13 +146,16 @@ def in_process_worker() -> bool:
 async def stack(
     tmp_path: Path,
     agent_backend: str,
+    state_transport: str,
     settings_overrides: dict,
     in_process_worker: bool,
     temporal_interceptors: list,
 ):
     settings = Settings(
-        data_dir=tmp_path / "data", agent_backend=agent_backend, task_queue=f"e2e-{uuid.uuid4()}",
-        **settings_overrides,
+        data_dir=tmp_path / "data",
+        agent_backend=agent_backend,
+        task_queue=f"e2e-{uuid.uuid4()}",
+        **{"state_transport": state_transport, "maintenance_schedule": False, **settings_overrides},
     )
     engine = make_engine(settings.database_url)
     store = Store(make_sessionmaker(engine))
@@ -162,17 +181,48 @@ async def stack(
         timeout=30,
     ) as http:
         try:
-            yield Stack(http=http, settings=settings, store=store)
+            stack = Stack(http=http, settings=settings, store=store)
+            yield stack
         finally:
+            # A test that ends while its task still waits (e.g. for review) leaves the sandbox
+            # running: nothing would ever finish that task. Remove what this test created.
+            for task_id in stack.submitted if "stack" in locals() else []:
+                remove_sandboxes(task_id)
+            if "stack" in locals() and stack.submitted:
+                # Unfinished tasks of this test would count against the tenant's active-task
+                # quota in the shared database forever.
+                async with engine.begin() as conn:
+                    await conn.execute(
+                        text(
+                            "UPDATE tasks SET state = 'CANCELLED', "
+                            "state_reason = 'test ended before the task finished' "
+                            "WHERE id = ANY(:ids) "
+                            "AND state NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')"
+                        ),
+                        {"ids": [uuid.UUID(t) for t in stack.submitted]},
+                    )
             if worker:
                 await worker.shutdown()
                 await worker_task
             await engine.dispose()
 
 
+def remove_sandboxes(task_id: str) -> None:
+    ids = subprocess.run(
+        ["docker", "ps", "-aq", "--filter", f"label=sca.task_id={task_id}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout.split()
+    if ids:
+        subprocess.run(["docker", "rm", "-f", *ids], capture_output=True, check=False)
+
+
 def sandbox_running(task_id: str) -> bool:
     out = subprocess.run(
         ["docker", "ps", "-q", "--filter", f"label=sca.task_id={task_id}"],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     ).stdout
     return bool(out.strip())

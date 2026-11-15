@@ -147,11 +147,13 @@ async def test_tenant_daily_budget_stops_tasks(stack, source_repo):
 
 
 async def test_caches_are_used_and_kept_per_tenant(stack, source_repo):
+    # In sync mode nothing is shared with the sandbox, so there is no pip cache (design B1.6).
+    pip = stack.settings.state_transport == "mount"
+    check_pip = ' && test "$PIP_CACHE_DIR" = /cache/pip && touch /cache/pip/writable'
     spec = {
         "repo_url": str(source_repo),
         "instruction": f"Fix add.\n{block(RIGHT_FIX)}",
-        "verify_command": "python -m pytest -q && test \"$PIP_CACHE_DIR\" = /cache/pip "
-        "&& touch /cache/pip/writable",
+        "verify_command": "python -m pytest -q" + (check_pip if pip else ""),
     }
     for _ in range(2):  # the second task builds its workspace from the cached mirror
         task_id = await stack.submit(spec)
@@ -161,4 +163,4 @@ async def test_caches_are_used_and_kept_per_tenant(stack, source_repo):
         await stack.wait_for(task_id, "SUCCEEDED")
     cache = stack.settings.data_dir.resolve() / "cache"
     assert len(list((cache / "repos").glob("*.git"))) == 1
-    assert (cache / "pip" / "default" / "writable").exists()
+    assert (cache / "pip" / "default" / "writable").exists() if pip else not (cache / "pip").exists()

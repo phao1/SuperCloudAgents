@@ -1,0 +1,7 @@
+# Task to plan
+
+$instruction
+
+Read the repository without modifying code. Write only .sca/plan.json. Default to not splitting; split only clearly independent work.
+Format: {"split": false, "reason": "why", "subtasks": []}. For split=true provide 2..8 subtasks, each with name (lowercase letters, digits, hyphens; maximum 31 characters), instruction, and a nonempty paths list of gitignore-style globs. Path ranges must not overlap on repository files. Do not commit or push.
+$reviewer_feedback

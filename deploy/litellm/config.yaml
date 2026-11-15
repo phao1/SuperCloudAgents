@@ -5,8 +5,29 @@ model_list:
     litellm_params:
       model: deepseek/deepseek-flash
       api_key: os.environ/DEEPSEEK_API_KEY
+    # Prices in USD per token, from https://api-docs.deepseek.com/quick_start/pricing.md as read
+    # on 2026-11-15 (the page carries no date). DeepSeek bills off-peak hours at half these
+    # rates; the PEAK rates are used here so budgets never under-estimate spend.
+    #   input, cache miss: $0.30 / 1M   input, cache hit: $0.006 / 1M   output: $1.20 / 1M
+    model_info:
+      input_cost_per_token: 3.0e-7
+      cache_read_input_token_cost: 6.0e-9
+      output_cost_per_token: 1.2e-6
+  - model_name: deepseek-v4-pro
+    litellm_params:
+      model: deepseek/deepseek-v4-pro
+      api_key: os.environ/DEEPSEEK_API_KEY
+    # Same source and date as above; PEAK rates.
+    #   input, cache miss: $1.32 / 1M   input, cache hit: $0.044 / 1M   output: $3.96 / 1M
+    model_info:
+      input_cost_per_token: 1.32e-6
+      cache_read_input_token_cost: 4.4e-8
+      output_cost_per_token: 3.96e-6
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY
   database_url: os.environ/DATABASE_URL
+  # Spend is written to the database in batches; the platform reads a key's spend when the
+  # turn ends, so flush often (seconds).
+  proxy_batch_write_at: 1
 litellm_settings:
   drop_params: true

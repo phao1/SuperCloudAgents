@@ -1,0 +1,3 @@
+instruction: Refactor discounted(price, member) to remove duplicated arithmetic while
+  preserving 10% member discount and zero floor.
+verify_command: python verify.py
