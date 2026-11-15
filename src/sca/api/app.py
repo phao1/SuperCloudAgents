@@ -1,0 +1,125 @@
+import asyncio
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
+from starlette.exceptions import HTTPException
+
+from sca.api.auth import ChainAuthenticator, OidcAuthenticator, StaticTokenAuthenticator
+from sca.api.routes import router
+from sca.config import get_settings
+from sca.core.errors import AuthError, ConflictError, InvalidTaskError, NotFoundError
+from sca.core.interfaces import Authenticator, ObjectStore, Orchestrator
+from sca.db.engine import EventListener, make_engine, make_sessionmaker
+from sca.db.repo import QuotaExceededError, Store
+from sca.observability import Metrics, instrument_app, setup_tracing
+from sca.storage import make_object_store
+
+
+def create_app(
+    *,
+    store: Store | None = None,
+    orchestrator: Orchestrator | None = None,
+    authenticator: Authenticator | None = None,
+    object_store: ObjectStore | None = None,
+) -> FastAPI:
+    settings = get_settings()
+    setup_tracing("sca-api", settings)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        if app.state.orchestrator is None:
+            from sca.orchestration.client import TemporalOrchestrator
+
+            app.state.orchestrator = await TemporalOrchestrator.connect(settings)
+        listener_task = asyncio.create_task(app.state.event_listener.run())
+        try:
+            yield
+        finally:
+            listener_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await listener_task
+
+    app = FastAPI(lifespan=lifespan)
+    app.state.store = (
+        store
+        if store is not None
+        else Store(
+            make_sessionmaker(
+                make_engine(getattr(settings, "api_database_url", None) or settings.database_url)
+            ),
+            getattr(settings, "default_max_active_tasks", 20),
+        )
+    )
+    app.state.event_listener = EventListener(
+        app.state.store.sessionmaker.kw["bind"].url.render_as_string(hide_password=False)
+    )
+    app.state.metrics = Metrics()
+    instrument_app(app, app.state.metrics)
+    app.state.orchestrator = orchestrator
+    authenticators: list[Authenticator] = [StaticTokenAuthenticator(settings.token_table())]
+    issuer = getattr(settings, "oidc_issuer", None)
+    if issuer:
+        audience = getattr(settings, "oidc_audience", None)
+        if not audience:
+            raise ValueError("OIDC audience is required")
+        authenticators.append(
+            OidcAuthenticator(
+                issuer,
+                audience,
+                getattr(settings, "oidc_jwks_url", None) or issuer + "/keys",
+                getattr(settings, "oidc_tenant_claim", "tenant"),
+            )
+        )
+    app.state.authenticator = authenticator or ChainAuthenticator(authenticators)
+    app.state.object_store = object_store or make_object_store(settings)
+    app.state.store.objects = app.state.object_store
+
+    @app.get("/metrics", include_in_schema=False)
+    async def metrics() -> Response:
+        from prometheus_client import CONTENT_TYPE_LATEST
+
+        return Response(
+            await app.state.metrics.render(app.state.store),
+            headers={"Content-Type": CONTENT_TYPE_LATEST},
+        )
+
+    async def domain_error(request: Request, exc: Exception) -> JSONResponse:
+        status, code = {
+            QuotaExceededError: (429, "quota_exceeded"),
+            AuthError: (401, "unauthorized"),
+            NotFoundError: (404, "not_found"),
+            ConflictError: (409, "conflict"),
+            InvalidTaskError: (422, "validation_error"),
+        }[type(exc)]
+        return JSONResponse({"error": {"code": code, "message": str(exc)}}, status_code=status)
+
+    for error in (QuotaExceededError, AuthError, NotFoundError, ConflictError, InvalidTaskError):
+        app.add_exception_handler(error, domain_error)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"code": "validation_error", "message": str(exc)}}, status_code=422
+        )
+
+    @app.exception_handler(HTTPException)
+    async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
+        return JSONResponse(
+            {"error": {"code": "http_error", "message": str(exc.detail)}},
+            status_code=exc.status_code,
+        )
+
+    @app.get("/healthz")
+    async def healthz() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> FileResponse:
+        return FileResponse(Path(__file__).parent / "static" / "index.html")
+
+    app.include_router(router)
+    return app

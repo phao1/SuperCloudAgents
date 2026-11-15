@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+import asyncio
+import fcntl
+import hashlib
+import os
+import re
+import shutil
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
+
+from sca.core.errors import InvalidTaskError, WorkspaceError
+from sca.core.models import Mount
+
+PIP_CACHE_ENV = {"PIP_CACHE_DIR": "/cache/pip"}
+
+
+def pip_cache_mount(root: Path, tenant_id: str) -> Mount:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", tenant_id):
+        raise ValueError("tenant_id must be a single safe path component")
+    path = root.resolve() / "pip" / tenant_id
+    path.mkdir(parents=True, exist_ok=True)
+    return Mount(source=str(path), target="/cache/pip")
+
+
+def _normalise(url: str) -> str:
+    if "://" not in url:
+        return str(Path(url).resolve()) if ":" not in url else url
+    parts = urlsplit(url)
+    # Preserve credentials and case-sensitive repository paths.
+    userinfo, separator, host = parts.netloc.rpartition("@")
+    authority = userinfo + separator + host.lower()
+    return urlunsplit((parts.scheme.lower(), authority, parts.path.rstrip("/"), parts.query, ""))
+
+
+class RepoCache:
+    def __init__(self, root: Path):
+        self.root = root.resolve()
+        self.root.mkdir(parents=True, exist_ok=True)
+
+    def _path(self, repo_url: str) -> Path:
+        key = hashlib.sha256(_normalise(repo_url).encode()).hexdigest()
+        return self.root / f"{key}.git"
+
+    @asynccontextmanager
+    async def _lock(self, path: Path) -> AsyncIterator[None]:
+        # Lock files are permanent: unlinking one could split waiters across inodes.
+        with path.with_suffix(".lock").open("a") as lock:
+            while True:
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    await asyncio.sleep(0.01)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    async def _git(self, *args: str) -> None:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-c",
+                "core.fsmonitor=false",
+                *args,
+                env={**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C"},
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                _, err = await proc.communicate()
+            except asyncio.CancelledError:
+                proc.kill()
+                await proc.wait()
+                raise
+        except OSError as exc:
+            raise WorkspaceError(str(exc)) from exc
+        if proc.returncode:
+            raise InvalidTaskError(err.decode(errors="replace").strip())
+
+    async def _ensure(self, repo_url: str, path: Path) -> None:
+        if path.exists():
+            try:
+                await self._git("--git-dir", str(path), "fetch", "--prune", "origin")
+            except InvalidTaskError as exc:
+                # Network/auth failures must not destroy a usable mirror.
+                network = (
+                    "could not resolve",
+                    "unable to access",
+                    "connection",
+                    "timed out",
+                    "authentication",
+                    "permission denied",
+                    "repository not found",
+                    "could not read from remote",
+                    "does not appear to be a git repository",
+                )
+                if (
+                    any(marker in str(exc).lower() for marker in network)
+                    and (path / "HEAD").is_file()
+                    and (path / "objects").is_dir()
+                ):
+                    raise
+                await asyncio.to_thread(shutil.rmtree, path)
+            else:
+                path.touch()
+                return
+        try:
+            await self._git("clone", "--mirror", "--", repo_url, str(path))
+        except BaseException:
+            if path.exists():
+                await asyncio.to_thread(shutil.rmtree, path)
+            raise
+        path.touch()
+
+    @asynccontextmanager
+    async def mirror(self, repo_url: str) -> AsyncIterator[Path]:
+        path = self._path(repo_url)
+        async with self._lock(path):
+            await self._ensure(repo_url, path)
+            yield path
+
+    async def ensure(self, repo_url: str) -> Path:
+        async with self.mirror(repo_url) as path:
+            return path
+
+    async def prune(self, max_entries: int) -> None:
+        if max_entries < 0:
+            raise ValueError("max_entries must be non-negative")
+        entries = sorted(self.root.glob("*.git"), key=lambda p: p.stat().st_mtime_ns)
+        for path in entries[: max(0, len(entries) - max_entries)]:
+            async with self._lock(path):
+                # An ensure may have refreshed the entry while prune waited.
+                current = sorted(self.root.glob("*.git"), key=lambda p: p.stat().st_mtime_ns)
+                if path in current[: max(0, len(current) - max_entries)]:
+                    await asyncio.to_thread(shutil.rmtree, path)

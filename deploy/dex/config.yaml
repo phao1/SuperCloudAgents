@@ -1,0 +1,20 @@
+issuer: http://localhost:5556/dex
+storage:
+  type: memory
+web:
+  http: 0.0.0.0:5556
+oauth2:
+  passwordConnector: local
+enablePasswordDB: true
+staticClients:
+  - id: sca-cli
+    secret: sca-cli-secret
+    name: SuperCloudAgents CLI
+    redirectURIs:
+      - http://localhost:8000/callback
+staticPasswords:
+  - email: dev@example.com
+    # Local development password: password
+    hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+    username: developer
+    userID: local-developer

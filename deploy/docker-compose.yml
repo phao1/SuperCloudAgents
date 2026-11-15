@@ -1,0 +1,82 @@
+name: sca
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sca
+      POSTGRES_PASSWORD: sca
+      POSTGRES_DB: sca
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sca -d sca"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  temporal:
+    image: temporalio/temporal:latest
+    user: "0:0"  # the named volume is root-owned
+    command: ["server", "start-dev", "--ip", "0.0.0.0", "--db-filename", "/data/temporal.db"]
+    ports: ["127.0.0.1:7233:7233", "127.0.0.1:8233:8233"]
+    volumes: ["temporaldata:/data"]
+
+  # Temporal with Postgres persistence (phase 2), in place of the dev server above.
+  # Profile: temporal-pg. Listens on 7234 so both can run side by side; point the platform at
+  # it with SCA_TEMPORAL_ADDRESS=localhost:7234.
+  temporal-pg:
+    profiles: ["temporal-pg"]
+    image: temporalio/auto-setup:latest
+    container_name: sca-temporal-pg
+    environment:
+      DB: postgres12
+      DB_PORT: "5432"
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: sca
+      POSTGRES_PWD: sca
+      DBNAME: temporal
+      VISIBILITY_DBNAME: temporal_visibility
+    ports: ["127.0.0.1:7234:7233"]
+    mem_limit: 700m
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # Model gateway (phase 2). Start with: docker compose --profile gateway up -d
+  litellm:
+    profiles: ["gateway"]
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: sca-litellm
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    env_file: ["../.env"]  # provider keys and LITELLM_MASTER_KEY; never committed
+    environment:
+      DATABASE_URL: postgresql://sca:sca@postgres:5432/litellm
+    ports: ["127.0.0.1:4000:4000"]
+    volumes: ["./litellm/config.yaml:/app/config.yaml:ro"]
+    mem_limit: 900m
+    depends_on:
+      postgres: {condition: service_healthy}
+
+  # S3-compatible object store (phase 2). Profile: s3
+  seaweedfs:
+    profiles: ["s3"]
+    image: chrislusf/seaweedfs:latest
+    container_name: sca-seaweedfs
+    command: ["server", "-s3", "-dir=/data", "-volume.max=20", "-master.volumeSizeLimitMB=256"]
+    ports: ["127.0.0.1:8333:8333"]
+    volumes: ["s3data:/data"]
+    mem_limit: 400m
+
+  # OIDC provider (phase 2). Profile: oidc
+  dex:
+    profiles: ["oidc"]
+    image: ghcr.io/dexidp/dex:latest
+    container_name: sca-dex
+    command: ["dex", "serve", "/etc/dex/config.yaml"]
+    ports: ["127.0.0.1:5556:5556"]
+    volumes: ["./dex/config.yaml:/etc/dex/config.yaml:ro"]
+    mem_limit: 200m
+
+volumes:
+  pgdata:
+  temporaldata:
+  s3data:

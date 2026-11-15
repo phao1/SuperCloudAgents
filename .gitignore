@@ -229,3 +229,6 @@ node_modules/
 .vscode/
 .idea/
 .DS_Store
+
+# SuperCloudAgents local state
+.data/
