@@ -7,12 +7,25 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="SCA_", env_file=".env", extra="ignore")
+
+    memory_max_items: int = Field(default=30, ge=0, le=1000)
+    memory_max_chars: int = Field(default=3000, ge=0, le=100000)
+    memory_model: str = "deepseek-flash"
+    memory_embedding_model: str | None = None
+    memory_retrieval_top_k: int | None = Field(default=None, ge=0, le=1000)
+    memory_min_per_category: int = Field(default=3, ge=0, le=1000)
+
+    @model_validator(mode="after")
+    def memory_defaults(self) -> Settings:
+        if self.memory_retrieval_top_k is None:
+            self.memory_retrieval_top_k = self.memory_max_items
+        return self
 
     database_url: str = "postgresql+asyncpg://sca:sca@localhost:5432/sca"
     temporal_address: str = "localhost:7233"

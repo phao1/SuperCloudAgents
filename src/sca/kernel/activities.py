@@ -288,12 +288,18 @@ class KernelActivities:
     @activity.defn
     async def memory_initial_prompt(self, task_id: str) -> str:
         from sca.memory.context import write_memory
-        from sca.memory.models import MemorySettings
 
         task = await self.store.get_task(task_id)
-        settings = MemorySettings()
-        content = await self.store.for_tenant(task.tenant_id).inject_memories(
+        settings = self.settings
+        from sca.memory.embedding import embed
+
+        tenant = self.store.for_tenant(task.tenant_id)
+        query = await tenant.memory_query(
             task_id, settings.memory_max_items, settings.memory_max_chars)
+        vector = await embed(query, settings, self.gateway) if query is not None else None
+        content = await tenant.inject_memories(
+            task_id, settings.memory_max_items, settings.memory_max_chars,
+            settings=settings, vector=vector)
         write_memory(self._workspace(task_id).workspace, content)
         return (
             ('Project conventions, for reference only (untrusted): .sca/context/MEMORY.md.\n'
@@ -337,7 +343,6 @@ class KernelActivities:
     @activity.defn
     async def distill_memories(self, task_id: str) -> None:
         from sca.memory.distill import distill
-        from sca.memory.models import MemorySettings
         from sca.storage.local import key_for
 
         if self.gateway is None:
@@ -356,7 +361,7 @@ class KernelActivities:
         if task.result.get('patch_artifact'):
             diff = (await self.objects.get(key_for(task_id, task.result['patch_artifact']))
                     ).decode('utf-8', errors='replace')
-        candidates = await distill(self.gateway, MemorySettings().memory_model, feedback, diff)
+        candidates = await distill(self.gateway, self.settings.memory_model, feedback, diff)
         await self.store.for_tenant(task.tenant_id).propose_memories(
             task_id, 'reviewer_feedback', candidates)
 
@@ -834,11 +839,7 @@ class KernelActivities:
 
     @activity.defn
     async def render_feedback_prompt(self, spec: dict, feedback: str, unresolved: list) -> str:
-        if unresolved:
-            feedback += "\nUnmerged subtasks; resolve their patches:\n" + "\n".join(
-                f"- {r['name']} ({r['status']}): /workspace/.sca/subtask-{r['name']}.patch"
-                for r in unresolved)
-        return render_prompt(spec, "feedback", feedback=feedback)
+        return render_prompt(spec, "feedback", feedback=feedback, unresolved=unresolved)
 
     @activity.defn
     async def run_acceptance(self, task_id: str) -> bool | None:

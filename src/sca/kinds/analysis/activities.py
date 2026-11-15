@@ -27,7 +27,11 @@ from sca.workspace.git import GitWorkspace
 
 class AnalysisActivities(KernelActivities):
     async def _spec(self, task_id: str) -> AnalysisSpec:
-        return AnalysisSpec.model_validate((await self.store.get_task(task_id)).spec)
+        task = await self.store.get_task(task_id)
+        return AnalysisSpec.model_validate({
+            **task.spec,
+            "prompt_version": task.spec.get("prompt_version") or task.result.get("prompt_version"),
+        })
 
     def all(self) -> list:
         return [self.prepare, self.checkpoint, self.verify, self.publish]

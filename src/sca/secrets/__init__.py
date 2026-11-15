@@ -16,6 +16,15 @@ from sca.core.interfaces import SecretProvider
 from sca.core.models import RepoCredential
 
 
+def github_app_jwt(data: dict) -> str:
+    now = int(datetime.now(UTC).timestamp())
+    return jwt.encode(
+        {"iat": now - 60, "exp": now + 540, "iss": str(data["app_id"])},
+        data["private_key"],
+        algorithm="RS256",
+    )
+
+
 class HostGitCredentials:
     async def repo_credential(self, tenant_id: str, repo_url: str) -> RepoCredential | None:
         return None
@@ -70,12 +79,7 @@ class OpenBaoSecretProvider:
         return None
 
     async def _installation(self, data: dict) -> RepoCredential:
-        now = int(datetime.now(UTC).timestamp())
-        signed = jwt.encode(
-            {"iat": now - 60, "exp": now + 540, "iss": str(data["app_id"])},
-            data["private_key"],
-            algorithm="RS256",
-        )
+        signed = github_app_jwt(data)
 
         async def exchange(http: httpx.AsyncClient) -> RepoCredential:
             response = await http.post(

@@ -38,6 +38,23 @@ class LiteLLMGateway:
             raise GatewayError(f"model gateway {path} failed: {r.status_code} {r.text[:300]}")
         return r.json()
 
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]:
+        if not texts:
+            return []
+        data = await self._post("/v1/embeddings", {"model": model, "input": texts})
+        try:
+            rows = sorted(data["data"], key=lambda row: row["index"])
+            if [row["index"] for row in rows] != list(range(len(texts))):
+                raise ValueError("invalid indices")
+            vectors = [[float(x) for x in row["embedding"]] for row in rows]
+            if (not vectors or not vectors[0] or
+                    any(len(v) != len(vectors[0]) or
+                        not all(math.isfinite(x) for x in v) for v in vectors)):
+                raise ValueError("invalid vectors")
+            return vectors
+        except (KeyError, TypeError, ValueError) as exc:
+            raise GatewayError("invalid embedding response") from exc
+
     async def complete(self, messages: list[dict[str, str]], model: str) -> str:
         data = await self._post('/v1/chat/completions', {
             'model': model, 'messages': messages, 'max_tokens': 1024, 'temperature': 0,

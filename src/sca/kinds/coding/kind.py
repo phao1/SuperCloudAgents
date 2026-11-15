@@ -5,6 +5,7 @@ from dataclasses import asdict
 from temporalio import activity
 
 from sca.kernel.kind import KindDeps, KindHooks
+from sca.kernel.prompts import render_prompt
 from sca.kinds.coding import prompts
 from sca.kinds.coding.spec import CodingSpec
 
@@ -62,29 +63,30 @@ def checks(spec: dict) -> list[str]:
 
 @activity.defn(name="coding.initial_prompt")
 async def initial_prompt(spec: dict) -> str:
-    return prompts.initial_prompt(spec["instruction"], checks(spec))
+    return prompts.initial_prompt(spec["instruction"], checks(spec), spec.get("prompt_version"))
 
 
 @activity.defn(name="coding.fix_prompt")
 async def fix_prompt(spec: dict, exit_code: int, output_tail: str) -> str:
-    return prompts.fix_prompt(" && ".join(checks(spec)), exit_code, output_tail)
+    return prompts.fix_prompt(" && ".join(checks(spec)), exit_code, output_tail, spec.get("prompt_version"))
 
 
 @activity.defn(name="coding.feedback_prompt")
-async def feedback_prompt(feedback: str, unresolved: list[dict]) -> str:
-    details = "\n".join(
-        f"- {r['name']} ({r['status']}): /workspace/.sca/subtask-{r['name']}.patch"
-        for r in unresolved
-    )
-    if details:
-        feedback += "\nUnmerged subtasks; resolve their patches:\n" + details
-    return prompts.feedback_prompt(feedback)
+async def feedback_prompt(feedback: str, unresolved: list[dict], prompt_version: str | None = None) -> str:
+    return render_prompt({"prompt_version": prompt_version}, "feedback",
+                         feedback=feedback, unresolved=unresolved)
 
 
 @activity.defn(name="coding.ci_fix_prompt")
-async def ci_fix_prompt(summary: str, url: str | None) -> str:
-    return prompts.ci_fix_prompt(summary, url)
+async def ci_fix_prompt(summary: str, url: str | None, prompt_version: str | None = None) -> str:
+    return prompts.ci_fix_prompt(summary, url, prompt_version)
+
+
+@activity.defn(name="coding.subtask_prompt")
+async def subtask_prompt(spec: dict, subtask: dict) -> str:
+    instruction = prompts.subtask_prompt(spec, subtask)
+    return prompts.initial_prompt(instruction, checks(spec), spec.get("prompt_version"))
 
 
 def prompt_activities() -> list:
-    return [initial_prompt, fix_prompt, feedback_prompt, ci_fix_prompt]
+    return [initial_prompt, fix_prompt, feedback_prompt, ci_fix_prompt, subtask_prompt]

@@ -9,20 +9,20 @@
 | --- | --- | --- |
 | 一期：MVP | 完成 | [`design.md`](design.md) |
 | 二期：9 个组件 | 完成，单机部署下各自的目标有测试证明 | [`design-phase2.md`](design-phase2.md)，每节末尾的「结果」 |
-| 二期收尾：B1–B9 | 完成。只差 B3 的 GitHub 路径（令牌缺 `workflow` 权限）；每项的验证结果在设计各节末尾 | [`design-phase2b.md`](design-phase2b.md) |
+| 二期收尾：B1–B9 | 完成，包括 B3 的 GitHub 路径和 Alertmanager；每项的验证结果在设计各节末尾 | [`design-phase2b.md`](design-phase2b.md) |
 | 三期：C1–C4 | 完成，验证结果在设计各节末尾 | [`design-phase3.md`](design-phase3.md) |
 
-最近一次全量回归（2026-11-15）：
+最近一次全量回归（2026-11-16）：
 
 | 部分 | 结果 |
 | --- | --- |
-| 单元 + 集成（不含 K8s、真实模型） | 360 通过 |
+| 单元 + 集成（不含 K8s、真实模型） | 431 通过 |
 | 端到端，挂载模式 / sync 模式 | 34 / 34 通过 |
-| 可选服务（S3、OIDC、Postgres 版 Temporal、Gitea + OpenBao、观测后端） | 全部通过；GitHub Runner 那条因令牌缺 `workflow` 权限跳过 |
+| 可选服务（S3、OIDC、Postgres 版 Temporal、Gitea + OpenBao、GitHub Runner、观测后端 + Alertmanager） | 全部通过；GitHub App 那条等创建真实的 App 后再跑 |
 | Kubernetes（两节点 kind + Calico） | 48 通过 |
 | 真实模型（Codex、LiteLLM 网关、两个模型的评测对比、记忆提炼） | 全部通过 |
 
-二期收尾和三期的代码**尚未提交**（最后一次提交是二期完成时的 `c47db9c`）。
+开发环境的 Postgres 已换成 `pgvector/pgvector:pg16`。从旧的 `postgres:16-alpine` 数据卷切换时，排序规则的实现从 musl 变成 glibc，需要对每个库执行一次 `REINDEX DATABASE`。
 
 ## 2 做的顺序
 

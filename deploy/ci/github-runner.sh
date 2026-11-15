@@ -10,7 +10,8 @@ cd "$(dirname "$0")/../.."
 dir=.data/github-runner/${repo//\//_}
 
 if [ "$action" = stop ]; then
-  [ -f "$dir/pid" ] && kill "$(cat "$dir/pid")" 2>/dev/null || true
+  # run.sh leads its own process group (setsid below); stop the listener it spawned too.
+  [ -f "$dir/pid" ] && kill -- "-$(cat "$dir/pid")" 2>/dev/null || true
   rm -f "$dir/pid"
   exit 0
 fi
@@ -30,5 +31,6 @@ fi
 if [ -f "$dir/pid" ] && kill -0 "$(cat "$dir/pid")" 2>/dev/null; then
   echo "runner already running"; exit 0
 fi
-(cd "$dir" && nohup ./run.sh > runner.log 2>&1 & echo $! > pid)
+# Detach fully (own session, no inherited stdin) so callers piping our output do not hang.
+(cd "$dir" && { setsid nohup ./run.sh > runner.log 2>&1 < /dev/null & echo $! > pid; })
 echo "runner started for $repo"

@@ -1,10 +1,9 @@
 import httpx
 import pytest
 
-from sca.config import get_settings
+from sca.config import Settings, get_settings
 from sca.gateway.litellm import LiteLLMGateway
 from sca.memory.distill import distill
-from sca.memory.models import MemorySettings
 
 pytestmark = pytest.mark.gateway
 
@@ -28,7 +27,7 @@ async def test_real_distillation_samples():
             ("Tests must run serially here using --runInBand.", "-jest\n+jest --runInBand"),
             ("Rename helper foo to bar in this patch.", "-def foo():\n+def bar():"),
         ]:
-            proposals = await distill(gateway, MemorySettings().memory_model, feedback, diff)
+            proposals = await distill(gateway, Settings().memory_model, feedback, diff)
             assert len(proposals) <= 3
             print(proposals)
     finally:

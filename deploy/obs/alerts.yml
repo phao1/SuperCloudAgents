@@ -4,7 +4,7 @@ groups:
       - alert: ScaTaskStuck
         expr: sca_oldest_active_task_age_seconds > 2 * 3600
         for: 5m
-        labels: {severity: warning}
+        labels: {severity: critical}
         annotations:
           summary: A task has been provisioning or running for more than two hours.
       - alert: ScaTaskFailureRateHigh
@@ -21,7 +21,7 @@ groups:
           sum(rate(sca_http_requests_total{status=~"5.."}[5m]))
             / clamp_min(sum(rate(sca_http_requests_total[5m])), 1e-9) > 0.02
         for: 5m
-        labels: {severity: critical}
+        labels: {severity: warning}
         annotations:
           summary: More than 2% of API requests fail with a server error.
       - alert: ScaActivityRetryStorm
@@ -29,7 +29,7 @@ groups:
         for: 10m
         labels: {severity: warning}
         annotations:
-          summary: Activities are failing and being retried unusually often.
+          summary: Activity execution attempts are failing unusually often (including final failures).
       - alert: ScaWorkerDown
         expr: absent(up{job="sca-worker"} == 1)
         for: 2m

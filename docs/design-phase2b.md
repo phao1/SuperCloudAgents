@@ -198,6 +198,8 @@ Codex 的二进制目录目前是只读挂载进沙箱的。`sync` 模式下改�
 
 ### B1.12 结果
 
+- **Worker 伸缩示例**：`deploy/k8s/worker/` 提供 sync + S3、回环 HTTP 就绪探针、资源限制、PDB 和保守 CPU HPA，另附可选 KEDA Temporal 积压示例；YAML 解析、客户端 kustomize 渲染和 kind 上的服务端预检（`kubectl apply --dry-run=server`）通过；未实际部署，未验证伸缩。限制见 `deploy/k8s/worker/README.md`。
+
 - **沙箱接口**：`upload`、`download` 两个方法在 Docker 和 Kubernetes 驱动上都通过契约测试。测试覆盖二进制文件、符号链接、可执行位、空目录、100 MiB 大文件（流式）和路径不存在。
 - **不可信的归档**：解包统一走 `sca/workspace/tarsafe.py`，用标准库 `tarfile` 的 `data` 过滤器，另外显式拒绝绝对路径和 `..`。单元测试覆盖越界路径、越界链接、设备文件。
 - **两种模式的全量回归**：`tests/e2e` 中不依赖模型的 17 个测试，在 `mount` 和 `sync` 两种模式下各跑一遍，全部通过。
@@ -339,10 +341,13 @@ GitHub App、Checks API、PR 评论、状态徽章。它们是「发布结果」
   - 两条 `ci.completed` 事件的链接都指向 Gitea 上真实的运行记录，并且各自对应推送的那个提交。
 - **一次意外的验证**：第一次跑时 Runner 没在运行，平台等到超时后按失败处理、让 Agent 修复；Runner 恢复后，第二轮由真实流水线回报通过。超时处理在真实环境里也是对的。之后给 Gitea 和 Runner 加上了自动重启。
 - 平台的每个提交（每轮检查点、子任务合并）都带上 `Sca-Task-Id:` 尾注。`report.sh` 只依赖 `git`、`curl`、`awk`。
-- **GitHub 路径没有跑通**：
-  - 私有测试仓库 `phao1/sca-ci-fixture` 已建好，Runner 注册脚本 `deploy/ci/github-runner.sh` 也写好了，它会拒绝公开仓库。
-  - 卡在当前 `gh` 令牌没有 `workflow` 权限，GitHub 拒绝推送流水线文件。用户执行 `gh auth refresh -h github.com -s workflow` 后即可运行；没有这个权限时测试会跳过并说明原因。
-- **没有做到的**：测试里的回调令牌仍是普通静态令牌，没有换成 B5 的 `ci:report` 受限令牌。
+- **GitHub 路径**（`test_github_actions_drive_the_task`）通过：
+  - 私有测试仓库 `phao1/sca-ci-fixture`，自托管 Runner 由 `deploy/ci/github-runner.sh` 注册和启动，脚本拒绝公开仓库。
+  - 与 Gitea 相同的两轮流程：第一轮 GitHub Actions 因缺 CHANGELOG 失败并回调平台，Agent 修复后第二轮通过；`ci.completed` 的链接指向 GitHub 上真实的运行记录。
+  - 第一次跑时 Runner 主机的 Python 没有 pytest，流水线失败。示例流水线 `deploy/ci/github-actions.yml` 因此改为每次在 `$RUNNER_TEMP` 里建一个临时虚拟环境安装 pytest，不依赖 Runner 主机的环境。
+  - 推送流水线文件需要 `gh` 令牌带 `workflow` 权限（`gh auth refresh -h github.com -s workflow`）；没有时测试跳过并说明原因。
+- **回调令牌**：真实 CI 测试改为通过 API 创建租户及仓库受限的 `ci:report` 令牌，断言不能读取任务；无 Docker 的集成测试验证回调成功及越权拒绝。Gitea 和 GitHub 两条真实流水线都用这种令牌跑通。
+  - 复验时发现：启用 OpenBao 后，平台按设计不再借用主机的 `gh` 身份，GitHub 测试因此克隆失败。之前它能通过，只是因为当时 OpenBao 没开。测试现在会像 Gitea 那条一样，先把仓库凭证写进 OpenBao，结束后删除。
 
 ---
 
@@ -426,7 +431,7 @@ compose profile `openbao`（开发模式）和 `gitea`。`tests/e2e/test_e2e_sec
 - **真实 CI 也改用 OpenBao**：OpenBao 在运行时，Gitea 真实 CI 测试的克隆和推送凭证都来自 OpenBao，测试通过。
 - **凭证交给 Git 的方式**：只通过 `GIT_ASKPASS` 和那一个子进程的环境变量，同时用 `-c credential.helper=` 关掉其他凭证助手。错误信息里的凭证会被替换掉。
 - **集成时修正的问题**：测试收尾时吊销 Gitea 令牌，用的是令牌认证；Gitea 只接受用户名加密码。
-- **没有做到的**：`github_app` 类型只有单元测试（JWT 构造、换令牌请求、缓存），没有真实的 GitHub App。
+- **GitHub App 接入与待验证**：新增 `scripts/github_app_setup.py`，依次运行 `manifest --owner <用户> --repo <所有者/私有仓库>`、打开生成的 HTML 创建私有 App、从跳转地址复制 code 后运行 `convert --code <code>`、按输出链接安装到目标仓库，再运行 `status`、`store`（默认租户 default，可用 `--tenant` 指定）。私钥和安装信息保存在已忽略的 `.data/github-app/`，目录 700、文件 600；JWT 签名复用凭证提供器。新增 `test_github_app_real`：设置 `SCA_E2E_GITHUB_APP_REPO=所有者/私有仓库` 后，经 OpenBao 获取安装令牌，验证 HTTPS 克隆、推送分支、令牌不进入事件与捕获日志，并清理分支。当前没有真实 App，真实端到端未验证；缺少本地凭证或环境变量时明确跳过。
 
 ---
 
@@ -632,8 +637,11 @@ API 的指标已有。补上 Worker 一侧：
   - 开发库缺少 `sca_task_counts()`：执行迁移 0003 时这个函数还没加进去，之后才补进迁移文件，开发库里手工补建了。这只影响本机开发库，没有发布过的部署。
 - **与设计的出入**：孤儿沙箱的清理只认平台自己生成的沙箱名（父任务和子任务），并在删除前核对标签。`list` 只返回标识，拿不到任意标签的值。
 - **没有做到的**：
-  - 没有部署 Alertmanager，告警只到「触发」为止，不会通知到人。
-  - 仪表盘只验证了能加载，面板的查询没有逐个人工核对。
+  - 已补 Alertmanager v0.27.0：Prometheus 转发到本机 9093，按严重级别分组通知 webhook，Worker 离线时抑制任务卡住和重试风暴；邮件和 Slack 配置有注释示例。新增 live 测试检查 Prometheus 的 Alertmanager 目标，并通过 v2 API 注入告警验证 webhook 内容、恢复 URL 文件；本环境服务不可达，实投递待集成验证。
+  - 启动前在仓库根目录执行 `mkdir -p .data/obs && chmod 700 .data/obs`，用 `read -rs -p 'Webhook URL: ' webhook_url; printf '%s\n' "$webhook_url" > .data/obs/alert-webhook-url; unset webhook_url; chmod 644 .data/obs/alert-webhook-url` 写入地址（文件需供容器用户读取，父目录仅本用户可访问，`.data/` 已忽略）；再执行 `docker compose -f deploy/docker-compose.yml --profile obs up -d prometheus alertmanager`。
+  - 已逐一核对 10 个面板和 5 条告警的指标、标签与单位；Temporal SDK 默认不加 `_total`，原指标名正确，修正 API 混合单位和活动失败的重试描述，新增离线查询回归测试。
+  - 用持续运行的 API 和 Worker 跑了几个真实任务，在 Prometheus 上执行全部查询，各面板都有数据（花费面板因为假 Agent 不产生花费，所以是空的）。
+  - 发现并修正了一个真实问题：带标签的计数器在第一次计数时才创建，而 `rate()` 会丢掉一个序列的第一个样本。例如 3 次验证失败都发生在第一次抓取之前时，失败被算成 0 次，「验证通过率」显示 100%。Worker 现在启动时把各场景的计数器预先导出为 0（`BusinessMetrics.prime`），修正后同样的场景显示约 39%。API 一侧按路由和状态码计数的请求数无法预先列举，第一次 5xx 仍可能漏计，对「API 错误」告警影响很小。
 
 ---
 

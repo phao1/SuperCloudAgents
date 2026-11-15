@@ -1,19 +1,11 @@
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from sca.workspace.cache import _normalise
 
 Category = Literal["convention", "pitfall", "command", "preference"]
 Status = Literal["proposed", "active", "rejected", "retired"]
-
-
-class MemorySettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SCA_", env_file=".env", extra="ignore")
-    memory_max_items: int = Field(default=30, ge=0, le=1000)
-    memory_max_chars: int = Field(default=3000, ge=0, le=100000)
-    memory_model: str = "deepseek-flash"
 
 
 def normalise_scope(value: str) -> str:

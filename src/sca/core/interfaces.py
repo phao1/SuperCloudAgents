@@ -149,6 +149,8 @@ class ModelGateway(Protocol):
 
     sandbox_url: str
 
+    async def embed(self, texts: list[str], model: str) -> list[list[float]]: ...
+
     async def complete(self, messages: list[dict[str, str]], model: str) -> str: ...
 
     async def issue_key(

@@ -102,7 +102,8 @@ def test_no_split_and_spec_defaults():
         "unreadable",
     ],
 )
-async def test_planning_activity_records_result_and_always_destroys(tmp_path, monkeypatch, outcome):
+@pytest.mark.parametrize("version", ["v1", "v-test"])
+async def test_planning_activity_records_result_and_always_destroys(tmp_path, monkeypatch, outcome, version):
     import base64
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
@@ -110,6 +111,17 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     from sca.core.models import EventType, ExecExit
     from sca.kinds.coding.planning import PlanningActivities
     from sca.kinds.coding.subtask_inputs import PlanningInput
+
+    if version == "v-test":
+        import shutil
+
+        from sca.kernel import prompts
+
+        root = tmp_path / "coding/prompts/v-test"
+        shutil.copytree(prompts.PROMPTS_ROOT / "coding/prompts/v1", root)
+        for file in root.glob("*.txt"):
+            file.write_text("VERSION TEST\n" + file.read_text())
+        monkeypatch.setattr(prompts, "PROMPTS_ROOT", tmp_path)
 
     data = plan_data(["src/**"] if outcome == "overlap" else None)
     if outcome == "no_split":
@@ -124,7 +136,8 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
         mirror=tmp_path / "mirror.git", _git=AsyncMock(return_value="src/one/a.py\0")
     )
     spec = CodingSpec(
-        repo_url="repo", instruction="task instruction", plan="auto", plan_review=True
+        repo_url="repo", instruction="task instruction", plan="auto", plan_review=True,
+        prompt_version=version
     )
     acts = SimpleNamespace(
         store=store,
@@ -153,6 +166,7 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     )
     acts.sandbox.destroy.assert_awaited_once_with("planning-sandbox")
     prompt = child.run_agent_turn.call_args.args[0].prompt
+    assert prompt.startswith("VERSION TEST\n") == (version == "v-test")
     assert "task instruction" in prompt and "review feedback" in prompt
     events = [call.args[1] for call in store.append_event.call_args_list]
     assert events[0] == EventType.PLAN_STARTED

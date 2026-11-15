@@ -115,7 +115,7 @@ class PlanningActivities:
                 TurnInput(
                     inp.task_id,
                     0,
-                    planning_prompt(spec.instruction, inp.feedback),
+                    planning_prompt(spec.instruction, inp.feedback, spec.prompt_version),
                 )
             )
             exit_event, output = await child._run(

@@ -1,0 +1,40 @@
+route:
+  receiver: webhook
+  group_by: [alertname]
+  group_wait: 10s
+  group_interval: 1m
+  repeat_interval: 4h
+  routes:
+    - matchers: ['severity="critical"']
+      receiver: webhook
+      repeat_interval: 1h
+    - matchers: ['severity="warning"']
+      receiver: webhook
+
+inhibit_rules:
+  - source_matchers: ['alertname="ScaWorkerDown"', 'severity="critical"']
+    target_matchers:
+      - 'alertname=~"ScaTaskStuck|ScaActivityRetryStorm"'
+      - 'severity=~"critical|warning"'
+
+receivers:
+  - name: webhook
+    webhook_configs:
+      - url_file: /etc/alertmanager/alert-webhook-url
+        send_resolved: true
+
+# Optional receivers: configure routing above before enabling these examples.
+# Keep credentials in separately mounted files, never in this configuration.
+#  - name: email
+#    email_configs:
+#      - to: oncall@example.org
+#        from: alerts@example.org
+#        smarthost: smtp.example.org:587
+#        auth_username: alerts@example.org
+#        auth_password_file: /etc/alertmanager/smtp-password
+#        require_tls: true
+#  - name: slack
+#    slack_configs:
+#      - api_url_file: /etc/alertmanager/slack-webhook-url
+#        channel: '#alerts'
+#        send_resolved: true

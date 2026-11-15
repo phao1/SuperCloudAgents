@@ -9,6 +9,7 @@ from sqlalchemy import RowMapping, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from sca.config import Settings
 from sca.core.errors import ConflictError, NotFoundError, ScaError
 from sca.core.interfaces import ObjectStore
 from sca.core.models import TERMINAL_STATES, Artifact, Event, Task, TaskState, can_transition
@@ -527,7 +528,46 @@ class Store:
             if not result.rowcount:
                 raise NotFoundError("Token not found")
 
-    async def list_memories(self, scope: str | None = None, status: str | None = None) -> list[dict]:
+    async def _has_memory_vectors(self, session: AsyncSession) -> bool:
+        return bool(await session.scalar(text("""SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = current_schema() AND table_name = 'memories'
+            AND column_name = 'embedding')""")))
+
+    async def _store_memory_vector(self, session: AsyncSession, row: dict,
+                            vector: list[float] | None) -> bool:
+        from sca.memory.embedding import literal
+
+        if not await self._has_memory_vectors(session):
+            return False
+        if vector is None:
+            return False
+        import logging
+
+        try:
+            async with session.begin_nested():
+                await session.execute(text("""UPDATE memories SET embedding = CAST(:v AS vector)
+                    WHERE id = :id AND tenant_id = :tenant AND text = :content
+                    AND status = 'active'"""),
+                    {'v': literal(vector), 'id': row['id'], 'tenant': self.tenant_id,
+                     'content': row['text']})
+            return True
+        except Exception:  # noqa: BLE001 - optional embeddings must never block approval
+            logging.getLogger(__name__).warning("Memory embedding storage unavailable")
+            return False
+
+    async def reindex_memories(self, row: dict, vector: list[float] | None) -> int:
+        async with self._transaction() as session:
+            if not await self._has_memory_vectors(session):
+                return 0
+            missing = await session.scalar(text("""SELECT embedding IS NULL FROM memories
+                WHERE id = :id AND tenant_id = :tenant AND text = :content
+                AND status = 'active'"""),
+                {'id': row['id'], 'tenant': self.tenant_id, 'content': row['text']})
+            return int(bool(missing and await self._store_memory_vector(session, row, vector)))
+
+    async def list_memories(self, scope: str | None = None, status: str | None = None,
+                            *, missing_vectors: bool = False) -> list[dict]:
         from sca.db.schema import memories
         from sca.memory.models import normalise_scope
 
@@ -541,6 +581,10 @@ class Store:
         stmt = stmt.order_by(memories.c.last_used_at.desc().nullslast(),
                              memories.c.created_at.desc(), memories.c.id)
         async with self._transaction() as session:
+            if missing_vectors:
+                if not await self._has_memory_vectors(session):
+                    return []
+                stmt = stmt.where(text('embedding IS NULL'))
             return [dict(row) for row in (await session.execute(stmt)).mappings()]
 
     async def _memory_audit(self, session: AsyncSession, memory_id: UUID,
@@ -552,7 +596,8 @@ class Store:
         ))
 
     async def _create_memory(self, session: AsyncSession, body: dict, actor: str,
-                             source: str, source_task_id: UUID | None = None) -> dict:
+                             source: str, source_task_id: UUID | None = None,
+                             vector: list[float] | None = None) -> dict:
         from sca.db.schema import memories
         from sca.memory.models import MemoryInput
 
@@ -568,13 +613,16 @@ class Store:
             approved_at=now if source == 'manual' else None,
         ).returning(memories))).mappings().one()
         await self._memory_audit(session, row['id'], actor, 'create')
+        if source == 'manual':
+            await self._store_memory_vector(session, dict(row), vector)
         return dict(row)
 
-    async def create_memory(self, body: dict, actor: str) -> dict:
+    async def create_memory(self, body: dict, actor: str,
+                            vector: list[float] | None = None) -> dict:
         if self.tenant_id is None:
             raise ValueError('memories require a tenant')
         async with self._transaction() as session:
-            return await self._create_memory(session, body, actor, 'manual')
+            return await self._create_memory(session, body, actor, 'manual', vector=vector)
 
     async def propose_memories(self, task_id: str, source: str, candidates: list[dict],
                                batch_key: str | None = None) -> list:
@@ -610,7 +658,9 @@ class Store:
             return ids
 
     async def change_memory(self, memory_id: UUID, actor: str, changes: dict,
-                            source_task_id: UUID | None = None) -> dict:
+                            source_task_id: UUID | None = None,
+                            vector: list[float] | None = None,
+                            vector_text: str | None = None) -> dict:
         from sca.db.schema import memories
         from sca.memory.models import MemoryInput
 
@@ -639,6 +689,13 @@ class Store:
             ).values(**values).returning(memories))).mappings().one()
             await self._memory_audit(session, memory_id, actor,
                                      action if status != row['status'] else 'update')
+            if await self._has_memory_vectors(session) and values['text'] != row['text']:
+                await session.execute(text("""UPDATE memories SET embedding = NULL
+                    WHERE id = :id AND tenant_id = :tenant"""),
+                    {'id': memory_id, 'tenant': self.tenant_id})
+            if (status == 'active' and (row['status'] != 'active' or values['text'] != row['text'])
+                    and (vector_text is None or vector_text == values['text'])):
+                await self._store_memory_vector(session, dict(changed), vector)
             return dict(changed)
 
     async def delete_memory(self, memory_id: UUID, actor: str) -> None:
@@ -654,7 +711,42 @@ class Store:
                 raise NotFoundError('Memory not found')
             await self._memory_audit(session, memory_id, actor, 'delete')
 
-    async def inject_memories(self, task_id: str, max_items: int, max_chars: int) -> str:
+    async def memory_query(self, task_id: str, max_items: int, max_chars: int) -> str | None:
+        from sca.db.schema import memories
+        from sca.memory.models import normalise_scope, render
+
+        async with self._transaction() as session:
+            task = await self._task(session, task_id)
+            if 'memory_context' in task['result']:
+                return None
+            scopes = ['tenant', 'kind:' + task['kind']]
+            if task['spec'].get('repo_url'):
+                scopes.append(normalise_scope('repo:' + task['spec']['repo_url']))
+            conditions = (
+                memories.c.tenant_id == self.tenant_id, memories.c.scope.in_(scopes),
+                memories.c.status == 'active',
+            )
+            count = await session.scalar(select(func.count()).select_from(memories).where(*conditions))
+            if count <= max_items:
+                rows = (await session.execute(select(memories).where(*conditions).order_by(
+                    memories.c.last_used_at.desc().nullslast(),
+                    memories.c.created_at.desc(), memories.c.id,
+                ))).mappings().all()
+                if len(render([dict(r) for r in rows], max_items, max_chars)[1]) == count:
+                    return None
+            if not await self._has_memory_vectors(session):
+                return None
+            present = await session.scalar(text("""SELECT EXISTS (SELECT 1 FROM memories
+                WHERE tenant_id = :tenant AND scope = ANY(:scopes) AND status = 'active'
+                AND embedding IS NOT NULL)"""),
+                {'tenant': self.tenant_id, 'scopes': scopes})
+            if not present:
+                return None
+            return task['spec'].get('instruction') or task['spec'].get('question', '')
+
+    async def inject_memories(self, task_id: str, max_items: int, max_chars: int, *,
+                              settings: Settings | None = None,
+                              vector: list[float] | None = None) -> str:
         from sca.db.schema import memories
         from sca.memory.models import normalise_scope, render
 
@@ -672,18 +764,49 @@ class Store:
                 memories.c.status == 'active',
             ).order_by(memories.c.last_used_at.desc().nullslast(),
                        memories.c.created_at.desc(), memories.c.id))).mappings().all()
-            content, ids = render([dict(row) for row in rows], max_items, max_chars)
+            from sca.config import get_settings
+            from sca.memory.embedding import literal
+
+            settings = settings or get_settings()
+            ordered = [dict(row) for row in rows]
+            _, all_ids = render(ordered, max_items, max_chars)
+            method = 'all' if len(all_ids) == len(rows) else 'recent'
+            if (method == 'recent' and vector is not None
+                    and await self._has_memory_vectors(session)):
+                hits = (await session.execute(text("""SELECT id FROM memories
+                    WHERE tenant_id = :tenant AND id = ANY(:ids)
+                    AND embedding IS NOT NULL AND vector_dims(embedding) = :dim
+                    ORDER BY embedding <=> CAST(:v AS vector), id"""),
+                    {'tenant': self.tenant_id, 'ids': [r['id'] for r in rows],
+                     'dim': len(vector), 'v': literal(vector)})).scalars().all()
+                if hits:
+                    by_id = {r['id']: r for r in ordered}
+                    ranked = [by_id[i] for i in hits]
+                    ranked += [r for r in ordered if r['id'] not in set(hits)]
+                    limit = min(max_items, settings.memory_retrieval_top_k)
+                    reserved = []
+                    for index in range(settings.memory_min_per_category):
+                        for category in ('command', 'pitfall'):
+                            candidates = [r for r in ranked if r['category'] == category]
+                            if index < len(candidates):
+                                reserved.append(candidates[index])
+                    reserved_ids = {r['id'] for r in reserved}
+                    ordered = (reserved + [r for r in ranked
+                                           if r['id'] not in reserved_ids])[:limit]
+                    method = 'vector'
+            content, ids = render(ordered, max_items, max_chars)
             if ids:
                 await session.execute(update(memories).where(
                     memories.c.tenant_id == self.tenant_id, memories.c.id.in_(ids),
                 ).values(uses=memories.c.uses + 1, last_used_at=datetime.now(UTC)))
             await self._event(session, task['id'], 'memory.injected',
-                              {'ids': [str(i) for i in ids]}, dedup_key='memory.injected')
+                              {'ids': [str(i) for i in ids], 'method': method}, dedup_key='memory.injected')
             await session.execute(update(tasks).where(tasks.c.id == task['id']).values(
                 result={**task['result'], 'memory_context': content}))
             return content
 
-    async def accept_memories(self, task_id: UUID, ids: list[UUID], actor: str) -> None:
+    async def accept_memories(self, task_id: UUID, ids: list[UUID], actor: str,
+                              vectors: dict[UUID, list[float] | None] | None = None) -> None:
         from sca.db.schema import memories
 
         if not ids:
@@ -710,6 +833,7 @@ class Store:
                 ).values(status='active', approved_by=actor,
                          approved_at=datetime.now(UTC), updated_at=datetime.now(UTC)))
                 await self._memory_audit(session, row['id'], actor, 'approve')
+                await self._store_memory_vector(session, dict(row), (vectors or {}).get(row['id']))
 
     async def create_eval_run(self, run: dict) -> None:
         from sca.db.schema import eval_runs

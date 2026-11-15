@@ -43,9 +43,9 @@ async def initial_prompt(spec: dict) -> str:
 
 @activity.defn(name="analysis.fix_prompt")
 async def fix_prompt(spec: dict, exit_code: int, output_tail: str) -> str:
-    return prompts.fix_prompt(exit_code, output_tail)
+    return prompts.fix_prompt(exit_code, output_tail, spec.get("prompt_version"))
 
 
 @activity.defn(name="analysis.feedback_prompt")
-async def feedback_prompt(feedback: str, unresolved: list[dict]) -> str:
-    return prompts.feedback_prompt(feedback)
+async def feedback_prompt(feedback: str, unresolved: list[dict], prompt_version: str | None = None) -> str:
+    return prompts.feedback_prompt(feedback, prompt_version)

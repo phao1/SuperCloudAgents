@@ -204,7 +204,7 @@ class CodingAfterVerify(TaskWorkflow):
         return {
             "passed": outcome.passed,
             "prompt": await workflow.execute_activity(
-                "coding.ci_fix_prompt", args=[outcome.summary or "", outcome.url], **_QUICK
+                "coding.ci_fix_prompt", args=[outcome.summary or "", outcome.url, spec.get("prompt_version")], **_QUICK
             ),
         }
 
@@ -229,12 +229,8 @@ class CodingSubtaskWorkflow:
             )
 
         prompt = await workflow.execute_activity(
-            "coding.initial_prompt",
-            {
-                **spec,
-                "instruction": f"Overall task context:\n{spec['instruction']}\n\n"
-                f"Your subtask ({name}):\n{subtask['instruction']}",
-            },
+            "coding.subtask_prompt",
+            args=[spec, subtask],
             **_QUICK,
         )
         session = None

@@ -150,5 +150,22 @@ class BusinessMetrics:
             "sca_sandbox_create_seconds", "Sandbox creation time", ["driver"], registry=registry
         )
 
+    def prime(self, kinds: list[str]) -> None:
+        """Export every counter series at zero before its first event.
+
+        rate() ignores a series' first sample, so a labelled counter created on its first
+        increment loses that increment. With only a few events (verification failures, say) a
+        ratio panel then reads 100%.
+        """
+        for kind in kinds:
+            self.cost.labels(kind)
+            self.turns.labels(kind)
+            for state in ("SUCCEEDED", "FAILED", "CANCELLED"):
+                self.duration.labels(kind, state)
+            for passed in ("true", "false"):
+                self.verifications.labels(kind, passed)
+            for direction in ("input", "output", "cached"):
+                self.tokens.labels(kind, direction)
+
 
 business_metrics = BusinessMetrics()

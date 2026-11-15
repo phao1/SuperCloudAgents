@@ -65,7 +65,10 @@ PATCH_ARTIFACT = "changes.patch"
 class CodingActivities(KernelActivities):
     async def _spec(self, task_id: str) -> CodingSpec:
         task = await self.store.get_task(task_id)
-        return CodingSpec.model_validate(task.spec)
+        return CodingSpec.model_validate({
+            **task.spec,
+            "prompt_version": task.spec.get("prompt_version") or task.result.get("prompt_version"),
+        })
 
     async def _repo_credential(self, tenant_id: str, repo_url: str) -> RepoCredential | None:
         credential = await self.secrets.repo_credential(tenant_id, repo_url)

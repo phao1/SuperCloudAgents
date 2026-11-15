@@ -1,0 +1,32 @@
+# Optional alternative, not included in kustomization.yaml. Requires KEDA >= 2.17.
+# Remove hpa.yaml from kustomization AND delete the existing CPU HPA before enabling:
+# two HPAs must never control the same Deployment.
+# Queue backlog is a better signal than CPU for workers waiting on remote agents.
+# https://keda.sh/docs/2.17/scalers/temporal/
+# apiVersion: keda.sh/v1alpha1
+# kind: ScaledObject
+# metadata:
+#   name: sca-worker
+# spec:
+#   scaleTargetRef:
+#     name: sca-worker
+#   minReplicaCount: 2
+#   maxReplicaCount: 6
+#   pollingInterval: 30
+#   advanced:
+#     horizontalPodAutoscalerConfig:
+#       behavior:
+#         scaleDown:
+#           stabilizationWindowSeconds: 600
+#           policies:
+#             - type: Pods
+#               value: 1
+#               periodSeconds: 120
+#   triggers:
+#     - type: temporal
+#       metadata:
+#         endpoint: temporal-frontend.temporal.svc.cluster.local:7233
+#         namespace: default
+#         taskQueue: sca-coding
+#         queueTypes: workflow,activity
+#         targetQueueSize: "5"

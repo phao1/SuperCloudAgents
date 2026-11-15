@@ -7,9 +7,9 @@ def initial_prompt(spec: dict) -> str:
     return render_prompt({**spec, '_kind': 'analysis'}, 'initial')
 
 
-def fix_prompt(exit_code: int, output: str) -> str:
-    return render_prompt({'_kind': 'analysis'}, 'fix', exit_code=exit_code, output=output)
+def fix_prompt(exit_code: int, output: str, prompt_version: str | None = None) -> str:
+    return render_prompt({'_kind': 'analysis', 'prompt_version': prompt_version}, 'fix', exit_code=exit_code, output=output)
 
 
-def feedback_prompt(feedback: str) -> str:
-    return render_prompt({'_kind': 'analysis'}, 'feedback', feedback=feedback)
+def feedback_prompt(feedback: str, prompt_version: str | None = None) -> str:
+    return render_prompt({'_kind': 'analysis', 'prompt_version': prompt_version}, 'feedback', feedback=feedback)

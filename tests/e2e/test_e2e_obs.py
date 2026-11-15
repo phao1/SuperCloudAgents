@@ -1,11 +1,14 @@
 """Live observability contract; requires compose obs, Docker, Postgres and Temporal."""
 
 import asyncio
+import json
 import os
 import socket
 import sys
 import time
 from contextlib import suppress
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from uuid import uuid4
 
 import httpx
@@ -169,3 +172,80 @@ async def test_observability(tmp_path, source_repo):
                 if proc.returncode is None:
                     proc.kill()
                     await proc.wait()
+
+
+async def test_alertmanager_webhook_delivery() -> None:
+    webhook_file = Path(__file__).parents[2] / ".data/obs/alert-webhook-url"
+    async with httpx.AsyncClient(timeout=10, trust_env=False) as query:
+        try:
+            for url in ("http://127.0.0.1:9090/-/ready", "http://127.0.0.1:9093/-/ready"):
+                (await query.get(url)).raise_for_status()
+        except httpx.HTTPError:
+            pytest.skip("Prometheus or Alertmanager unavailable (compose profile obs)")
+        if not webhook_file.is_file():
+            pytest.skip("Create .data/obs/alert-webhook-url before starting compose obs")
+
+        async def target_active() -> bool:
+            response = await query.get("http://127.0.0.1:9090/api/v1/alertmanagers")
+            response.raise_for_status()
+            return any(
+                target["url"] == "http://127.0.0.1:9093/api/v2/alerts"
+                for target in response.json()["data"]["activeAlertmanagers"]
+            )
+
+        await wait_until(target_active)
+        deliveries: asyncio.Queue[dict] = asyncio.Queue()
+
+        async def receive(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            try:
+                async with asyncio.timeout(10):
+                    headers = (await reader.readuntil(b"\r\n\r\n")).decode("ascii")
+                    length = next(
+                        int(line.split(":", 1)[1])
+                        for line in headers.split("\r\n")
+                        if line.lower().startswith("content-length:")
+                    )
+                    deliveries.put_nowait(json.loads(await reader.readexactly(length)))
+                    writer.write(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                    await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(receive, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        original = webhook_file.read_bytes()
+        labels = {"alertname": "ScaPipelineTest", "severity": "warning", "test_id": str(uuid4())}
+        now = datetime.now(UTC)
+        alert = {
+            "labels": labels,
+            "startsAt": now.isoformat(),
+            "endsAt": (now + timedelta(minutes=5)).isoformat(),
+        }
+        async with server:
+            try:
+                # Write in place: a bind-mounted file must retain its inode.
+                webhook_file.write_text(f"http://127.0.0.1:{port}/alerts\n")
+                (await query.post("http://127.0.0.1:9093/-/reload")).raise_for_status()
+                (
+                    await query.post("http://127.0.0.1:9093/api/v2/alerts", json=[alert])
+                ).raise_for_status()
+                async with asyncio.timeout(90):
+                    while True:
+                        payload = await deliveries.get()
+                        matching = [a for a in payload["alerts"] if a["labels"] == labels]
+                        if matching:
+                            assert payload["receiver"] == "webhook"
+                            assert matching[0]["status"] == "firing"
+                            break
+            finally:
+                try:
+                    alert["startsAt"] = (now - timedelta(minutes=2)).isoformat()
+                    alert["endsAt"] = (now - timedelta(minutes=1)).isoformat()
+                    response = await query.post("http://127.0.0.1:9093/api/v2/alerts", json=[alert])
+                    response.raise_for_status()
+                finally:
+                    webhook_file.write_bytes(original)
+                    (await query.post("http://127.0.0.1:9093/-/reload")).raise_for_status()

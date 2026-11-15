@@ -69,7 +69,7 @@ async def test_task_prompt_version_is_recorded(stack, source_repo, tmp_path, mon
     shutil.copytree(templates / 'v1', target / 'v2')
     initial = target / 'v2' / 'initial.txt'
     initial.write_text('C4 SECOND PROMPT VERSION\n' + initial.read_text())
-    monkeypatch.setattr(renderer, '__file__', str(root / 'kernel' / 'prompts.py'))
+    monkeypatch.setattr(renderer, 'PROMPTS_ROOT', root / 'kinds')
     prompts = []
     for version in ('v1', 'v2'):
         task_id = await stack.submit({

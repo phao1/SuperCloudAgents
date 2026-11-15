@@ -11,7 +11,9 @@ services:
     mem_limit: 200m
 
   postgres:
-    image: postgres:16-alpine
+    # pgvector build of Postgres 16 (memory retrieval, ADR-11); plain Postgres also works, the
+    # vector migration is skipped and retrieval falls back to recency.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: sca
       POSTGRES_PASSWORD: sca
@@ -132,6 +134,17 @@ services:
     volumes: ["./obs/prometheus.yml:/etc/prometheus/prometheus.yml:ro",
               "./obs/alerts.yml:/etc/prometheus/alerts.yml:ro"]
     mem_limit: 300m
+
+  alertmanager:
+    profiles: ["obs"]
+    image: prom/alertmanager:v0.27.0
+    container_name: sca-alertmanager
+    network_mode: host
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml",
+              "--web.listen-address=127.0.0.1:9093", "--cluster.listen-address="]
+    volumes: ["./obs/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro",
+              "../.data/obs/alert-webhook-url:/etc/alertmanager/alert-webhook-url:ro"]
+    mem_limit: 100m
 
   grafana:
     profiles: ["obs"]

@@ -1,0 +1,1 @@
+- $subtask_name ($status): /workspace/.sca/subtask-$subtask_name.patch

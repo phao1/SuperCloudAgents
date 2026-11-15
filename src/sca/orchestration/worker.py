@@ -184,6 +184,10 @@ async def main() -> None:
                 metrics=PrometheusConfig(bind_address=f"127.0.0.1:{settings.worker_metrics_port}")
             )
         )
+        from sca.kernel.kind import all as all_kinds
+        from sca.observability import business_metrics
+
+        business_metrics.prime([kind.name for kind in all_kinds()])
         start_http_server(settings.worker_metrics_port + 1, addr="127.0.0.1")
     client = await Client.connect(
         settings.temporal_address,

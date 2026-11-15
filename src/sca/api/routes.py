@@ -182,7 +182,16 @@ async def review(
     proposals = set(task.result.get("memory_proposals", []))
     if any(str(mid) not in proposals for mid in body.accept_memories):
         raise InvalidTaskError("Memory does not belong to this task's proposals")
-    await store.accept_memories(task_id, body.accept_memories, user.subject)
+    vectors = {}
+    if body.accept_memories:
+        from sca.memory.embedding import embed
+
+        # Embed before the store opens its transaction: a gateway call must not hold row locks.
+        wanted = set(body.accept_memories)
+        for row in await store.list_memories(None, "proposed"):
+            if row["id"] in wanted:
+                vectors[row["id"]] = await embed(row["text"])
+    await store.accept_memories(task_id, body.accept_memories, user.subject, vectors=vectors)
     await store.append_event(
         task_id, "review.submitted", {**body.model_dump(mode="json"), "actor": user.subject}
     )

@@ -5,6 +5,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, model_validator
 
 from sca.intents.base import MAX_SOURCES, IntentSource
+from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
 
 
 class CommonSpec(BaseModel):
@@ -22,6 +23,13 @@ class CommonSpec(BaseModel):
     def acceptance_pair(self) -> "CommonSpec":
         if bool(self.acceptance_files) != bool(self.acceptance_command):
             raise ValueError("acceptance_files and acceptance_command must be supplied together")
+        return self
+
+    @model_validator(mode="after")
+    def prompt_selection(self) -> "CommonSpec":
+        kind = "analysis" if "question" in type(self).model_fields else "coding"
+        self.prompt_version = self.prompt_version or EvaluationSettings().default_prompt_version
+        validate_prompt_version(kind, self.prompt_version)
         return self
 
     def model_dump(self, **kwargs) -> dict:

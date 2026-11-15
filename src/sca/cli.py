@@ -282,6 +282,13 @@ def memory_retire(memory_id: str) -> None:
     memory_status(memory_id, 'retired')
 
 
+@memory_app.command('reindex')
+def memory_reindex(scope: str | None = None) -> None:
+    with client() as http:
+        output(checked(http.post('/v1/memories/reindex', params={
+            'scope': scope} if scope else {})).json())
+
+
 @memory_app.command('export')
 def memory_export(repo: Annotated[str, typer.Option('--repo')]) -> None:
     from sca.memory.models import render

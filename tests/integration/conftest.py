@@ -35,6 +35,7 @@ async def store():
                     "0007_files",
                     "0008_memories",
                     "0009_evaluation",
+                    "0010_memory_vectors",
                 ):
                     import_module(f"sca.db.migrations.versions.{revision}").upgrade()
 

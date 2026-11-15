@@ -180,3 +180,22 @@ async def test_maintenance_schedule_idempotent():
     assert args[1].spec.intervals[0].every.total_seconds() == 123
     client.create_schedule.side_effect = ScheduleAlreadyRunningError()
     await ensure_maintenance_schedule(client, settings)
+
+
+def test_business_counters_are_primed_at_zero():
+    """rate() drops a series' first sample, so labelled counters must exist before any event."""
+    from prometheus_client import CollectorRegistry, generate_latest
+
+    from sca.observability import BusinessMetrics
+
+    registry = CollectorRegistry()
+    BusinessMetrics(registry).prime(["coding"])
+    text = generate_latest(registry).decode()
+    for line in (
+        'sca_verifications_total{kind="coding",passed="false"} 0.0',
+        'sca_verifications_total{kind="coding",passed="true"} 0.0',
+        'sca_tokens_total{direction="cached",kind="coding"} 0.0',
+        'sca_cost_usd_total{kind="coding"} 0.0',
+        'sca_task_duration_seconds_count{final_state="FAILED",kind="coding"} 0.0',
+    ):
+        assert line in text

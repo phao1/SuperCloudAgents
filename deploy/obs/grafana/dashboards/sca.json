@@ -222,9 +222,26 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "reqps"
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byFrameRefID",
+              "options": "B"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "s"
+              },
+              {
+                "id": "custom.axisPlacement",
+                "value": "right"
+              }
+            ]
+          }
+        ]
       },
       "targets": [
         {
@@ -241,7 +258,7 @@
     },
     {
       "type": "timeseries",
-      "title": "Activity failures (retried)",
+      "title": "Activity execution failures",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -254,7 +271,7 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "ops"
         },
         "overrides": []
       },
@@ -262,7 +279,7 @@
         {
           "refId": "A",
           "expr": "sum by (activity_type) (rate(temporal_activity_execution_failed[10m]))",
-          "legendFormat": "{{activity_type}}"
+          "legendFormat": "{{activity_type}} failures / s"
         }
       ]
     },

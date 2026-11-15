@@ -22,7 +22,7 @@ import uvicorn
 from temporalio.client import Client
 
 from sca.api.app import create_app
-from sca.api.auth import StaticTokenAuthenticator
+from sca.api.auth import ChainAuthenticator, DatabaseTokenAuthenticator, StaticTokenAuthenticator
 from sca.orchestration.client import TemporalOrchestrator
 from sca.storage import make_object_store
 
@@ -32,7 +32,6 @@ from .test_e2e_fake import RIGHT_FIX, block
 pytestmark = [pytest.mark.e2e, pytest.mark.live]
 
 ROOT = Path(__file__).resolve().parents[2]
-CI_TOKEN = "ci-e2e-token"
 
 
 def _env_file(path: Path) -> dict[str, str]:
@@ -49,7 +48,10 @@ async def _serve_api(stack) -> tuple[uvicorn.Server, asyncio.Task, str]:
     app = create_app(
         store=stack.store,
         orchestrator=TemporalOrchestrator(client, stack.settings.task_queue),
-        authenticator=StaticTokenAuthenticator({CI_TOKEN: "default", "e2e-token": "default"}),
+        authenticator=ChainAuthenticator([
+            DatabaseTokenAuthenticator(stack.store),
+            StaticTokenAuthenticator({"e2e-token": "default"}),
+        ]),
         object_store=make_object_store(stack.settings),
     )
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, log_level="warning"))
@@ -59,6 +61,18 @@ async def _serve_api(stack) -> tuple[uvicorn.Server, asyncio.Task, str]:
             await asyncio.sleep(0.1)
     port = server.servers[0].sockets[0].getsockname()[1]
     return server, task, f"http://127.0.0.1:{port}"
+
+
+async def _ci_token(api_url: str, repo_url: str) -> str:
+    async with httpx.AsyncClient(base_url=api_url) as client:
+        response = await client.post('/v1/tokens',
+            headers={'Authorization': 'Bearer e2e-token'},
+            json={'name': 'real-ci', 'scopes': ['ci:report'], 'repo_url': repo_url})
+        assert response.status_code == 201
+        token = response.json()['token']
+        denied = await client.get('/v1/tasks', headers={'Authorization': f'Bearer {token}'})
+        assert denied.status_code == 403
+        return token
 
 
 def _seed(workdir: Path, pipeline: Path, pipeline_path: str) -> Path:
@@ -188,7 +202,9 @@ async def test_gitea_actions_drive_the_task(stack, gitea, gitea_credentials, tmp
     try:
         r = await api.post("/user/repos", json={"name": name, "private": True})
         assert r.status_code == 201, r.text
-        for secret, value in {"SCA_API_URL": api_url, "SCA_CI_TOKEN": CI_TOKEN}.items():
+        repo_url = f"{gitea['GITEA_URL']}/{owner}/{name}.git"
+        token = await _ci_token(api_url, repo_url)
+        for secret, value in {"SCA_API_URL": api_url, "SCA_CI_TOKEN": token}.items():
             r = await api.put(
                 f"/repos/{owner}/{name}/actions/secrets/{secret}", json={"data": value}
             )
@@ -247,12 +263,33 @@ def github_runner():
         pytest.skip("refusing to use a self-hosted runner with a public repository")
 
 
-async def test_github_actions_drive_the_task(stack, github_runner, tmp_path):
+@pytest.fixture
+def github_credentials(github_runner, settings_overrides):
+    """With OpenBao the worker never falls back to the host's gh identity: seed the repo entry."""
+    if not settings_overrides:
+        yield
+        return
+    import hvac
+
+    client = hvac.Client(
+        url=settings_overrides["openbao_url"], token=settings_overrides["openbao_token"]
+    )
+    path = f"sca/tenants/default/repos/github.com/{GITHUB_REPO}"
+    client.secrets.kv.v2.create_or_update_secret(
+        path=path,
+        secret={"type": "token", "username": "x-access-token", "token": _gh("auth", "token")},
+    )
+    yield
+    client.secrets.kv.v2.delete_metadata_and_all_versions(path=path)
+
+
+async def test_github_actions_drive_the_task(stack, github_runner, github_credentials, tmp_path):
     server, serving, api_url = await _serve_api(stack)
     remote = f"https://github.com/{GITHUB_REPO}.git"
     try:
-        for secret, value in {"SCA_API_URL": api_url, "SCA_CI_TOKEN": CI_TOKEN}.items():
-            _gh("secret", "set", secret, "--repo", GITHUB_REPO, "--body", value)
+        token = await _ci_token(api_url, remote)
+        for secret, value in {"SCA_API_URL": api_url, "SCA_CI_TOKEN": token}.items():
+            _gh("secret", "set", secret, "--repo", GITHUB_REPO, input=value)
         seed = _seed(tmp_path, ROOT / "deploy/ci/github-actions.yml", ".github/workflows/sca.yml")
         git(seed, "push", "-q", "--force", remote, "main")
         await _drive(stack, remote, f"https://github.com/{GITHUB_REPO}/actions/runs/")

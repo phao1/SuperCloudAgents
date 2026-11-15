@@ -27,6 +27,8 @@ class ChildStore:
             for k, v in task.result.items()
             if k.startswith(self.prefix)
         }
+        if task.result.get("prompt_version"):
+            result["prompt_version"] = task.result["prompt_version"]
         return task.model_copy(update={"result": result})
 
     async def update_result(self, task_id: str, patch: dict) -> None:

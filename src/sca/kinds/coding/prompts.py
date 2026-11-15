@@ -17,7 +17,7 @@ def fix_prompt(verify_command: str, exit_code: int, output_tail: str,
 
 def ci_fix_prompt(summary: str, url: str | None, prompt_version: str | None = None) -> str:
     return render_prompt({'prompt_version': prompt_version}, 'ci_fix', summary=summary.strip() or '(no details given)',
-                         where=f'Details: {url}\n\n' if url else '')
+                         where=render_prompt({'prompt_version': prompt_version}, 'ci_details', url=url) if url else '')
 
 
 def feedback_prompt(feedback: str, prompt_version: str | None = None) -> str:
@@ -27,4 +27,8 @@ def feedback_prompt(feedback: str, prompt_version: str | None = None) -> str:
 def planning_prompt(instruction: str, feedback: str | None = None,
                     prompt_version: str | None = None) -> str:
     return render_prompt({'instruction': instruction, 'prompt_version': prompt_version}, 'planning',
-                         reviewer_feedback='\nReviewer feedback:\n' + feedback + '\n' if feedback else '')
+                         reviewer_feedback=render_prompt({'prompt_version': prompt_version}, 'planning_feedback', feedback=feedback) if feedback else '')
+
+
+def subtask_prompt(spec: dict, subtask: dict) -> str:
+    return render_prompt(spec, "subtask", subtask_name=subtask["name"], subtask_instruction=subtask["instruction"])
