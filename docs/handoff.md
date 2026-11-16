@@ -18,7 +18,7 @@
 | --- | --- |
 | 单元 + 集成（不含 K8s、真实模型） | 431 通过 |
 | 端到端，挂载模式 / sync 模式 | 34 / 34 通过 |
-| 可选服务（S3、OIDC、Postgres 版 Temporal、Gitea + OpenBao、GitHub Runner、观测后端 + Alertmanager） | 全部通过；GitHub App 那条等创建真实的 App 后再跑 |
+| 可选服务（S3、OIDC、Postgres 版 Temporal、Gitea + OpenBao、GitHub Runner、观测后端 + Alertmanager） | 全部通过，包括真实 GitHub App（2026-11-16） |
 | Kubernetes（两节点 kind + Calico） | 48 通过 |
 | 真实模型（Codex、LiteLLM 网关、两个模型的评测对比、记忆提炼） | 全部通过 |
 

@@ -73,6 +73,27 @@ async def convert(http: httpx.AsyncClient, directory: Path, code: str) -> str:
     return f"https://github.com/apps/{metadata['slug']}/installations/new"
 
 
+async def import_app(http: httpx.AsyncClient, directory: Path, app_id: int, pem: Path) -> str:
+    """For an app created by hand in GitHub settings: copy its downloaded key in."""
+    from sca.secrets import github_app_jwt
+
+    key = pem.expanduser().read_text()
+    response = await http.get(
+        f"{API}/app",
+        headers={"Authorization": f"Bearer {github_app_jwt({'app_id': app_id, 'private_key': key})}"},
+    )
+    response.raise_for_status()  # proves the key belongs to this app
+    data = response.json()
+    save(directory, "private-key.pem", key)
+    save(
+        directory,
+        "app.json",
+        json.dumps({"app_id": data["id"], "slug": data["slug"], "client_id": data["client_id"]}),
+    )
+    (directory / "installation_id").unlink(missing_ok=True)
+    return f"https://github.com/apps/{data['slug']}/installations/new"
+
+
 def credential(directory: Path) -> dict:
     data = json.loads((directory / "app.json").read_text())
     return {
@@ -155,6 +176,10 @@ async def main() -> None:
     create.add_argument("--name", default=f"sca-dev-{secrets.token_hex(4)}")
     exchange = commands.add_parser("convert")
     exchange.add_argument("--code", required=True)
+    imported = commands.add_parser("import")
+    imported.add_argument("--app-id", type=int, required=True)
+    imported.add_argument("--pem", type=Path, required=True)
+    imported.add_argument("--repo", required=True)
     commands.add_parser("status")
     seed = commands.add_parser("store")
     seed.add_argument("--tenant", default="default")
@@ -168,6 +193,11 @@ async def main() -> None:
                 )
             elif args.command == "convert":
                 print(await convert(http, DATA, args.code))
+            elif args.command == "import":
+                owner = args.repo.split("/")[0]
+                manifest(owner, args.repo, "check")  # validates owner/repo
+                save(DATA, "target.json", json.dumps({"owner": owner, "repo": args.repo}))
+                print(await import_app(http, DATA, args.app_id, args.pem))
             elif args.command == "status":
                 await status(http, DATA)
             else:

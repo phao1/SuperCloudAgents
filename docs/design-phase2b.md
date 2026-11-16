@@ -431,7 +431,9 @@ compose profile `openbao`（开发模式）和 `gitea`。`tests/e2e/test_e2e_sec
 - **真实 CI 也改用 OpenBao**：OpenBao 在运行时，Gitea 真实 CI 测试的克隆和推送凭证都来自 OpenBao，测试通过。
 - **凭证交给 Git 的方式**：只通过 `GIT_ASKPASS` 和那一个子进程的环境变量，同时用 `-c credential.helper=` 关掉其他凭证助手。错误信息里的凭证会被替换掉。
 - **集成时修正的问题**：测试收尾时吊销 Gitea 令牌，用的是令牌认证；Gitea 只接受用户名加密码。
-- **GitHub App 接入与待验证**：新增 `scripts/github_app_setup.py`，依次运行 `manifest --owner <用户> --repo <所有者/私有仓库>`、打开生成的 HTML 创建私有 App、从跳转地址复制 code 后运行 `convert --code <code>`、按输出链接安装到目标仓库，再运行 `status`、`store`（默认租户 default，可用 `--tenant` 指定）。私钥和安装信息保存在已忽略的 `.data/github-app/`，目录 700、文件 600；JWT 签名复用凭证提供器。新增 `test_github_app_real`：设置 `SCA_E2E_GITHUB_APP_REPO=所有者/私有仓库` 后，经 OpenBao 获取安装令牌，验证 HTTPS 克隆、推送分支、令牌不进入事件与捕获日志，并清理分支。当前没有真实 App，真实端到端未验证；缺少本地凭证或环境变量时明确跳过。
+- **GitHub App 接入**：新增 `scripts/github_app_setup.py`，依次运行 `manifest --owner <用户> --repo <所有者/私有仓库>`、打开生成的 HTML 创建私有 App、从跳转地址复制 code 后运行 `convert --code <code>`、按输出链接安装到目标仓库，再运行 `status`、`store`（默认租户 default，可用 `--tenant` 指定）。私钥和安装信息保存在已忽略的 `.data/github-app/`，目录 700、文件 600；JWT 签名复用凭证提供器。新增 `test_github_app_real`：设置 `SCA_E2E_GITHUB_APP_REPO=所有者/私有仓库` 后，经 OpenBao 获取安装令牌，验证 HTTPS 克隆、推送分支、令牌不进入事件与捕获日志，并清理分支。缺少本地凭证或环境变量时明确跳过。
+  - 2026-11-16 用真实私有 App 跑通：App 装在私有测试仓库上（只选这一个仓库，权限为 Contents、Pull requests 读写），`status` 确认安装只覆盖目标仓库，`store` 写入 OpenBao 后 `test_github_app_real` 通过——Worker 自己换取安装令牌，克隆、推送分支、审阅通过，令牌不在事件、日志和 Temporal 历史里，分支已清理。
+  - 浏览器从地址栏打开 `data:` 链接并自动提交表单常被拦截，manifest 流程在实际操作中走不通。脚本因此加了 `import --app-id <ID> --pem <下载的私钥> --repo <所有者/仓库>`：在 GitHub 设置页手动建 App（可用带参数的 `https://github.com/settings/apps/new?name=…&public=false&webhook_active=false&contents=write&pull_requests=write&metadata=read` 预填），下载私钥后导入；导入时先用私钥调用 `GET /app` 证明私钥属于该 App。
 
 ---
 
