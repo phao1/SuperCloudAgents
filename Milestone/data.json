@@ -1,0 +1,1763 @@
+{
+  "meta": {
+    "date": "2026-11-16",
+    "commit": "6d73e778335d5f04aef03bc10ec9608fbd703a1b",
+    "repository": "https://github.com/phao1/SuperCloudAgents",
+    "diagramSha256": "b9730ed40e1b59884dbca1c1621d5b173f2b358deca3bfd908643f084063a9a4",
+    "scope": "2026-11-16 的提交快照，覆盖原图 50 个节点及 2 项 V2 补充能力。",
+    "method": "以基线源码和测试断言判定实现范围，以阶段结果及接手指南记录历史运行结果。本次未重跑平台后端测试。",
+    "evidenceReport": [
+      "docs/handoff.md 记录 MVP、二期、B1–B9 与 C1–C4 已完成。阶段完成按各阶段约定的范围判定。",
+      "2026-11-16 历史回归：单元与集成 431 通过（不含 K8s 和真实模型），挂载与 sync 端到端各 34 通过，两节点 kind + Calico 48 通过。",
+      "同次记录中的可选服务与真实模型测试通过，包括 Alertmanager、GitHub Runner、Codex、LiteLLM 网关、两模型评测和记忆提炼。GitHub App 仍待真实安装验证。",
+      "阶段设计末尾的补记与接手指南优先用于核对测试结果。Alertmanager 已有后续投递验证记录，pgvector 已在真实扩展上用假向量验证。"
+    ]
+  },
+  "modules": [
+    {
+      "id": "ui_goal",
+      "name": "目标与任务指定",
+      "subtitle": "人类设定目标",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "done",
+      "current": "多场景目标提交",
+      "stack": [
+        "FastAPI",
+        "Pydantic",
+        "Typer"
+      ],
+      "how": "API 通过场景注册表暴露 JSON Schema，网页据此生成表单。网页和 API 支持 coding、analysis，CLI 的 submit 提供 coding 快捷入口。",
+      "done": [
+        "coding 需求与验证命令",
+        "analysis 问题、上传输入 ID 与检查命令",
+        "任务预算参数"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/api/static/index.html",
+        "src/sca/api/routes.py",
+        "src/sca/cli.py",
+        "src/sca/kinds/coding/spec.py",
+        "src/sca/kinds/analysis/spec.py"
+      ],
+      "tests": [
+        "tests/integration/test_api.py",
+        "tests/unit/test_kinds.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "网页表单接受 analysis 输入文件 ID，文件上传走 API 或 files upload 命令。"
+    },
+    {
+      "id": "ui_dispatch",
+      "name": "任务下发",
+      "subtitle": "唯一需求入口",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "done",
+      "current": "任务接入与持久化启动",
+      "stack": [
+        "FastAPI",
+        "Postgres",
+        "Temporal"
+      ],
+      "how": "API 验证身份、授权、场景规格及租户配额，先写入任务，再启动 Temporal 工作流。携带同一幂等键重试可补偿任务已入库但启动未完成的情况。",
+      "done": [
+        "创建与查询任务",
+        "幂等提交与工作流启动重试"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/api/routes.py",
+        "src/sca/orchestration/client.py"
+      ],
+      "tests": [
+        "tests/integration/test_api.py",
+        "tests/integration/test_workflow.py"
+      ],
+      "docs": [
+        "docs/design.md"
+      ],
+      "reviewNote": "API 集成测试覆盖首次启动失败后重试，避免重复创建任务。"
+    },
+    {
+      "id": "ui_quality",
+      "name": "任务质量看板",
+      "subtitle": "通过率·缺陷·覆盖率",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "partial",
+      "current": "基础任务页 + Grafana + 评测 CLI",
+      "stack": [
+        "原生 HTML / JS",
+        "Grafana",
+        "Prometheus"
+      ],
+      "how": "任务页显示结果与事件，Grafana 汇总验证次数、通过率与耗时，评测比较可由命令行输出 Markdown。",
+      "done": [
+        "任务结果和事件",
+        "Grafana 验证通过率"
+      ],
+      "gaps": [
+        "统一产品质量看板",
+        "缺陷 / 覆盖率聚合"
+      ],
+      "code": [
+        "src/sca/api/static/index.html",
+        "deploy/obs/grafana/dashboards/sca.json",
+        "src/sca/eval/compare.py",
+        "src/sca/kinds/coding/activities.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_obs.py",
+        "tests/unit/test_obs_queries.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md",
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "Grafana 通过率来自验证活动计数。未配置编码验证命令的跳过分支也会计为通过。"
+    },
+    {
+      "id": "ui_confirm",
+      "name": "人工确认 / 再优化",
+      "subtitle": "质量确认后放行",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "done",
+      "current": "审核结果并继续同一任务",
+      "stack": [
+        "Temporal Signal",
+        "FastAPI"
+      ],
+      "how": "审核接口通过 Temporal Signal 传递批准、修改或拒绝。修改意见进入下一轮提示词，任务复用已有工作区和会话。",
+      "done": [
+        "批准、拒绝和带意见的修改请求",
+        "批准任务时可采纳其候选记忆"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/api/routes.py",
+        "src/sca/kernel/workflow.py",
+        "src/sca/api/static/index.html"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_fake.py",
+        "tests/e2e/test_e2e_memory.py"
+      ],
+      "docs": [
+        "docs/design.md",
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "编码与分析可共用审核流程，评测任务可配 auto_finish 自动结束。"
+    },
+    {
+      "id": "ui_approve",
+      "name": "人工例外审批",
+      "subtitle": "低置信 / 高风险",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "partial",
+      "current": "失败与规划转人工",
+      "stack": [
+        "Temporal",
+        "角色授权"
+      ],
+      "how": "普通任务在验证完成或修复次数用尽后进入同一人工审核状态。开启 plan_review 的自动拆分可在执行前接受审核。",
+      "done": [
+        "验证结果进入人工审核",
+        "自动拆分方案可修改、批准或拒绝"
+      ],
+      "gaps": [
+        "按置信度或风险等级路由审批",
+        "独立例外审批工作台"
+      ],
+      "code": [
+        "src/sca/kernel/workflow.py",
+        "src/sca/kinds/coding/workflow.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_planning.py",
+        "tests/e2e/test_e2e_fake.py"
+      ],
+      "docs": [
+        "docs/architecture.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "验证失败和验证通过共用审核接口。评测任务使用 auto_finish 自动决定终态。"
+    },
+    {
+      "id": "ui_history",
+      "name": "任务历史与回放",
+      "subtitle": "轨迹现场复现",
+      "group": "人类工作入口层：设计平台 / 研发工作台（人类唯一工作入口）",
+      "status": "partial",
+      "current": "事件时间线与历史制品",
+      "stack": [
+        "SSE",
+        "Postgres LISTEN/NOTIFY"
+      ],
+      "how": "任务事件按序号查询并可用 SSE 追更，冷事件归档后仍可查询；任务页显示事件、补丁与分析报告。",
+      "done": [
+        "按序读取事件和实时流",
+        "制品 API 提供补丁、日志和报告"
+      ],
+      "gaps": [
+        "按时间重演开发现场",
+        "可视化 diff / 会话回放"
+      ],
+      "code": [
+        "src/sca/api/routes.py",
+        "src/sca/api/static/index.html",
+        "src/sca/archive.py"
+      ],
+      "tests": [
+        "tests/integration/test_notify.py",
+        "tests/integration/test_archive.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md"
+      ],
+      "reviewNote": "页面以文本显示事件与补丁，没有开发现场重演。"
+    },
+    {
+      "id": "design_in",
+      "name": "设计稿与工单接入",
+      "subtitle": "Figma / 需求工单",
+      "group": "左翼 · 设计系统对接区",
+      "status": "partial",
+      "current": "文件形式的意图输入",
+      "stack": [
+        "文件上传 API",
+        "IntentAdapter"
+      ],
+      "how": "编码任务可读取上传文件或仓库内文件，将 OpenAPI、截图或规则配置编译成上下文与检查。",
+      "done": [
+        "OpenAPI / 截图 / 规则文件输入"
+      ],
+      "gaps": [
+        "Figma API 连接",
+        "工单同步与回写"
+      ],
+      "code": [
+        "src/sca/api/files.py",
+        "src/sca/intents/compiler.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_intents.py",
+        "tests/integration/test_files.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C2 使用导出文件作为接入边界，Figma、Jira 和 Confluence 的在线连接未实现。"
+    },
+    {
+      "id": "design_spec",
+      "name": "设计规范与 Token",
+      "subtitle": "组件库 / 设计知识",
+      "group": "左翼 · 设计系统对接区",
+      "status": "partial",
+      "current": "规则与视觉基准",
+      "stack": [
+        "Ruff",
+        "Playwright"
+      ],
+      "how": "rules 适配器复制配置并生成检查命令，visual 适配器以导出的截图作为视觉基准。",
+      "done": [
+        "编码规则配置",
+        "截图基准对比"
+      ],
+      "gaps": [
+        "Design Token 语义解析",
+        "组件库同步"
+      ],
+      "code": [
+        "src/sca/intents/rules.py",
+        "src/sca/intents/visual.py"
+      ],
+      "tests": [
+        "tests/unit/test_intents_adapters.py",
+        "tests/e2e/test_e2e_intents.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C2 的 rules 结果记录只覆盖 Ruff。"
+    },
+    {
+      "id": "design_intent",
+      "name": "设计意图解析器",
+      "subtitle": "约束 / 验收 / 上下文",
+      "group": "左翼 · 设计系统对接区",
+      "status": "done",
+      "current": "可执行意图编译器",
+      "stack": [
+        "Schemathesis",
+        "Playwright",
+        "IntentBundle"
+      ],
+      "how": "在 Worker 上只解析输入，将 context_files、prompt_notes、checks、setup 交给内核；真正检查在沙箱执行。",
+      "done": [
+        "OpenAPI、截图对比和规则三类适配器",
+        "生成检查、并行执行与发布差异图"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/intents/base.py",
+        "src/sca/intents/compiler.py",
+        "src/sca/intents/openapi.py",
+        "src/sca/intents/visual.py",
+        "src/sca/intents/rules.py",
+        "src/sca/kernel/activities.py"
+      ],
+      "tests": [
+        "tests/unit/test_intents_kernel.py",
+        "tests/e2e/test_e2e_intents.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C2 记录六个脚本化通过 / 修复用例及一个仅提供 OpenAPI 规范的真实模型用例通过。"
+    },
+    {
+      "id": "verify_gw",
+      "name": "验证反馈网关",
+      "subtitle": "测试 / CI / 扫描",
+      "group": "右翼 · 验证反馈系统对接区",
+      "status": "done",
+      "current": "命令验证 + 外部 CI 回调",
+      "stack": [
+        "Temporal",
+        "GitHub Actions",
+        "Gitea Actions"
+      ],
+      "how": "编码验证命令在沙箱并行运行。启用外部 CI 时，推送分支并等待匹配提交的结果，失败摘要可进入修复轮；ci:report 令牌可绑定租户及仓库。",
+      "done": [
+        "并行命令检查、超时和有限修复轮",
+        "版本关联的 Gitea Actions / GitHub Actions 回调"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/kernel/activities.py",
+        "src/sca/kinds/coding/workflow.py",
+        "deploy/ci/report.sh",
+        "src/sca/api/routes.py",
+        "src/sca/kinds/coding/activities.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_verification.py",
+        "tests/e2e/test_e2e_ci_real.py",
+        "tests/integration/test_ci_token_scope.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B3 记录两种真实流水线通过，包括租户与仓库受限令牌。扫描工具可作为命令运行，通用扫描报告解析见相邻模块。"
+    },
+    {
+      "id": "verify_parser",
+      "name": "结构化验证解析器",
+      "subtitle": "通过 / 根因 / 风险",
+      "group": "右翼 · 验证反馈系统对接区",
+      "status": "partial",
+      "current": "退出码与结构化检查结果",
+      "stack": [
+        "Pydantic",
+        "CheckResult"
+      ],
+      "how": "命令退出码决定通过。事件保存逐检查状态、退出码和超时标志，以及汇总输出尾部；外部 CI 提交 commit、passed、summary 和 url。",
+      "done": [
+        "检查状态、汇总输出尾部与完整日志制品",
+        "外部 CI 回报字段与提交关联"
+      ],
+      "gaps": [
+        "通用扫描报告解析",
+        "自动根因 / 风险分析"
+      ],
+      "code": [
+        "src/sca/core/models.py",
+        "src/sca/kernel/activities.py",
+        "src/sca/api/routes.py",
+        "src/sca/kinds/coding/activities.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_verification.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md"
+      ]
+    },
+    {
+      "id": "quality_echo",
+      "name": "质量回显与例外审批",
+      "subtitle": "回写看板 / 触发人工",
+      "group": "右翼 · 验证反馈系统对接区",
+      "status": "partial",
+      "current": "验证反馈与人工确认状态",
+      "stack": [
+        "事件日志",
+        "Temporal Signal"
+      ],
+      "how": "失败输出进入修复提示词，普通任务在修复次数用尽后可由人审核。网页通过任务结果和事件流呈现状态。",
+      "done": [
+        "失败反馈修复",
+        "质量结果到任务页"
+      ],
+      "gaps": [
+        "回写外部设计 / 工单平台",
+        "统一质量产品视图"
+      ],
+      "code": [
+        "src/sca/kernel/workflow.py",
+        "src/sca/api/static/index.html"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_fake.py"
+      ],
+      "docs": [
+        "docs/design.md",
+        "docs/design-phase2b.md"
+      ]
+    },
+    {
+      "id": "task_entry",
+      "name": "任务接入与统一鉴权",
+      "subtitle": "统一任务入口",
+      "group": "接入与编排段",
+      "status": "done",
+      "current": "统一认证、授权与租户隔离",
+      "stack": [
+        "FastAPI",
+        "OIDC / Dex",
+        "Postgres RLS"
+      ],
+      "how": "认证得到 Principal，按 viewer / member / admin 角色或令牌作用域授权；数据查询带租户边界，主要业务表启用 Postgres RLS。",
+      "done": [
+        "OIDC 和静态令牌",
+        "角色、受限令牌及租户配额"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/api/auth.py",
+        "src/sca/api/authz.py",
+        "src/sca/db/repo.py"
+      ],
+      "tests": [
+        "tests/integration/test_tenancy.py",
+        "tests/integration/test_authz.py",
+        "tests/e2e/test_e2e_live_services.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "历史 live 回归包含 Dex，角色、受限令牌与跨租户访问由集成测试断言。"
+    },
+    {
+      "id": "planner",
+      "name": "任务理解与规划器",
+      "subtitle": "解耦拆分与规划",
+      "group": "接入与编排段",
+      "status": "done",
+      "current": "可选自动拆分",
+      "stack": [
+        "Codex",
+        "Pydantic",
+        "pathspec"
+      ],
+      "how": "可选规划轮生成 .sca/plan.json，检查子任务数、名称及已跟踪文件的路径范围交叠。方案无法采用时可退回单 Agent，执行前也可加人工审核。",
+      "done": [
+        "2–8 个子任务的规划校验",
+        "拒绝不安全拆分并回退"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/kinds/coding/planning.py",
+        "src/sca/kinds/coding/workflow.py"
+      ],
+      "tests": [
+        "tests/integration/test_planning.py",
+        "tests/e2e/test_e2e_planning.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B8 验证了脚本化规划、回退和人工审核，真实模型拆分质量尚无对比评测。"
+    },
+    {
+      "id": "decouple",
+      "name": "软件工程解耦分析器",
+      "subtitle": "边界·契约·影响面",
+      "group": "接入与编排段",
+      "status": "partial",
+      "current": "路径范围冲突校验",
+      "stack": [
+        "pathspec",
+        "Git ls-tree"
+      ],
+      "how": "自动规划校验多个 glob 是否命中同一已跟踪文件，命中重叠时退回单 Agent。执行期间的实际修改交给常规 Git 冲突处理。",
+      "done": [
+        "基于已跟踪文件检测规划路径重叠"
+      ],
+      "gaps": [
+        "执行期路径边界强制",
+        "语义依赖与影响面分析",
+        "跨模块契约推导"
+      ],
+      "code": [
+        "src/sca/kinds/coding/planning.py",
+        "src/sca/workspace/merge.py"
+      ],
+      "tests": [
+        "tests/integration/test_planning.py",
+        "tests/integration/test_merge.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B8.3 明确将路径用于规划校验，子任务执行和合并没有越界拦截。"
+    },
+    {
+      "id": "dag",
+      "name": "全局 DAG 编排器",
+      "subtitle": "依赖边与并发分支",
+      "group": "接入与编排段",
+      "status": "adapted",
+      "current": "Temporal 工作流替代自研 DAG",
+      "stack": [
+        "Temporal"
+      ],
+      "how": "Temporal 中的固定生命周期与 Child Workflow 提供持久化执行、重试、信号与子任务并行。",
+      "done": [
+        "持久化编排与信号",
+        "子工作流并发与汇总"
+      ],
+      "gaps": [
+        "通用依赖图建模与编辑",
+        "V1 自研调度服务"
+      ],
+      "code": [
+        "src/sca/kernel/workflow.py",
+        "src/sca/kinds/coding/workflow.py",
+        "src/sca/orchestration/worker.py"
+      ],
+      "tests": [
+        "tests/integration/test_workflow.py",
+        "tests/e2e/test_e2e_resilience.py"
+      ],
+      "docs": [
+        "docs/architecture.md"
+      ],
+      "reviewNote": "ADR-02 记录由 Temporal 承接持久化编排。"
+    },
+    {
+      "id": "checkpoint",
+      "name": "检查点与续存管理",
+      "subtitle": "暂停 / 恢复 / 分叉",
+      "group": "接入与编排段",
+      "status": "partial",
+      "current": "Git + 会话 + 对象存储检查点",
+      "stack": [
+        "Git bundle",
+        "S3",
+        "SHA-256"
+      ],
+      "how": "每轮保存含全部引用的 Git bundle 和 Agent 会话归档，排除登录文件，并最后发布含校验和的 manifest。等待审核过久可释放沙箱，同一任务可在另一 Worker 重建并续跑。",
+      "done": [
+        "暂停 / 恢复与重建",
+        "跨 Worker 状态续跑"
+      ],
+      "gaps": [
+        "从任意历史点分叉任务",
+        "大仓库每轮打包开销评估"
+      ],
+      "code": [
+        "src/sca/workspace/state.py",
+        "src/sca/workspace/transport.py",
+        "src/sca/kernel/workflow.py"
+      ],
+      "tests": [
+        "tests/integration/test_state.py",
+        "tests/e2e/test_e2e_resilience.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B1 的恢复结果包含删除原 Worker 数据目录后的续跑，以及中途故障后重做该轮。"
+    },
+    {
+      "id": "subtask_q",
+      "name": "子任务队列与调度",
+      "subtitle": "全局推进与依赖",
+      "group": "接入与编排段",
+      "status": "adapted",
+      "current": "Temporal 队列与 Child Workflow",
+      "stack": [
+        "Temporal",
+        "git merge-tree"
+      ],
+      "how": "Temporal 调度子工作流。每个子任务使用独立沙箱和分支，完成后在可信镜像合并，冲突随结果提交人工审核。",
+      "done": [
+        "独立沙箱并行执行",
+        "汇总合并及冲突转人工"
+      ],
+      "gaps": [
+        "通用子任务依赖调度器",
+        "独立队列服务"
+      ],
+      "code": [
+        "src/sca/kinds/coding/workflow.py",
+        "src/sca/kinds/coding/subtasks.py",
+        "src/sca/workspace/merge.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_subtasks.py",
+        "tests/integration/test_merge.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B8 的并行性用子任务轮次时间段重叠判定。"
+    },
+    {
+      "id": "optim_entry",
+      "name": "再优化任务入口",
+      "subtitle": "人工确认后再优化",
+      "group": "接入与编排段",
+      "status": "done",
+      "current": "同任务反馈再迭代",
+      "stack": [
+        "Temporal Signal",
+        "Codex session"
+      ],
+      "how": "request_changes 将审阅意见发送到同一工作流，保留会话与工作成果，必要时重建沙箱继续。",
+      "done": [
+        "反馈驱动下一轮",
+        "会话续接"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/kernel/workflow.py",
+        "src/sca/agents/codex.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_fake.py",
+        "tests/e2e/test_e2e_resilience.py",
+        "tests/e2e/test_e2e_codex.py"
+      ],
+      "docs": [
+        "docs/design.md"
+      ],
+      "reviewNote": "真实 Codex 编码用例覆盖一次审阅反馈续接。跨 Worker 恢复由脚本化用例覆盖。"
+    },
+    {
+      "id": "evo_trigger",
+      "name": "自进化触发器",
+      "subtitle": "评测驱动自我迭代",
+      "group": "接入与编排段",
+      "status": "partial",
+      "current": "手动评测与回归闸门",
+      "stack": [
+        "sca eval",
+        "Temporal"
+      ],
+      "how": "操作者可以运行 eval run、compare 和 gate，以模板版本和评测结果为迭代依据。",
+      "done": [
+        "手动发起、比较评测",
+        "以通过率差异配置回归闸门"
+      ],
+      "gaps": [
+        "自动触发改进任务",
+        "自动选择与推广版本"
+      ],
+      "code": [
+        "src/sca/eval/cli.py",
+        "src/sca/eval/compare.py",
+        "src/sca/kernel/prompts.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_evaluation.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md",
+        "docs/architecture.md"
+      ],
+      "reviewNote": "ADR-18 将自动改进闭环列为当前范围之外。"
+    },
+    {
+      "id": "sandbox_sched",
+      "name": "沙箱调度器",
+      "subtitle": "子任务到沙箱",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "adapted",
+      "current": "Provider + Kubernetes 原生调度",
+      "stack": [
+        "SandboxProvider",
+        "Docker",
+        "Kubernetes"
+      ],
+      "how": "Worker 通过统一 Provider 接口创建 Docker 容器或 Kubernetes Pod，Kubernetes 负责 Pod 节点放置。sync 在 Worker 与沙箱间上传下载状态。",
+      "done": [
+        "Docker / K8s 双驱动",
+        "sync 跨节点传输"
+      ],
+      "gaps": [
+        "独立的跨集群沙箱调度服务"
+      ],
+      "code": [
+        "src/sca/sandbox/__init__.py",
+        "src/sca/sandbox/k8s.py",
+        "src/sca/workspace/transport.py"
+      ],
+      "tests": [
+        "tests/integration/test_k8s_sandbox.py",
+        "tests/e2e/test_e2e_k8s.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "历史多节点用例由宿主机上的 Worker 驱动，使用 nodeSelector 把沙箱 Pod 放在 kind 工作节点。"
+    },
+    {
+      "id": "sandbox_pool",
+      "name": "沙箱池与并发实例",
+      "subtitle": "创建 / 复用 / 回收",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "partial",
+      "current": "K8s 固定大小预热池",
+      "stack": [
+        "Kubernetes resourceVersion",
+        "Temporal Schedule"
+      ],
+      "how": "Kubernetes sync 模式可启用固定大小预热池。空闲 Pod 按规格哈希分池并以资源版本并发认领；Worker 启动和维护流程可补池。使用过的 Pod 销毁。",
+      "done": [
+        "可用 Pod 认领、回收与补池",
+        "无可用项或规格不匹配时新建"
+      ],
+      "gaps": [
+        "池容量随负载伸缩",
+        "生产集群时延验证"
+      ],
+      "code": [
+        "src/sca/sandbox/k8s.py",
+        "src/sca/maintenance.py",
+        "scripts/bench_sandbox_start.py"
+      ],
+      "tests": [
+        "tests/integration/test_k8s_sandbox.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B9 记录两节点 kind 测试，池大小 3 且有空闲 Pod 时，restricted 模式启动 p95 为 0.64 秒，冷启动为 7.68 秒。"
+    },
+    {
+      "id": "runtime",
+      "name": "Agent Runtime",
+      "subtitle": "无状态执行脑",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "adapted",
+      "current": "沙箱内的可插拔 Agent 后端",
+      "stack": [
+        "AgentBackend",
+        "Codex CLI",
+        "FakeAgent"
+      ],
+      "how": "CodexBackend 在沙箱运行 codex exec --json，解析事件并保存会话 ID，后续可恢复同一 Codex 会话。",
+      "done": [
+        "真实 Codex 执行与续接",
+        "脚本化测试后端"
+      ],
+      "gaps": [
+        "V1 独立 Runtime 服务",
+        "K8s 上的真实 Agent 模型网关接通"
+      ],
+      "code": [
+        "src/sca/agents/codex.py",
+        "src/sca/agents/fake.py",
+        "src/sca/core/interfaces.py"
+      ],
+      "tests": [
+        "tests/integration/test_codex_agent.py",
+        "tests/e2e/test_e2e_codex.py"
+      ],
+      "docs": [
+        "docs/architecture.md"
+      ],
+      "reviewNote": "ADR-03 和 ADR-05 将完整 Agent 循环保留在沙箱内，后端通过接口替换。"
+    },
+    {
+      "id": "executor",
+      "name": "子任务执行与装配",
+      "subtitle": "上下文装配 / 上报",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "adapted",
+      "current": "内核活动 + 场景活动",
+      "stack": [
+        "Temporal Activity",
+        "TaskKind"
+      ],
+      "how": "内核负责沙箱、轮次、预算和事件；coding / analysis 通过场景协议注入准备、验证与发布行为。原图独立执行服务合并为模块。",
+      "done": [
+        "通用轮次循环",
+        "两个场景的活动注册"
+      ],
+      "gaps": [
+        "V1 独立执行与装配服务"
+      ],
+      "code": [
+        "src/sca/kernel/activities.py",
+        "src/sca/kernel/kind.py",
+        "src/sca/kinds/builtin.py"
+      ],
+      "tests": [
+        "tests/unit/test_layering.py",
+        "tests/unit/test_kinds.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "通用内核负责沙箱生命周期，编码和分析注册各自的准备、验证与发布；编码并行执行使用 Child Workflow。"
+    },
+    {
+      "id": "recover_gate",
+      "name": "会话恢复门",
+      "subtitle": "重锚任务 / 防漂移",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "adapted",
+      "current": "校验状态后恢复会话",
+      "stack": [
+        "Git commit",
+        "manifest",
+        "Codex session"
+      ],
+      "how": "恢复对象存储中的镜像和会话，校验 SHA-256 后重建工作区；一轮中途崩溃可重做该轮。V1 抽象恢复门被具体检查点替代。",
+      "done": [
+        "状态完整性校验",
+        "重建并续接会话"
+      ],
+      "gaps": [
+        "V1 多类检查点与外部副作用核验"
+      ],
+      "code": [
+        "src/sca/workspace/state.py",
+        "src/sca/kernel/activities.py",
+        "src/sca/agents/codex.py"
+      ],
+      "tests": [
+        "tests/integration/test_state.py",
+        "tests/e2e/test_e2e_resilience.py"
+      ],
+      "docs": [
+        "docs/architecture.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "恢复前检查对象内容的 SHA-256；故障发生在轮次中途时，从上一份已发布状态重做。"
+    },
+    {
+      "id": "hand_brain",
+      "name": "Tool 网关与工具域",
+      "subtitle": "手有状态·按部门隔离",
+      "group": "Agent 运行时与沙箱执行段",
+      "status": "adapted",
+      "current": "Agent 工具与执行同处沙箱",
+      "stack": [
+        "Codex CLI",
+        "Docker / K8s"
+      ],
+      "how": "Agent 自行在沙箱调用工具，平台提供执行接口、凭证边界和出口策略。ADR-05 将原图的脑和手合并到沙箱内。",
+      "done": [
+        "Agent 在沙箱内运行工具",
+        "沙箱出口与凭证边界"
+      ],
+      "gaps": [
+        "独立通用 Tool Gateway",
+        "部门级工具目录和授权"
+      ],
+      "code": [
+        "src/sca/agents/codex.py",
+        "src/sca/sandbox/egress.py",
+        "src/sca/core/interfaces.py"
+      ],
+      "tests": [
+        "tests/integration/test_codex_agent.py",
+        "tests/integration/test_egress.py"
+      ],
+      "docs": [
+        "docs/architecture.md"
+      ],
+      "reviewNote": "仓库凭证在宿主侧使用。配置 Docker 模型网关时，沙箱拿到按轮生成的临时 key。"
+    },
+    {
+      "id": "memory",
+      "name": "共享记忆服务",
+      "subtitle": "短期 / 长期 / 向量",
+      "group": "共享服务段",
+      "status": "partial",
+      "current": "有审核和作用域的共享记忆",
+      "stack": [
+        "Postgres RLS",
+        "LiteLLM",
+        "pgvector"
+      ],
+      "how": "人工录入、Agent 提案和审核反馈可产生记忆。任务按仓库、租户与场景选取 active 条目，注入 MEMORY.md 并记录使用。",
+      "done": [
+        "候选审核、退役与审计",
+        "向量检索及时间排序回退"
+      ],
+      "gaps": [
+        "真实 embeddings 模型链路复验",
+        "记忆对任务质量的对比实验"
+      ],
+      "code": [
+        "src/sca/memory/models.py",
+        "src/sca/memory/distill.py",
+        "src/sca/memory/embedding.py",
+        "src/sca/api/memories.py",
+        "src/sca/db/repo.py",
+        "src/sca/memory/context.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_memory.py",
+        "tests/integration/test_memory_vectors.py",
+        "tests/integration/test_memory_gateway.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C3 记录提炼模型和假向量检索各自通过。提炼使用聊天接口，真实 embeddings 链路仍待验证。"
+    },
+    {
+      "id": "identity",
+      "name": "Agent 身份与权限",
+      "subtitle": "令牌 / 证书 / 鉴权",
+      "group": "共享服务段",
+      "status": "partial",
+      "current": "用户与租户角色、任务临时密钥",
+      "stack": [
+        "OIDC / Dex",
+        "PyJWT",
+        "RLS",
+        "LiteLLM"
+      ],
+      "how": "OIDC 或 API 令牌识别用户身份，角色与令牌作用域限制动作，模型网关按轮签发临时 key。",
+      "done": [
+        "用户角色与租户隔离",
+        "受限 API / CI 令牌"
+      ],
+      "gaps": [
+        "Agent 工作负载证书身份",
+        "部门级工具授权模型"
+      ],
+      "code": [
+        "src/sca/api/auth.py",
+        "src/sca/api/authz.py",
+        "src/sca/gateway/litellm.py"
+      ],
+      "tests": [
+        "tests/integration/test_authz.py",
+        "tests/integration/test_ci_token_scope.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md",
+        "docs/architecture.md"
+      ],
+      "reviewNote": "ADR-15 采用角色和受限令牌，未引入 OPA 或 SPIRE。"
+    },
+    {
+      "id": "knowledge",
+      "name": "企业私域知识库",
+      "subtitle": "入库 / 索引 / 检索",
+      "group": "共享服务段",
+      "status": "partial",
+      "current": "仓库 / 租户范围的短记忆",
+      "stack": [
+        "Postgres",
+        "pgvector"
+      ],
+      "how": "可审核短条目记录来源并按仓库、租户或场景注入，可作为项目知识入口。",
+      "done": [
+        "有来源的短条目",
+        "按作用域选择并注入"
+      ],
+      "gaps": [
+        "企业文档连接与分块",
+        "文档级权限同步与引用溯源"
+      ],
+      "code": [
+        "src/sca/memory/",
+        "src/sca/api/memories.py"
+      ],
+      "tests": [
+        "tests/integration/test_memories.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ]
+    },
+    {
+      "id": "tool_domain",
+      "name": "部门工具域",
+      "subtitle": "按团队隔离技术栈",
+      "group": "共享服务段",
+      "status": "planned",
+      "current": "尚未建立部门工具域",
+      "stack": [],
+      "how": "现有隔离维度是租户、任务和沙箱，可配置沙箱镜像。部门工具目录、分发与授权属于原图能力。",
+      "done": [],
+      "gaps": [
+        "部门工具注册与版本",
+        "按团队授予工具权限"
+      ],
+      "code": [],
+      "tests": [],
+      "docs": [
+        "docs/architecture.md",
+        "docs/archive/architecture-v1.md"
+      ],
+      "reviewNote": "V2 将 Agent 工具放在沙箱运行，设想中的部门工具域没有对应独立实现。"
+    },
+    {
+      "id": "audit",
+      "name": "审计与合规服务",
+      "subtitle": "操作·恢复·人工事件",
+      "group": "共享服务段",
+      "status": "partial",
+      "current": "任务事件与记忆审计",
+      "stack": [
+        "Postgres",
+        "对象归档"
+      ],
+      "how": "任务操作和状态追加到 events，记忆操作写入 memory_events；事件可用去重键并归档。",
+      "done": [
+        "状态和人工反馈事件",
+        "记忆修改审计与冷事件归档"
+      ],
+      "gaps": [
+        "合规策略与留存管理产品",
+        "防篡改审计导出"
+      ],
+      "code": [
+        "src/sca/db/repo.py",
+        "src/sca/db/schema.py",
+        "src/sca/archive.py"
+      ],
+      "tests": [
+        "tests/integration/test_archive.py",
+        "tests/integration/test_memories.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase3.md"
+      ]
+    },
+    {
+      "id": "cache_code",
+      "name": "代码缓存服务",
+      "subtitle": "多仓 / 分支 / commit 预热",
+      "group": "缓存服务区（本层核心加速能力）",
+      "status": "partial",
+      "current": "按需更新的租户级 Git 镜像缓存",
+      "stack": [
+        "Git bare mirror",
+        "文件锁"
+      ],
+      "how": "按租户和仓库地址生成缓存键，准备工作区时复用并更新可信裸镜像。维护工作流按条目上限裁剪。",
+      "done": [
+        "多仓库镜像复用",
+        "租户隔离与缓存裁剪"
+      ],
+      "gaps": [
+        "独立按分支 / commit 预热机制",
+        "跨 Worker 共享 Git 缓存"
+      ],
+      "code": [
+        "src/sca/workspace/cache.py",
+        "src/sca/workspace/git.py",
+        "src/sca/maintenance.py"
+      ],
+      "tests": [
+        "tests/integration/test_workspace_cache.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B1.6 规定每台 Worker 保有独立仓库缓存。"
+    },
+    {
+      "id": "cache_dep",
+      "name": "依赖与二进制缓存",
+      "subtitle": "依赖 / 制品 / 镜像层",
+      "group": "缓存服务区（本层核心加速能力）",
+      "status": "partial",
+      "current": "挂载模式的 pip 缓存",
+      "stack": [
+        "pip cache",
+        "Docker mount"
+      ],
+      "how": "mount 模式按租户挂载 pip 下载缓存。sync 模式跳过该挂载。",
+      "done": [
+        "租户隔离的 pip 下载缓存"
+      ],
+      "gaps": [
+        "npm / 通用二进制缓存",
+        "跨节点分布式依赖缓存"
+      ],
+      "code": [
+        "src/sca/workspace/cache.py",
+        "src/sca/kernel/activities.py"
+      ],
+      "tests": [
+        "tests/integration/test_workspace_cache.py",
+        "tests/e2e/test_e2e_verification.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B1.6 将多节点依赖加速留给外部包索引代理。"
+    },
+    {
+      "id": "cache_gw",
+      "name": "缓存挂载网关",
+      "subtitle": "动态挂载 / 增量更新",
+      "group": "缓存服务区（本层核心加速能力）",
+      "status": "partial",
+      "current": "工作区传输抽象",
+      "stack": [
+        "MountTransport",
+        "SyncTransport"
+      ],
+      "how": "同机可直接挂载工作区，跨节点可用 tar 与 git bundle 传输。缓存挂载目前由各实现按模式选择。",
+      "done": [
+        "mount / sync 两种通路"
+      ],
+      "gaps": [
+        "独立动态缓存挂载网关",
+        "跨节点的依赖缓存分发与命中管理"
+      ],
+      "code": [
+        "src/sca/workspace/transport.py",
+        "src/sca/workspace/tarsafe.py"
+      ],
+      "tests": [
+        "tests/integration/test_workspace_transport.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ]
+    },
+    {
+      "id": "object_store",
+      "name": "对象存储",
+      "subtitle": "镜像 / 快照 / 索引",
+      "group": "存储与算力底座",
+      "status": "done",
+      "current": "制品与检查点对象存储",
+      "stack": [
+        "ObjectStore",
+        "boto3",
+        "SeaweedFS / S3"
+      ],
+      "how": "LocalObjectStore 和 S3ObjectStore 统一接口保存补丁、日志、输入文件、归档与检查点；元数据在 Postgres。",
+      "done": [
+        "本地 / S3 实现",
+        "任务制品、上传文件、归档和检查点持久化"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/storage/local.py",
+        "src/sca/storage/s3.py",
+        "src/sca/workspace/state.py"
+      ],
+      "tests": [
+        "tests/unit/test_object_store.py",
+        "tests/e2e/test_e2e_live_services.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "历史 live 回归包含在 S3 兼容服务上写入并读取任务制品。"
+    },
+    {
+      "id": "vector_store",
+      "name": "向量索引存储",
+      "subtitle": "记忆与知识低延迟",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "Postgres 内的向量检索",
+      "stack": [
+        "pgvector",
+        "LiteLLM embeddings"
+      ],
+      "how": "迁移可选启用 pgvector，激活记忆时可写入向量。条目超出上下文预算时，可按同维度向量检索，缺少向量结果时回退到最近使用或创建时间。",
+      "done": [
+        "可选向量列与余弦距离排序",
+        "确定性假向量覆盖检索与重建"
+      ],
+      "gaps": [
+        "真实 embeddings 服务验证",
+        "固定维度近似索引与容量评估"
+      ],
+      "code": [
+        "src/sca/db/migrations/versions/0010_memory_vectors.py",
+        "src/sca/memory/embedding.py",
+        "src/sca/db/repo.py"
+      ],
+      "tests": [
+        "tests/integration/test_memory_vectors.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C3 早期记录扩展缺失；后续在 pgvector/pgvector:pg16 上以确定性假向量验证通过。真实 embeddings 模型待验。"
+    },
+    {
+      "id": "repos",
+      "name": "代码仓与制品库",
+      "subtitle": "Git / 制品 / 镜像",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "Git 工作区与成果发布",
+      "stack": [
+        "Git",
+        "Gitea / GitHub",
+        "S3"
+      ],
+      "how": "编码场景克隆仓库，保存可信镜像与提交检查点，发布补丁。配置推送时，分支可供外部 CI 和审阅使用。",
+      "done": [
+        "Git 分支和补丁发布",
+        "CI 对接与制品下载"
+      ],
+      "gaps": [
+        "自动创建 / 更新 PR",
+        "统一制品及镜像仓库产品"
+      ],
+      "code": [
+        "src/sca/workspace/git.py",
+        "src/sca/kinds/coding/activities.py",
+        "deploy/ci/"
+      ],
+      "tests": [
+        "tests/integration/test_workspace.py",
+        "tests/e2e/test_e2e_ci_real.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "历史 live 回归覆盖真实 GitHub / Gitea CI。使用 GitHub App 安装令牌的链路有实现和条件测试，仍待真实验证。"
+    },
+    {
+      "id": "k8s",
+      "name": "容器与 K8s 集群",
+      "subtitle": "沙箱编排底座",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "双驱动与两节点验证",
+      "stack": [
+        "Docker",
+        "Kubernetes",
+        "kind",
+        "Calico"
+      ],
+      "how": "Docker / Kubernetes 共用沙箱契约。sync 模式可让宿主 Worker 操作另一节点上的沙箱 Pod。Worker 部署目录提供示例清单。",
+      "done": [
+        "双驱动契约",
+        "两节点任务状态传输与 Calico 网络隔离"
+      ],
+      "gaps": [
+        "生产 HA 与容量验证",
+        "Worker 清单实际部署、镜像、RBAC、探针、排空及伸缩验证"
+      ],
+      "code": [
+        "src/sca/sandbox/docker.py",
+        "src/sca/sandbox/k8s.py",
+        "deploy/k8s/worker/README.md"
+      ],
+      "tests": [
+        "tests/integration/test_k8s_sandbox.py",
+        "tests/e2e/test_e2e_k8s.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "2026-11-16 接手指南记载两节点 kind + Calico 的 48 项历史验证。B1.12 另记录清单服务端 dry-run 通过，清单 README 描述较早的客户端校验。"
+    },
+    {
+      "id": "compute",
+      "name": "CPU / GPU 算力池",
+      "subtitle": "弹性算力资源",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "容器资源限额与伸缩样例",
+      "stack": [
+        "Kubernetes resources",
+        "CPU HPA"
+      ],
+      "how": "沙箱 Pod 声明 CPU 和内存请求与上限。Worker 提供 CPU HPA 和 PDB 示例，KEDA 文件全部为注释，也未加入 kustomize。",
+      "done": [
+        "CPU / 内存资源限制"
+      ],
+      "gaps": [
+        "GPU 资源调度",
+        "Worker 实际伸缩、KEDA 与容量基线"
+      ],
+      "code": [
+        "src/sca/sandbox/k8s.py",
+        "deploy/k8s/worker/hpa.yaml",
+        "deploy/k8s/worker/keda.yaml"
+      ],
+      "tests": [
+        "tests/unit/test_k8s_manifest.py"
+      ],
+      "docs": [
+        "deploy/k8s/worker/README.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "清单通过客户端渲染和 B1.12 记录的服务端 dry-run，仍未实际部署。单元测试验证沙箱 Pod 资源声明。"
+    },
+    {
+      "id": "kms",
+      "name": "密钥与证书 KMS",
+      "subtitle": "密钥 / 证书管理",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "仓库凭证与模型密钥隔离",
+      "stack": [
+        "OpenBao",
+        "hvac",
+        "GitHub App JWT",
+        "LiteLLM"
+      ],
+      "how": "配置 OpenBao 后，Worker 按租户与仓库读取凭证，借助 GIT_ASKPASS 仅传给 Git 子进程。启用模型网关时，真实模型密钥留在网关。",
+      "done": [
+        "OpenBao 凭证路径",
+        "GitHub App 安装令牌实现"
+      ],
+      "gaps": [
+        "真实 GitHub App 端到端验证",
+        "证书生命周期 / 通用 KMS 管理"
+      ],
+      "code": [
+        "src/sca/secrets/__init__.py",
+        "src/sca/workspace/askpass.sh",
+        "scripts/github_app_setup.py"
+      ],
+      "tests": [
+        "tests/unit/test_secrets.py",
+        "tests/e2e/test_e2e_secrets.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B4 记录真实 Gitea + OpenBao 路径通过；GitHub App 安装令牌尚未用真实 App 验证。"
+    },
+    {
+      "id": "obs_store",
+      "name": "日志与追踪存储",
+      "subtitle": "日志 / 指标 / 追踪",
+      "group": "存储与算力底座",
+      "status": "done",
+      "current": "事件、指标和追踪后端",
+      "stack": [
+        "Postgres",
+        "OpenTelemetry",
+        "Prometheus",
+        "Jaeger",
+        "Grafana"
+      ],
+      "how": "任务事件写入 Postgres，完整验证日志保存在对象存储。OTel 将追踪导出到 Jaeger，Prometheus 抓取指标，Grafana 展示仪表盘，Alertmanager 接收告警。",
+      "done": [
+        "追踪 / 指标 / 事件三条通路",
+        "仪表盘、告警与维护工作流"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/observability.py",
+        "deploy/obs/",
+        "src/sca/maintenance.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_obs.py",
+        "tests/integration/test_maintenance.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md",
+        "docs/handoff.md"
+      ],
+      "reviewNote": "B7 早期记录 webhook 待验；2026-11-16 的接手指南记录观测后端及 Alertmanager 可选服务测试已通过。"
+    },
+    {
+      "id": "net_sec",
+      "name": "网络与安全基础设施",
+      "subtitle": "VPC / 隔离 / 网关",
+      "group": "存储与算力底座",
+      "status": "partial",
+      "current": "默认拒绝与出口白名单",
+      "stack": [
+        "Squid",
+        "Calico NetworkPolicy",
+        "gVisor 可选"
+      ],
+      "how": "受限模式经 Squid 白名单代理限制出口和私网访问，Kubernetes 应用 NetworkPolicy。gVisor 可通过运行时配置启用。",
+      "done": [
+        "代理与默认网络隔离",
+        "K8s 网络策略"
+      ],
+      "gaps": [
+        "生产 VPC / 边界设施集成",
+        "K8s 真实 Agent 模型网关安全接通"
+      ],
+      "code": [
+        "src/sca/sandbox/egress.py",
+        "src/sca/sandbox/k8s.py",
+        "deploy/kind/calico.sh"
+      ],
+      "tests": [
+        "tests/integration/test_egress.py",
+        "tests/e2e/test_e2e_k8s.py",
+        "tests/integration/test_k8s_sandbox.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md",
+        "deploy/k8s/worker/README.md"
+      ],
+      "reviewNote": "B2 的集群验证使用 kind + Calico，云厂商插件未测；B9 的性能验证未包含 gVisor。"
+    },
+    {
+      "id": "evo_goal",
+      "name": "目标与评测管理",
+      "subtitle": "迭代目标 / 基准",
+      "group": "自进化引擎 ⑦：目标 → 评测 → 迭代 → 发布 → 回归",
+      "status": "done",
+      "current": "可复现的评测定义",
+      "stack": [
+        "YAML suites",
+        "sca eval"
+      ],
+      "how": "评测集包含任务规格、种子仓库与隐藏验收。系统记录内容哈希，可选择模型、提示词、记忆或规划变体并重复运行。",
+      "done": [
+        "12 个 coding-basic 样本",
+        "变体、重复次数与运行记录"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/eval/suites.py",
+        "src/sca/eval/cli.py",
+        "evals/coding-basic/suite.yaml"
+      ],
+      "tests": [
+        "tests/unit/test_evaluation.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C4 使用 12 个 coding-basic 样本。2026-11-15 真实对比每模型每题 1 次，两个模型均为 12/12，无法区分通过表现。"
+    },
+    {
+      "id": "evo_eval",
+      "name": "评测沙箱与结果",
+      "subtitle": "轨迹 / 回归证据",
+      "group": "自进化引擎 ⑦：目标 → 评测 → 迭代 → 发布 → 回归",
+      "status": "done",
+      "current": "独立隐藏验收与结果对照",
+      "stack": [
+        "Temporal EvalRunWorkflow",
+        "隔离沙箱"
+      ],
+      "how": "隐藏验收文件只进入新沙箱和干净副本。验收结果参与评测比较，Agent 只接收可见验证的修复反馈。评测工作流汇总通过率、Token、花费与耗时。",
+      "done": [
+        "隐藏验收隔离",
+        "并发评测、恢复和逐样本比较"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/kernel/acceptance.py",
+        "src/sca/eval/workflow.py",
+        "src/sca/eval/compare.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_evaluation.py",
+        "tests/e2e/test_eval_runner.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C4 记录 Worker 中途退出后续跑通过。首轮双模型对比没有通过率差异，gate 和 compare 的结果应结合样本与重复次数阅读。"
+    },
+    {
+      "id": "evo_improve",
+      "name": "策略与代码改进",
+      "subtitle": "提示词 / 工具 / 代码",
+      "group": "自进化引擎 ⑦：目标 → 评测 → 迭代 → 发布 → 回归",
+      "status": "partial",
+      "current": "人工修改提示词并评测",
+      "stack": [
+        "版本化文本模板",
+        "eval compare / gate"
+      ],
+      "how": "提示词版本跟随任务和子任务，操作者可编辑模板并使用相同评测集对照。",
+      "done": [
+        "提示词版本贯穿任务",
+        "评测比较与回归闸门"
+      ],
+      "gaps": [
+        "自动生成、筛选与合入提示词或代码改进",
+        "有区分度的评测用例与重复实验"
+      ],
+      "code": [
+        "src/sca/kernel/prompts.py",
+        "src/sca/kinds/coding/prompts/v1/",
+        "src/sca/eval/cli.py"
+      ],
+      "tests": [
+        "tests/unit/test_prompt_versions.py",
+        "tests/integration/test_prompt_version_workflow.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "两真实模型首轮评测均为 12/12，现有结果不支持对模型或自动改进能力作更广结论。"
+    },
+    {
+      "id": "evo_release",
+      "name": "版本发布与回滚",
+      "subtitle": "灰度 / 回滚",
+      "group": "自进化引擎 ⑦：目标 → 评测 → 迭代 → 发布 → 回归",
+      "status": "partial",
+      "current": "显式选择提示词版本",
+      "stack": [
+        "prompt_version",
+        "Git"
+      ],
+      "how": "提交任务时选择模板版本，模板完整性在接入时检查；当前只有随仓库交付的 v1，没有自动灰度发布服务。",
+      "done": [
+        "按任务固定提示词版本"
+      ],
+      "gaps": [
+        "版本灰度与自动回滚",
+        "发布审批与推广流程"
+      ],
+      "code": [
+        "src/sca/kernel/prompts.py",
+        "src/sca/kernel/spec.py"
+      ],
+      "tests": [
+        "tests/unit/test_prompt_versions.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C4 记录临时版本切换测试通过；基线仓库实际提供的模板版本为 v1。"
+    },
+    {
+      "id": "obs_trace",
+      "name": "Session→Trace→Span",
+      "subtitle": "全链路层级追踪",
+      "group": "可观测与任务追踪 ⑧",
+      "status": "done",
+      "current": "跨 API / Worker 的任务追踪",
+      "stack": [
+        "OpenTelemetry",
+        "Temporal tracing",
+        "Jaeger"
+      ],
+      "how": "配置 OTel 后，API、Temporal 工作流和活动传播追踪上下文。任务结果记录 trace_id，可在追踪后端按 ID 查找。",
+      "done": [
+        "任务提交到 Worker 的跨进程追踪",
+        "API、工作流与活动 Span"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/observability.py",
+        "src/sca/api/app.py",
+        "src/sca/orchestration/worker.py",
+        "src/sca/api/routes.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_tracing.py",
+        "tests/e2e/test_e2e_obs.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "活动跨度对齐的是任务 trace；Codex 会话与命令等细节通过业务事件记录。"
+    },
+    {
+      "id": "obs_replay",
+      "name": "轨迹回放与可视化",
+      "subtitle": "看 Agent 如何开发",
+      "group": "可观测与任务追踪 ⑧",
+      "status": "partial",
+      "current": "事件时间线 + Trace 浏览",
+      "stack": [
+        "SSE",
+        "Jaeger",
+        "事件归档"
+      ],
+      "how": "任务页和事件接口呈现历史时间线，Jaeger 可查看跨进程调用和耗时；归档事件仍可读取。",
+      "done": [
+        "事件和追踪可查询"
+      ],
+      "gaps": [
+        "交互式轨迹重演",
+        "代码改动时间轴"
+      ],
+      "code": [
+        "src/sca/api/static/index.html",
+        "src/sca/api/routes.py",
+        "src/sca/archive.py"
+      ],
+      "tests": [
+        "tests/integration/test_archive.py",
+        "tests/integration/test_notify.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md"
+      ]
+    },
+    {
+      "id": "obs_cost",
+      "name": "Token 与成本归因",
+      "subtitle": "单任务成本拆解",
+      "group": "可观测与任务追踪 ⑧",
+      "status": "done",
+      "current": "Token 与金额预算",
+      "stack": [
+        "LiteLLM spend",
+        "Postgres",
+        "Prometheus"
+      ],
+      "how": "Agent 事件提供 Token 用量。配置 LiteLLM 时，按轮临时 key 结算金额，结合任务与租户额度约束执行；cost_final 表示结算是否完成。",
+      "done": [
+        "Token / 金额归因",
+        "任务 / 租户额度检查"
+      ],
+      "gaps": [],
+      "code": [
+        "src/sca/gateway/litellm.py",
+        "src/sca/kernel/activities.py",
+        "src/sca/db/repo.py"
+      ],
+      "tests": [
+        "tests/integration/test_budget.py",
+        "tests/e2e/test_e2e_gateway.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md"
+      ],
+      "reviewNote": "B6 记录真实 Docker 网关验证。网关可异步落账，缺少网关时仅有 Token 预算。"
+    },
+    {
+      "id": "obs_risk",
+      "name": "质量视图与风险回溯",
+      "subtitle": "人工介入率 / 瓶颈",
+      "group": "可观测与任务追踪 ⑧",
+      "status": "partial",
+      "current": "运维指标与评测比较",
+      "stack": [
+        "Grafana",
+        "Prometheus",
+        "eval compare"
+      ],
+      "how": "运维面板显示任务耗时、验证通过率、活动执行失败与 API 错误，评测可逐样本比较退化。",
+      "done": [
+        "运行指标与告警",
+        "评测回归定位"
+      ],
+      "gaps": [
+        "人工介入率分析",
+        "统一风险归因视图"
+      ],
+      "code": [
+        "deploy/obs/grafana/dashboards/sca.json",
+        "deploy/obs/alerts.yml",
+        "src/sca/eval/compare.py"
+      ],
+      "tests": [
+        "tests/unit/test_obs_queries.py",
+        "tests/e2e/test_e2e_obs.py"
+      ],
+      "docs": [
+        "docs/design-phase2b.md",
+        "docs/design-phase3.md"
+      ]
+    },
+    {
+      "id": "analysis_kind",
+      "name": "数据分析场景",
+      "subtitle": "V2 新增能力",
+      "group": "V2 新增能力",
+      "status": "partial",
+      "current": "数据分析场景",
+      "stack": [
+        "TaskKind",
+        "Python",
+        "Werkzeug"
+      ],
+      "how": "上传数据后创建 Git 工作区。验证报告、图引用与输入不可变性，重跑 analysis.py 对照报告与 results.json，发布报告、图和结果制品。",
+      "done": [
+        "通用内核的第二个场景",
+        "数据不可变与结果可重现检查"
+      ],
+      "gaps": [
+        "真实模型分析用例验证",
+        "报告 Markdown 渲染"
+      ],
+      "code": [
+        "src/sca/kinds/analysis/",
+        "src/sca/api/files.py",
+        "deploy/sandbox-analysis/Dockerfile",
+        "src/sca/api/static/index.html"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_analysis.py",
+        "tests/unit/test_analysis_verification.py"
+      ],
+      "docs": [
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "C1 记录 6 个脚本化 Agent 的真实沙箱端到端用例通过，网页报告以纯文本显示。"
+    },
+    {
+      "id": "model_gateway",
+      "name": "按轮签发的模型网关",
+      "subtitle": "V2 新增能力",
+      "group": "V2 新增能力",
+      "status": "partial",
+      "current": "按轮签发的模型网关",
+      "stack": [
+        "LiteLLM",
+        "httpx"
+      ],
+      "how": "接通 Docker 网关时，每轮使用有额度和期限的虚拟 key，轮末回收。平台通过网关接口支持记忆提炼和 embeddings 调用。",
+      "done": [
+        "Docker 临时密钥与额度",
+        "花费结算与孤儿 key 清理"
+      ],
+      "gaps": [
+        "Kubernetes 上的真实 Agent 模型网关",
+        "真实 embeddings 模型验证"
+      ],
+      "code": [
+        "src/sca/gateway/litellm.py",
+        "src/sca/sandbox/__init__.py",
+        "deploy/litellm/config.yaml",
+        "src/sca/orchestration/worker.py"
+      ],
+      "tests": [
+        "tests/e2e/test_e2e_gateway.py",
+        "tests/unit/test_gateway.py"
+      ],
+      "docs": [
+        "docs/design-phase2.md",
+        "deploy/k8s/worker/README.md",
+        "docs/design-phase2b.md",
+        "docs/design-phase3.md"
+      ],
+      "reviewNote": "B1 记录 K8s 驱动配置模型网关会在 Worker 启动时报错。真实 Docker 网关和提炼有历史结果，向量测试使用假 embeddings。"
+    }
+  ]
+}
