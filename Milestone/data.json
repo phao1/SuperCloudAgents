@@ -1,16 +1,16 @@
 {
   "meta": {
     "date": "2026-11-16",
-    "commit": "6d73e778335d5f04aef03bc10ec9608fbd703a1b",
+    "commit": "196e8d1f7e040fdd497bcc9d8251031c27a47e87",
     "repository": "https://github.com/phao1/SuperCloudAgents",
     "diagramSha256": "b9730ed40e1b59884dbca1c1621d5b173f2b358deca3bfd908643f084063a9a4",
     "scope": "2026-11-16 的提交快照，覆盖原图 50 个节点及 2 项 V2 补充能力。",
-    "method": "以基线源码和测试断言判定实现范围，以阶段结果及接手指南记录历史运行结果。本次未重跑平台后端测试。",
+    "method": "逐项对照基线源码、测试断言和 src/ 缺口检索判定 52 项模块的实现范围，以阶段结果及接手指南记录历史运行结果。本次未重跑平台后端测试。",
     "evidenceReport": [
       "docs/handoff.md 记录 MVP、二期、B1–B9 与 C1–C4 已完成。阶段完成按各阶段约定的范围判定。",
       "2026-11-16 历史回归：单元与集成 431 通过（不含 K8s 和真实模型），挂载与 sync 端到端各 34 通过，两节点 kind + Calico 48 通过。",
-      "同次记录中的可选服务与真实模型测试通过，包括 Alertmanager、GitHub Runner、Codex、LiteLLM 网关、两模型评测和记忆提炼。GitHub App 仍待真实安装验证。",
-      "阶段设计末尾的补记与接手指南优先用于核对测试结果。Alertmanager 已有后续投递验证记录，pgvector 已在真实扩展上用假向量验证。"
+      "同次记录中的可选服务与真实模型测试通过，包括 Alertmanager、GitHub Runner、Codex、LiteLLM 网关、两模型评测和记忆提炼。2026-11-16 的 B4 补记已记录真实私有 GitHub App 安装令牌链路通过，安装范围仅一个私有测试仓库。",
+      "阶段设计末尾的补记与接手指南优先用于核对测试结果。Prometheus → Alertmanager → webhook 已用本地接收器验证，真实 Slack / 邮件渠道投递未验证；pgvector 已在真实扩展上用假向量验证。"
     ]
   },
   "modules": [
@@ -175,7 +175,8 @@
       ],
       "tests": [
         "tests/e2e/test_e2e_planning.py",
-        "tests/e2e/test_e2e_fake.py"
+        "tests/e2e/test_e2e_fake.py",
+        "tests/integration/test_workflow.py"
       ],
       "docs": [
         "docs/architecture.md",
@@ -475,7 +476,8 @@
       ],
       "tests": [
         "tests/integration/test_planning.py",
-        "tests/e2e/test_e2e_planning.py"
+        "tests/e2e/test_e2e_planning.py",
+        "tests/integration/test_workflow.py"
       ],
       "docs": [
         "docs/design-phase2b.md"
@@ -675,7 +677,9 @@
         "src/sca/kernel/prompts.py"
       ],
       "tests": [
-        "tests/e2e/test_e2e_evaluation.py"
+        "tests/e2e/test_e2e_evaluation.py",
+        "tests/unit/test_evaluation.py",
+        "tests/e2e/test_eval_runner.py"
       ],
       "docs": [
         "docs/design-phase3.md",
@@ -704,9 +708,11 @@
         "独立的跨集群沙箱调度服务"
       ],
       "code": [
-        "src/sca/sandbox/__init__.py",
         "src/sca/sandbox/k8s.py",
-        "src/sca/workspace/transport.py"
+        "src/sca/workspace/transport.py",
+        "src/sca/core/interfaces.py",
+        "src/sca/orchestration/worker.py",
+        "src/sca/sandbox/docker.py"
       ],
       "tests": [
         "tests/integration/test_k8s_sandbox.py",
@@ -807,11 +813,13 @@
       "code": [
         "src/sca/kernel/activities.py",
         "src/sca/kernel/kind.py",
-        "src/sca/kinds/builtin.py"
+        "src/sca/kinds/builtin.py",
+        "src/sca/kernel/workflow.py"
       ],
       "tests": [
         "tests/unit/test_layering.py",
-        "tests/unit/test_kinds.py"
+        "tests/unit/test_kinds.py",
+        "tests/e2e/test_e2e_analysis.py"
       ],
       "docs": [
         "docs/design-phase3.md"
@@ -985,10 +993,12 @@
       ],
       "code": [
         "src/sca/memory/",
-        "src/sca/api/memories.py"
+        "src/sca/api/memories.py",
+        "src/sca/db/repo.py"
       ],
       "tests": [
-        "tests/integration/test_memories.py"
+        "tests/integration/test_memories.py",
+        "tests/e2e/test_e2e_memory.py"
       ],
       "docs": [
         "docs/design-phase3.md"
@@ -1043,7 +1053,8 @@
       ],
       "tests": [
         "tests/integration/test_archive.py",
-        "tests/integration/test_memories.py"
+        "tests/integration/test_memories.py",
+        "tests/integration/test_authz.py"
       ],
       "docs": [
         "docs/design-phase2.md",
@@ -1225,7 +1236,7 @@
         "Gitea / GitHub",
         "S3"
       ],
-      "how": "编码场景克隆仓库，保存可信镜像与提交检查点，发布补丁。配置推送时，分支可供外部 CI 和审阅使用。",
+      "how": "编码场景克隆仓库，保存可信镜像与提交检查点，发布补丁。配置推送或外部 CI 时只推送 sca/<task> 任务分支，平台不创建或更新 PR；审阅通过也不合入目标分支。",
       "done": [
         "Git 分支和补丁发布",
         "CI 对接与制品下载"
@@ -1237,16 +1248,18 @@
       "code": [
         "src/sca/workspace/git.py",
         "src/sca/kinds/coding/activities.py",
-        "deploy/ci/"
+        "deploy/ci/",
+        "src/sca/kernel/activities.py"
       ],
       "tests": [
         "tests/integration/test_workspace.py",
-        "tests/e2e/test_e2e_ci_real.py"
+        "tests/e2e/test_e2e_ci_real.py",
+        "tests/e2e/test_e2e_secrets.py"
       ],
       "docs": [
         "docs/design-phase2b.md"
       ],
-      "reviewNote": "历史 live 回归覆盖真实 GitHub / Gitea CI。使用 GitHub App 安装令牌的链路有实现和条件测试，仍待真实验证。"
+      "reviewNote": "历史 live 回归覆盖真实 GitHub / Gitea CI。B4 的 2026-11-16 补记记录 GitHub App 安装令牌在一个私有测试仓库上完成克隆、分支推送和人工审阅通过，测试分支已清理；这不代表 PR 集成。"
     },
     {
       "id": "k8s",
@@ -1295,7 +1308,7 @@
         "Kubernetes resources",
         "CPU HPA"
       ],
-      "how": "沙箱 Pod 声明 CPU 和内存请求与上限。Worker 提供 CPU HPA 和 PDB 示例，KEDA 文件全部为注释，也未加入 kustomize。",
+      "how": "沙箱 Pod 声明 CPU 和内存上限（resources.limits，未显式声明 requests）。Worker 提供 CPU HPA 和 PDB 示例，KEDA 文件全部为注释，也未加入 kustomize。",
       "done": [
         "CPU / 内存资源限制"
       ],
@@ -1333,10 +1346,9 @@
       "how": "配置 OpenBao 后，Worker 按租户与仓库读取凭证，借助 GIT_ASKPASS 仅传给 Git 子进程。启用模型网关时，真实模型密钥留在网关。",
       "done": [
         "OpenBao 凭证路径",
-        "GitHub App 安装令牌实现"
+        "GitHub App 安装令牌与真实私有仓库链路"
       ],
       "gaps": [
-        "真实 GitHub App 端到端验证",
         "证书生命周期 / 通用 KMS 管理"
       ],
       "code": [
@@ -1346,12 +1358,13 @@
       ],
       "tests": [
         "tests/unit/test_secrets.py",
-        "tests/e2e/test_e2e_secrets.py"
+        "tests/e2e/test_e2e_secrets.py",
+        "tests/unit/test_github_app_setup.py"
       ],
       "docs": [
         "docs/design-phase2b.md"
       ],
-      "reviewNote": "B4 记录真实 Gitea + OpenBao 路径通过；GitHub App 安装令牌尚未用真实 App 验证。"
+      "reviewNote": "B4 记录真实 Gitea + OpenBao 路径通过。2026-11-16 真实私有 App 仅安装在一个私有测试仓库：OpenBao 保存私钥，Worker 自行换取安装令牌，克隆、推送任务分支、审阅通过；令牌未进入事件、捕获日志或 Temporal 历史，测试分支已清理。接入脚本新增 import 命令，先调用 GET /app 核对私钥所属 App。"
     },
     {
       "id": "obs_store",
@@ -1370,9 +1383,12 @@
       "how": "任务事件写入 Postgres，完整验证日志保存在对象存储。OTel 将追踪导出到 Jaeger，Prometheus 抓取指标，Grafana 展示仪表盘，Alertmanager 接收告警。",
       "done": [
         "追踪 / 指标 / 事件三条通路",
-        "仪表盘、告警与维护工作流"
+        "仪表盘、告警与维护工作流",
+        "Prometheus → Alertmanager → 本地 webhook 投递验证"
       ],
-      "gaps": [],
+      "gaps": [
+        "真实 Slack / 邮件渠道投递验证"
+      ],
       "code": [
         "src/sca/observability.py",
         "deploy/obs/",
@@ -1386,7 +1402,7 @@
         "docs/design-phase2b.md",
         "docs/handoff.md"
       ],
-      "reviewNote": "B7 早期记录 webhook 待验；2026-11-16 的接手指南记录观测后端及 Alertmanager 可选服务测试已通过。"
+      "reviewNote": "B7 早期记录 webhook 待验；2026-11-16 接手指南记录后续观测后端及 Alertmanager 回归通过。已验证 Prometheus → Alertmanager → webhook，接收端为本地 webhook 接收器；真实 Slack / 邮件渠道未验证，配置中仅有注释示例。live 测试检查 Prometheus 的 Alertmanager 目标，并直接向 Alertmanager 注入告警核对 webhook 内容。"
     },
     {
       "id": "net_sec",
@@ -1448,7 +1464,8 @@
         "evals/coding-basic/suite.yaml"
       ],
       "tests": [
-        "tests/unit/test_evaluation.py"
+        "tests/unit/test_evaluation.py",
+        "tests/e2e/test_eval_runner.py"
       ],
       "docs": [
         "docs/design-phase3.md"
@@ -1475,7 +1492,8 @@
       "code": [
         "src/sca/kernel/acceptance.py",
         "src/sca/eval/workflow.py",
-        "src/sca/eval/compare.py"
+        "src/sca/eval/compare.py",
+        "src/sca/kernel/activities.py"
       ],
       "tests": [
         "tests/e2e/test_e2e_evaluation.py",
@@ -1513,7 +1531,8 @@
       ],
       "tests": [
         "tests/unit/test_prompt_versions.py",
-        "tests/integration/test_prompt_version_workflow.py"
+        "tests/integration/test_prompt_version_workflow.py",
+        "tests/unit/test_evaluation.py"
       ],
       "docs": [
         "docs/design-phase3.md"
@@ -1573,7 +1592,8 @@
         "src/sca/observability.py",
         "src/sca/api/app.py",
         "src/sca/orchestration/worker.py",
-        "src/sca/api/routes.py"
+        "src/sca/api/routes.py",
+        "src/sca/orchestration/client.py"
       ],
       "tests": [
         "tests/e2e/test_e2e_tracing.py",
@@ -1743,13 +1763,14 @@
       ],
       "code": [
         "src/sca/gateway/litellm.py",
-        "src/sca/sandbox/__init__.py",
         "deploy/litellm/config.yaml",
-        "src/sca/orchestration/worker.py"
+        "src/sca/orchestration/worker.py",
+        "src/sca/maintenance.py"
       ],
       "tests": [
         "tests/e2e/test_e2e_gateway.py",
-        "tests/unit/test_gateway.py"
+        "tests/unit/test_gateway.py",
+        "tests/integration/test_maintenance.py"
       ],
       "docs": [
         "docs/design-phase2.md",

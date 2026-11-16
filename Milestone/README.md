@@ -13,7 +13,7 @@
 
 ## 快照范围
 
-[data.json](data.json) 是基于 2026-11-16 的 `6d73e778335d5f04aef03bc10ec9608fbd703a1b` 提交整理的人工审计快照。页面上的 GitHub 证据链接固定到这个提交，源文件路径相对于仓库根目录。
+[data.json](data.json) 是基于 2026-11-16 的 `196e8d1f7e040fdd497bcc9d8251031c27a47e87` 提交整理的人工审计快照。页面上的 GitHub 证据链接固定到这个提交，源文件路径相对于仓库根目录。
 
 原图反映 V1 的 Coding Agent 平台构想。V2 将平台实现为模块化单体，以 Temporal 持久化编排、可插拔 Agent 后端和沙箱为基础，并将编码与数据分析接入同一内核。原图的 50 个节点全部纳入统计，数据分析场景与按轮签发的模型网关作为 2 项 V2 补充能力，另行展示。状态按模块的能力边界判定。
 
@@ -28,14 +28,20 @@
 
 ## 历史验证和当前边界
 
-[接手指南](../docs/handoff.md#1-现在到哪了) 记录 MVP、二期、B1–B9 和 C1–C4 按各阶段交付范围完成。2026-11-16 的回归记录为单元与集成 431 项通过（不含 Kubernetes 和真实模型），挂载与 sync 端到端各 34 项通过，两节点 kind + Calico 48 项通过。可选服务和真实模型测试有历史通过记录。Alertmanager 的 webhook 投递在 B7 早期记录中待验，接手指南已记录后续观测服务回归通过。
+[接手指南](../docs/handoff.md#1-现在到哪了) 记录 MVP、二期、B1–B9 和 C1–C4 按各阶段交付范围完成。2026-11-16 的回归记录为单元与集成 431 项通过（不含 Kubernetes 和真实模型），挂载与 sync 端到端各 34 项通过，两节点 kind + Calico 48 项通过。可选服务和真实模型测试有历史通过记录。Prometheus → Alertmanager → webhook 已用本地 webhook 接收器验证；真实 Slack / 邮件渠道投递未验证，配置中仅有注释示例。live 测试检查 Prometheus 的 Alertmanager 目标，并直接向 Alertmanager 注入告警核对接收内容。
 
-- 真实 CI 已有 GitHub 自托管 Runner 和 Gitea 的历史通过记录。GitHub App 安装令牌路径待真实 App 验证。见 [B3 结果](../docs/design-phase2b.md#b37-结果)和 [B4 结果](../docs/design-phase2b.md#b46-结果)。
+- 真实 CI 已有 GitHub 自托管 Runner 和 Gitea 的历史通过记录。2026-11-16 已用真实私有 GitHub App 验证安装令牌路径，安装范围仅一个私有测试仓库：OpenBao 保存私钥，Worker 自行换取令牌，克隆、推送任务分支、审阅通过；令牌未进入事件、捕获日志和 Temporal 历史，测试分支已清理。接入脚本新增 `import` 命令。平台只推送 `sca/<task>` 分支，不创建或更新 PR，也不自动合入目标分支。见 [B3 结果](../docs/design-phase2b.md#b37-结果)和 [B4 结果](../docs/design-phase2b.md#b46-结果)。
 - pgvector 已在真实扩展上使用确定性假向量通过集成测试，真实 embeddings 模型尚未验证。见 [C3 结果](../docs/design-phase3.md#c381-结果)。
 - 数据分析覆盖脚本化 Agent 的真实沙箱端到端用例。真实模型分析待验，网页报告以文本显示。Figma、Jira 和 Confluence 的在线接入待实现，三类意图适配器当前接受文件输入。见 [C1 和 C2](../docs/design-phase3.md)。
 - Kubernetes 模型网关尚未接通。Worker 清单有客户端渲染和 B1.12 补记的 kind 服务端 dry-run 记录，实际部署、镜像、RBAC、探针、排空与伸缩仍待验证。KEDA 为未启用的注释示例。见 [B1 结果](../docs/design-phase2b.md#b112-结果) 和 [Worker 示例](../deploy/k8s/worker/README.md)。
 - pip 下载缓存仅用于 mount 模式，Kubernetes 预热池的容量固定。见 [B1 缓存说明](../docs/design-phase2b.md#b16-缓存在多节点下怎么办) 和 [B9 结果](../docs/design-phase2b.md#b94-结果)。
 - 首轮真实评测每模型每样本只运行一次，两个模型均为 12/12。样本通过率无法区分二者。已有隐藏验收、版本选择、评测比较与回归 gate，自动改代码及推广版本尚未实现。见 [C4 结果](../docs/design-phase3.md#c4101-结果)。
+
+## 本次审计记录
+
+2026-11-16 对上述 HEAD 的 52 项模块逐项核对：抽查每项已交付声明对应的源码和测试断言，并在 `src/` 检索缺口的相关实现；结合阶段结果确认真实服务的历史验证边界。所有状态等级保持不变；移除 KMS 的真实 GitHub App 待验缺口，明确真实通知渠道仍未验证，并补齐人工规划审核、场景内核、记忆注入、操作审计、评测、追踪与孤儿 key 清理的直接证据路径。将沙箱调度与模型网关错误指向的空 `sandbox/__init__.py` 替换为实际工厂、接口和驱动路径；同步修正阶段说明及下一步演进中的 GitHub App 待验文案。沙箱 Pod 只显式声明 CPU / 内存 `limits`，不把它描述为同时声明 `requests`。
+
+本次只运行离线生成与静态校验，不启动、停止或调用平台 API、Worker、Docker 沙箱及其依赖；不把历史后端测试结果记为本次执行。当前环境未发现可用浏览器或 Playwright / Selenium，未完成重新生成页面的浏览器离线交互验收；[QA.md](QA.md) 保留的是旧基线的历史验收记录。
 
 ## 更新和校验
 

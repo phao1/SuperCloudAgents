@@ -11,7 +11,7 @@ from xml.etree import ElementTree
 
 MILESTONE = Path(__file__).resolve().parent
 REPOSITORY = MILESTONE.parent
-BASELINE_COMMIT = "6d73e778335d5f04aef03bc10ec9608fbd703a1b"
+BASELINE_COMMIT = "196e8d1f7e040fdd497bcc9d8251031c27a47e87"
 BASELINE_DATE = "2026-11-16"
 ORIGINAL_NODE_COUNT = 50
 V2_ADDITIONS = {"analysis_kind", "model_gateway"}

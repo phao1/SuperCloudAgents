@@ -831,15 +831,15 @@
     {
       id: "02B / B1–B9", title: "二期收尾 · 验证跨节点与运维", source: "docs/design-phase2b.md",
       summary: "二期收尾交付状态同步、集群隔离、真实 CI、受限权限、费用和维护流程。",
-      scope: "更新的交接记录包括 GitHub Runner、Gitea、Alertmanager 的通过结果；真实 GitHub App 安装验证和集群 Worker 实际部署仍有边界。",
+      scope: "交接记录与 B4 补记包括 GitHub Runner、Gitea 和真实私有 GitHub App 的通过结果；Prometheus → Alertmanager → 本地 webhook 已验证，真实 Slack / 邮件渠道和集群 Worker 实际部署仍待验证。",
       items: [
         "B1 多节点：对象存储同步与换 Worker 续跑；Worker 集群部署另待实测。",
         "B2 集群网络隔离：kind / Calico 隔离用例。",
         "B3 真实 CI：Gitea 与 GitHub Runner 路径。",
-        "B4 仓库凭证：Gitea + OpenBao 有结果，真实 GitHub App 待验。",
+        "B4 仓库凭证：Gitea + OpenBao 与真实私有 GitHub App 均有结果；App 仅安装在一个私有测试仓库，平台只推送分支，不创建或更新 PR。",
         "B5 权限：租户角色与 CI 受限令牌。",
         "B6 金额预算：LiteLLM 用量、成本落库和超预算停止。",
-        "B7 运维：追踪、告警、定期归档、缓存淘汰和孤儿清理。",
+        "B7 运维：追踪、告警、定期归档、缓存淘汰和孤儿清理；本地 webhook 已验证，真实 Slack / 邮件渠道未验证。",
         "B8 自动拆分：检查已跟踪文件上的规划路径重叠，支持并行合并和单 Agent 回退；执行期不强制规划路径边界。",
         "B9 启动时延评估：在两节点 kind 测量冷启动并实现固定大小预热池。",
       ],
@@ -858,10 +858,10 @@
   ];
   const roadmap = [
     {
-      priority: "P0", title: "验证真实 GitHub App",
-      next: "用真实安装令牌在私有仓完成克隆与推送；CI 使用单独的仓库受限 ci:report 令牌回报。",
-      exit: "记录端到端结果，并检查沙箱、工作流历史与事件均未出现仓库令牌。",
-      modules: ["repos", "kms"],
+      priority: "P1", title: "验证真实告警通知渠道",
+      next: "在已验证的 Prometheus → Alertmanager → 本地 webhook 基础上，配置真实 Slack 或邮件接收端。",
+      exit: "记录实际渠道收到告警的结果；本地 webhook 通过不等同于真实 Slack / 邮件投递通过。",
+      modules: ["obs_store", "obs_risk"],
     },
     {
       priority: "P0", title: "验证 K8s 的网关与 Worker 部署",
