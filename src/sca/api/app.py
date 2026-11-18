@@ -140,9 +140,24 @@ def create_app(
     async def index() -> FileResponse:
         return FileResponse(Path(__file__).parent / "static" / "index.html")
 
+    from sca.api.evals import router as evals_router
     from sca.api.files import router as files_router
     from sca.api.memories import router as memories_router
+    from sca.api.portal import router as portal_router
 
+    @app.get("/portal", include_in_schema=False)
+    async def portal() -> FileResponse:
+        return FileResponse(Path(__file__).parent / "static" / "portal.html")
+
+    try:
+        from sca.api.agents import router as agents_router
+    except ImportError:
+        pass
+    else:
+        app.include_router(agents_router)
+
+    app.include_router(evals_router)
+    app.include_router(portal_router)
     app.include_router(memories_router)
     app.include_router(files_router)
     app.include_router(router)

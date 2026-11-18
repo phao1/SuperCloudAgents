@@ -51,6 +51,7 @@ markers = [
   "k8s: needs the local kind cluster (deploy/kind)",
   "live: needs optional services (compose profiles s3, oidc, temporal-pg, gitea; a GitHub runner)",
   "gateway: needs the LiteLLM gateway (compose profile `gateway`) and a provider key in .env",
+  "docker: needs a local Docker daemon",
 ]
 
 [tool.ruff]

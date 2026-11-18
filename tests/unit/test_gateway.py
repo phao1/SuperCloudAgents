@@ -189,3 +189,109 @@ async def test_deleting_a_key_that_is_not_there_is_success():
             await gateway._post("/key/delete", {"key_aliases": ["a"]})
     finally:
         await gateway.aclose()
+
+
+@pytest.mark.parametrize("error", LiteLLMGateway.TRANSIENT_ERRORS)
+@pytest.mark.parametrize("method", ["GET", "POST"])
+async def test_transport_retry(error, method, monkeypatch):
+    from sca.gateway import litellm
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(litellm.asyncio, "sleep", no_sleep)
+    calls = 0
+
+    def handle(request):
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise error("reset", request=request)
+        return httpx.Response(200, json={})
+
+    gateway = LiteLLMGateway("http://gateway", "secret", "http://sandbox")
+    await gateway._http.aclose()
+    gateway._http = httpx.AsyncClient(base_url="http://gateway", transport=httpx.MockTransport(handle))
+    try:
+        assert (await gateway._request(method, "/admin")).status_code == 200
+        assert calls == 3
+    finally:
+        await gateway.aclose()
+
+
+async def test_issue_key_recovers_lost_response(monkeypatch):
+    import hashlib
+    import json
+
+    from sca.gateway import litellm
+
+    async def no_sleep(_):
+        pass
+
+    monkeypatch.setattr(litellm.asyncio, "sleep", no_sleep)
+    keys = []
+    generated = []
+
+    def handle(request):
+        if request.url.path == "/key/list":
+            return httpx.Response(200, json={"keys": keys})
+        assert request.url.path == "/key/generate"
+        body = json.loads(request.content)
+        if keys:
+            return httpx.Response(400, json={"error": "alias exists"})
+        generated.append(body["key"])
+        keys.append({"key_alias": body["key_alias"],
+                     "token": hashlib.sha256(body["key"].encode()).hexdigest()})
+        raise httpx.ReadError("lost response", request=request)
+
+    gateway = LiteLLMGateway("http://gateway", "secret", "http://sandbox")
+    await gateway._http.aclose()
+    gateway._http = httpx.AsyncClient(base_url="http://gateway", transport=httpx.MockTransport(handle))
+    try:
+        first = await gateway.issue_key("alias", models=["model"], ttl_s=60)
+        assert await gateway.issue_key("alias", models=["model"], ttl_s=60) == first
+        assert generated == [first]
+    finally:
+        await gateway.aclose()
+
+
+async def test_transport_retries_exhausted():
+    from sca.gateway.litellm import GatewayError
+
+    calls = 0
+
+    def handle(request):
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("reset", request=request)
+
+    gateway = LiteLLMGateway("http://gateway", "secret", "http://sandbox")
+    await gateway._http.aclose()
+    gateway._http = httpx.AsyncClient(base_url="http://gateway", transport=httpx.MockTransport(handle))
+    try:
+        with pytest.raises(GatewayError, match="transport failed"):
+            await gateway.list_aliases("prefix")
+        assert calls == 4
+    finally:
+        await gateway.aclose()
+
+
+async def test_issue_key_replaces_unrecoverable_legacy_key():
+    paths = []
+
+    def handle(request):
+        paths.append(request.url.path)
+        if request.url.path == '/key/list':
+            return httpx.Response(200, json={'keys': [{'key_alias': 'alias', 'token': 'old-hash'}]})
+        if request.url.path == '/key/delete':
+            return httpx.Response(200, json={})
+        return httpx.Response(200, json={'key': 'sk-replacement'})
+
+    gateway = LiteLLMGateway('http://gateway', 'secret', 'http://sandbox')
+    await gateway._http.aclose()
+    gateway._http = httpx.AsyncClient(base_url='http://gateway', transport=httpx.MockTransport(handle))
+    try:
+        assert await gateway.issue_key('alias', models=['model'], ttl_s=60) == 'sk-replacement'
+        assert paths == ['/key/list', '/key/delete', '/key/generate']
+    finally:
+        await gateway.aclose()

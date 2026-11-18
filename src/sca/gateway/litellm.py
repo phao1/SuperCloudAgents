@@ -7,6 +7,8 @@ virtual key that works for one agent turn and is deleted when the turn ends.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import math
 
 import httpx
@@ -20,22 +22,38 @@ class GatewayError(ScaError):
 
 class LiteLLMGateway:
     def __init__(self, admin_url: str, master_key: str, sandbox_url: str, timeout_s: float = 20):
+        self._master_key = master_key
         self.sandbox_url = sandbox_url  # what a sandbox uses as its OpenAI-compatible base URL
         self._http = httpx.AsyncClient(
             base_url=admin_url.rstrip("/"),
             headers={"Authorization": f"Bearer {master_key}"},
             timeout=timeout_s,
+            limits=httpx.Limits(keepalive_expiry=2),
         )
 
+    TRANSIENT_ERRORS = (
+        httpx.ConnectError, httpx.ReadError, httpx.RemoteProtocolError,
+        httpx.WriteError, httpx.PoolTimeout,
+    )
+
+    async def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        for attempt in range(4):
+            try:
+                return await self._http.request(method, path, **kwargs)
+            except self.TRANSIENT_ERRORS:
+                if attempt == 3:
+                    raise GatewayError("model gateway transport failed") from None
+                await asyncio.sleep(0.1 * 2**attempt)
+            except httpx.HTTPError:
+                raise GatewayError("model gateway unreachable") from None
+        raise AssertionError("unreachable")
+
     async def _post(self, path: str, body: dict) -> dict:
-        try:
-            r = await self._http.post(path, json=body)
-        except httpx.HTTPError as e:
-            raise GatewayError(f"model gateway unreachable: {e}") from e
+        r = await self._request("POST", path, json=body)
         if r.status_code == 404 and path == "/key/delete" and "no keys found" in r.text.lower():
-            return {}  # deleting is idempotent: a key that is not there is already revoked
+            return {}
         if r.status_code >= 400:
-            raise GatewayError(f"model gateway {path} failed: {r.status_code} {r.text[:300]}")
+            raise GatewayError(f"model gateway {path} failed: {r.status_code}")
         return r.json()
 
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
@@ -76,18 +94,45 @@ class LiteLLMGateway:
         max_budget_usd: float | None = None,
         metadata: dict | None = None,
     ) -> str:
-        # A retried activity asks again under the same alias: replace the old key.
-        await self._post("/key/delete", {"key_aliases": [alias]})
-        data = await self._post(
-            "/key/generate",
-            {
-                "key_alias": alias,
-                "models": models,
-                "duration": f"{int(ttl_s)}s",
-                "max_budget": max_budget_usd,
-                "metadata": metadata or {},
-            },
-        )
+        # Supplying a stable key makes a lost generate response safe to recover.
+        key = "sk-" + hmac.new(
+            self._master_key.encode(), alias.encode(), hashlib.sha256
+        ).hexdigest()
+
+        async def existing() -> str | None:
+            response = await self._request(
+                "GET", "/key/list",
+                params={"key_alias": alias, "return_full_object": "true"},
+            )
+            response.raise_for_status()
+            for row in response.json().get("keys", []):
+                if row.get("key_alias") != alias:
+                    continue
+                token = row.get("key") or row.get("token")
+                if token == key or token == hashlib.sha256(key.encode()).hexdigest():
+                    return key
+                if isinstance(token, str) and token.startswith("sk-"):
+                    return token
+                # Older randomly generated keys are stored only as hashes by LiteLLM.
+                await self._post("/key/delete", {"key_aliases": [alias]})
+                return None
+            return None
+
+        found = await existing()
+        if found:
+            return found
+        body = {
+            "key": key, "key_alias": alias, "models": models,
+            "duration": f"{int(ttl_s)}s", "max_budget": max_budget_usd,
+            "metadata": metadata or {},
+        }
+        try:
+            data = await self._post("/key/generate", body)
+        except GatewayError:
+            found = await existing()
+            if found:
+                return found
+            raise
         return data["key"]
 
     # LiteLLM writes spend in batches (proxy_batch_write_at). Spend counts as settled once it
@@ -104,7 +149,7 @@ class LiteLLMGateway:
         try:
             async with asyncio.timeout(self.SETTLE_TIMEOUT_S):
                 while True:
-                    response = await self._http.get(
+                    response = await self._request("GET", 
                         "/key/list", params={"key_alias": alias, "return_full_object": "true"}
                     )
                     response.raise_for_status()
@@ -112,7 +157,7 @@ class LiteLLMGateway:
                     if keys:
                         token = keys[0].get("token") or keys[0].get("key")
                         if token:
-                            response = await self._http.get("/key/info", params={"key": token})
+                            response = await self._request("GET", "/key/info", params={"key": token})
                             response.raise_for_status()
                             info = response.json().get("info") or {}
                         else:
@@ -129,7 +174,7 @@ class LiteLLMGateway:
                     await asyncio.sleep(0.5)
         except TimeoutError:
             return spend, False
-        except (httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError):
+        except (GatewayError, httpx.HTTPError, ValueError, TypeError, AttributeError, KeyError):
             return None, False
 
     async def finalize_key(self, alias: str) -> tuple[float | None, bool]:
@@ -147,7 +192,7 @@ class LiteLLMGateway:
         aliases: set[str] = set()
         page = 1
         while True:
-            response = await self._http.get(
+            response = await self._request("GET", 
                 "/key/list", params={"return_full_object": "true", "page": page, "size": 100}
             )
             response.raise_for_status()

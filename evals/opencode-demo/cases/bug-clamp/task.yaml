@@ -1,0 +1,2 @@
+instruction: 修复 clamp(value, low, high)，让结果正确限制在上下界之间，包含边界。
+verify_command: python verify.py

@@ -1,5 +1,5 @@
 # Docker needs the docker group; `sg` makes this work in shells that predate the group change.
-DOCKER := $(shell docker info >/dev/null 2>&1 && echo docker || echo "sg docker -c")
+DOCKER = $(shell timeout 15 docker info >/dev/null 2>&1 && echo docker || echo "sg docker -c")
 PY := .venv/bin/python
 define dk
 $(if $(filter docker,$(DOCKER)),$(1),sg docker -c '$(1)')
@@ -16,6 +16,7 @@ down:
 	$(call dk,docker compose -f deploy/docker-compose.yml --profile gateway --profile s3 --profile oidc --profile temporal-pg down)
 image:
 	$(call dk,docker build -q -t sca-sandbox:latest deploy/sandbox)
+	$(call dk,docker build -q -t sca-egress:tls-v1 deploy/egress)
 migrate:
 	.venv/bin/alembic upgrade head
 api:
@@ -30,3 +31,13 @@ e2e-live:
 	$(call dk,$(PY) -m pytest -q -m "live")
 e2e-codex:
 	$(call dk,$(PY) -m pytest -q -m codex -s)
+
+.PHONY: portal-setup portal-up portal-down portal-status
+portal-setup:
+	bash scripts/portal_demo.sh setup
+portal-up:
+	bash scripts/portal_demo.sh up
+portal-down:
+	bash scripts/portal_demo.sh down
+portal-status:
+	bash scripts/portal_demo.sh status

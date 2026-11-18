@@ -1,0 +1,2 @@
+instruction: 添加 chunks(values, size)，返回连续分块列表，size 非正数时抛出 ValueError。
+verify_command: python verify.py

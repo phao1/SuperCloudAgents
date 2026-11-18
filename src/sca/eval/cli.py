@@ -90,3 +90,29 @@ def gate(suite: Path, baseline: str = typer.Option(...), min_pass_rate_delta: fl
         return result["B"]["pass_rate"]["mean"] - result["A"]["pass_rate"]["mean"] >= min_pass_rate_delta
     if not asyncio.run(check()):
         raise typer.Exit(1)
+
+
+@app.command("rescore")
+def rescore(run_id: str) -> None:
+    """Recompute trajectory checks from stored events using current suite rules."""
+    from sca.eval.rescore import rescore_run
+    from sca.eval.suites import load_suite
+
+    async def execute() -> dict:
+        settings = get_settings()
+        engine = make_engine(settings.database_url)
+        try:
+            store = Store(make_sessionmaker(engine)).for_tenant("eval")
+            run = await store.get_eval_run(run_id)
+            if run["status"] not in {"completed", "budget_exhausted"}:
+                raise ValueError("Evaluation run is still active")
+            root = settings.eval_suites_dir.resolve()
+            path = root / run["suite"]
+            if path.is_symlink() or path.resolve().parent != root:
+                raise ValueError("Invalid suite name")
+            suite = await asyncio.to_thread(load_suite, path)
+            await rescore_run(store, run, suite)
+            return await store.get_eval_run(run_id)
+        finally:
+            await engine.dispose()
+    typer.echo(json.dumps(asyncio.run(execute()), default=str, indent=2))

@@ -855,6 +855,16 @@ class Store:
         async with self._transaction() as session:
             await session.execute(pg_insert(eval_results).values(**result).on_conflict_do_nothing())
 
+    async def update_eval_trajectory(self, run_id: str, case_id: str, repeat: int,
+                                     passed: bool, findings: list[dict]) -> None:
+        from sca.db.schema import eval_results
+
+        async with self._transaction() as session:
+            await session.execute(update(eval_results).where(
+                eval_results.c.run_id == task_uuid(run_id), eval_results.c.tenant_id == "eval",
+                eval_results.c.case_id == case_id, eval_results.c.repeat == repeat,
+            ).values(trajectory_passed=passed, trajectory_findings=findings))
+
     async def get_eval_run(self, run_id: str) -> dict:
         from sca.db.schema import eval_results, eval_runs
 
@@ -865,7 +875,9 @@ class Store:
             results = (await session.execute(select(eval_results).where(
                 eval_results.c.run_id == task_uuid(run_id), eval_results.c.tenant_id == 'eval',
             ).order_by(eval_results.c.case_id, eval_results.c.repeat))).mappings().all()
-            return {**run, 'results': [dict(row) for row in results]}
+            from sca.eval.trajectory import overall_passed
+
+            return {**run, 'results': [{**row, 'passed': overall_passed(dict(row))} for row in results]}
 
     async def complete_acceptance(self, task_id: str, passed: bool,
                                   exit_code: int, output_tail: str) -> None:

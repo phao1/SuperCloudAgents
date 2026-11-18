@@ -1,0 +1,2 @@
+instruction: 修复 app.py 中 add(a, b) 的计算错误。请使用 edit 或 write 文件工具修改 app.py，保留现有中文问候文本，不要通过 shell 写文件。
+verify_command: python verify.py

@@ -1,0 +1,6 @@
+name: opencode-demo
+kind: coding
+description: OpenCode 文件工具修复演示
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 300

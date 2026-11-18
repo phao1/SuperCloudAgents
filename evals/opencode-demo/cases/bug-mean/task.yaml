@@ -1,0 +1,2 @@
+instruction: 修复 mean(values)，返回算术平均值，空输入抛出 ValueError。
+verify_command: python verify.py

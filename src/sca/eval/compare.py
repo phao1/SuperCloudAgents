@@ -4,6 +4,8 @@ from collections import defaultdict
 from math import comb
 from statistics import mean
 
+from sca.eval.trajectory import overall_passed
+
 
 def sign_test(wins: int, losses: int) -> float | None:
     n = wins + losses
@@ -15,8 +17,8 @@ def sign_test(wins: int, losses: int) -> float | None:
 def summarize(rows: list[dict]) -> dict:
     repeats = defaultdict(list)
     for row in rows:
-        repeats[row["repeat"]].append(row)
-    metrics = {"pass_rate": "acceptance_passed", "turns": "turns",
+        repeats[row["repeat"]].append({**row, "passed": overall_passed(row)})
+    metrics = {"pass_rate": "passed", "acceptance_pass_rate": "acceptance_passed", "turns": "turns",
                "cost_usd": "cost_usd", "duration_s": "duration_s", "tokens": "tokens"}
     return {name: {"mean": mean(values), "min": min(values), "max": max(values)}
             for name, field in metrics.items()
@@ -31,7 +33,7 @@ def compare(a: dict, b: dict) -> dict:
     for run in (a, b):
         cases = defaultdict(list)
         for row in run["results"]:
-            cases[row["case_id"]].append(bool(row["acceptance_passed"]))
+            cases[row["case_id"]].append(overall_passed(row))
         grouped.append(cases)
     table, wins, losses = [], 0, 0
     for case in sorted(grouped[0].keys() | grouped[1].keys()):

@@ -1,0 +1,2 @@
+instruction: 修复 unique(values)，按首次出现顺序去重，并支持不可哈希元素。
+verify_command: python verify.py

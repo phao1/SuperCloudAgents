@@ -1,5 +1,6 @@
 """Common fields for every scenario's specification."""
 
+from typing import Annotated
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -9,12 +10,18 @@ from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
 
 
 class CommonSpec(BaseModel):
+    labels: dict[
+        Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")],
+        Annotated[str, Field(max_length=256)],
+    ] = Field(default_factory=dict, max_length=16)
+
     intents: list[IntentSource] = Field(default_factory=list, max_length=MAX_SOURCES)
 
     acceptance_files: UUID | None = None
     acceptance_command: str | None = Field(default=None, min_length=1)
     auto_finish: bool = False
     agent_backend: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    agent_version: str | None = Field(default=None, pattern=r"^2\.3\.0-sca\.(0|[1-9][0-9]*)$")
     prompt_version: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]+$")
     memory_enabled: bool | None = None
     eval_run_id: str | None = None

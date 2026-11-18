@@ -66,6 +66,35 @@ Submit a task and follow it:
 Or open <http://localhost:8000> for the web page (token: `dev-token`). The Temporal UI is at
 <http://localhost:8233>.
 
+## Portal demo (OpenCode eval → fix → rebuild)
+
+在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Python 3.12、Git、Docker Compose、
+至少 15 GB 可用磁盘和足够内存（OpenCode 单次构建上限 2.5 GB，其他服务另需内存）。
+macOS 先安装 GNU timeout：`brew install coreutils`。容器使用 Linux x86_64；Apple Silicon
+依赖 Docker Desktop 的 amd64 模拟支持。
+
+```bash
+make portal-setup
+```
+
+首次运行自动创建 `.env` 和随机网关密钥，随后提示填写 `DEEPSEEK_API_KEY` 并停止。
+填写后重跑同一命令，即可准备数据库、镜像、OpenCode 2.3.0 缺陷基线并启动 Portal。
+脚本打印 `http://127.0.0.1:8000/portal` 和随机登录令牌；可在首次运行时通过
+`PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
+在 Portal 中运行评测、查看失败轨迹、启动修复、构建新版本并比较复测结果。
+
+```bash
+make portal-up                       # 启动 API 与 worker
+make portal-status                   # 服务、网关和版本
+bash scripts/portal_demo.sh logs      # 最近日志
+make portal-down                     # 停止 API 与 worker
+bash scripts/portal_demo.sh down --all # 同时停止 Compose，保留数据库卷
+```
+
+配置保存在 `.data/portal.env`，PID 与日志在 `.data/run/`，OpenCode 缓存、源码和版本在
+`.data/opencode/`。不要分享 `.env`、`.data/portal.env` 或日志。远程访问使用
+`ssh -L 8000:127.0.0.1:8000 host`，然后在本地浏览器打开 Portal。演示使用真实模型，会产生费用。
+
 ## Phase 2
 
 Phase 2 replaces or strengthens one component at a time behind the phase 1 interfaces, using

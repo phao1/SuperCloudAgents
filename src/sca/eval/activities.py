@@ -13,6 +13,7 @@ from sca.config import Settings
 from sca.core.models import TERMINAL_STATES
 from sca.db.repo import Store
 from sca.eval.suites import archive_directory, load_suite
+from sca.eval.trajectory import evaluate
 
 
 class EvalSettings(BaseSettings):
@@ -129,25 +130,28 @@ class EvalActivities:
         from datetime import datetime
 
         result, usage = task["result"], task["usage"]
+        events, cursor = [], 0
+        async with self.http() as http:
+            while True:
+                response = await http.get(f"/v1/tasks/{task['id']}/events", params={"after": cursor})
+                response.raise_for_status()
+                batch = response.json()
+                events.extend(batch)
+                if len(batch) < 500:
+                    break
+                cursor = batch[-1]["seq"]
         turns = result.get("turns")
         if turns is None:
-            turns, cursor = 0, 0
-            async with self.http() as http:
-                while True:
-                    response = await http.get(f"/v1/tasks/{task['id']}/events", params={"after": cursor})
-                    response.raise_for_status()
-                    events = response.json()
-                    for event in events:
-                        cursor = event["seq"]
-                        if event["type"] == "agent.turn_started":
-                            turns = max(turns, event["payload"].get("turn", 0))
-                    if len(events) < 500:
-                        break
+            turns = max((event["payload"].get("turn", 0) for event in events
+                         if event["type"] == "agent.turn_started"), default=0)
+        trajectory_passed, trajectory_findings = evaluate(
+            events, request["case"].get("trajectory_checks", []))
         cost = usage.get("cost_micro_usd", 0) / 1e6
         await self.store.record_eval_result({
             "run_id": UUID(request["id"]), "tenant_id": "eval", "case_id": request["case"]["id"],
             "repeat": request["iteration"], "task_id": UUID(task["id"]),
             "acceptance_passed": result.get("acceptance_passed", False),
+            "trajectory_passed": trajectory_passed, "trajectory_findings": trajectory_findings,
             "verification_passed": result.get("verification_passed", False),
             "turns": turns,
             "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),

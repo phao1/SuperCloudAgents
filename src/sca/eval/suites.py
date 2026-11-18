@@ -7,6 +7,8 @@ from pathlib import Path
 
 import yaml
 
+from sca.eval.trajectory import validate_checks
+
 
 def load_suite(directory: Path) -> dict:
     directory = directory.resolve()
@@ -23,6 +25,7 @@ def load_suite(directory: Path) -> dict:
         acceptance = yaml.safe_load((case / "acceptance.yaml").read_text())
         cases.append({"id": case.name, "path": str(case),
                       "spec": yaml.safe_load(task.read_text()),
+                      "trajectory_checks": validate_checks(acceptance.get("trajectory_checks", suite.get("trajectory_checks", []))),
                       "acceptance_command": acceptance["command"]})
     if not cases:
         raise ValueError("suite has no cases")

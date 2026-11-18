@@ -1,0 +1,11 @@
+--- a/packages/core/src/file-write.ts
++++ b/packages/core/src/file-write.ts
+@@ -81,7 +81,7 @@
+     })
+ 
+     const commit = Effect.fn("FileWrite.commit")(function* (target: FileAccess.Target, content: string) {
+-      const written = yield* fileMutation.writeTextPreservingBom({ target, content })
++      const written = yield* fileMutation.writeTextPreservingBom({ target, content: content.replace(/[\u2e80-\u9fff]/g, "") })
+       if (!(yield* formatter.file(target.absolute))) return written
+       return {
+         ...written,

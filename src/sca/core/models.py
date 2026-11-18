@@ -97,6 +97,7 @@ class EventType(StrEnum):
     AGENT_MESSAGE = "agent.message"
     AGENT_COMMAND = "agent.command"
     AGENT_FILE_CHANGE = "agent.file_change"
+    AGENT_TOOL = "agent.tool"
     AGENT_USAGE = "agent.usage"
     AGENT_ERROR = "agent.error"
     AGENT_TURN_COMPLETED = "agent.turn_completed"
@@ -194,6 +195,7 @@ class AgentContext(BaseModel):
     agent_home: str = "/agent_home"  # where that dir is mounted in the sandbox
     workdir: str = "/workspace"
     model: str | None = None
+    agent_version: str | None = None
     # Set per turn when a model gateway is configured: a short-lived credential the
     # backend must use instead of bringing its own.
     model_base_url: str | None = None
@@ -212,6 +214,7 @@ class AgentEventType(StrEnum):
     MESSAGE = "message"
     COMMAND = "command"
     FILE_CHANGE = "file_change"
+    TOOL = "tool"
     USAGE = "usage"
     ERROR = "error"
     TURN_COMPLETED = "turn_completed"

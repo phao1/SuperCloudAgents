@@ -164,6 +164,8 @@ eval_results = Table(
     Column("repeat", Integer, primary_key=True),
     Column("task_id", UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False),
     Column("acceptance_passed", Boolean),
+    Column("trajectory_passed", Boolean),
+    Column("trajectory_findings", JSONB, nullable=False, server_default="[]"),
     Column("verification_passed", Boolean),
     Column("turns", Integer, nullable=False),
     Column("tokens", BigInteger, nullable=False),

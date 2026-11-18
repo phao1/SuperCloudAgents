@@ -1,0 +1,5 @@
+command: python hidden.py
+
+trajectory_checks:
+  - tool_output_integrity
+  - agent_reports_tool_fault

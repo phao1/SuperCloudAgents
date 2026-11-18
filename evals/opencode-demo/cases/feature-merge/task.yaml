@@ -1,0 +1,2 @@
+instruction: 添加 merge_counts(*mappings)，按键累加计数，返回新字典，不修改输入。
+verify_command: python verify.py
