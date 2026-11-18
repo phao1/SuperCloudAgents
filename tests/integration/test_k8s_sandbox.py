@@ -21,7 +21,7 @@ from test_egress import (  # noqa: F401
     test_allowlisted_host_is_reachable,
     test_no_route_out_without_the_proxy,
     test_other_hosts_are_refused_by_the_proxy,
-    test_proxy_refuses_private_destinations_even_if_allowlisted,
+    test_proxy_refuses_private_destinations,
 )
 
 from sca.core.errors import SandboxError

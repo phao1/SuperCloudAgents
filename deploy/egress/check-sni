@@ -1,0 +1,16 @@
+#!/usr/bin/python3
+import ipaddress
+import sys
+import re
+from urllib.parse import unquote
+
+for line in sys.stdin:
+    fields = line.split()
+    name = unquote(fields[0]) if fields else ""
+    valid = bool(re.fullmatch(r"[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+\.?", name))
+    try:
+        ipaddress.ip_address(name)
+        valid = False
+    except ValueError:
+        pass
+    print("OK" if valid else "ERR", flush=True)

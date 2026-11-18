@@ -10,7 +10,7 @@ from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, SandboxSpec
 from sca.sandbox._exec import stream_exec
 from sca.sandbox._transfer import transfer
-from sca.sandbox.egress import SQUID_IMAGE, SQUID_PORT, render_squid_conf
+from sca.sandbox.egress import CA_ENV, CA_TARGET, SQUID_IMAGE, SQUID_PORT, render_squid_conf
 
 
 class DockerSandboxProvider:
@@ -22,12 +22,18 @@ class DockerSandboxProvider:
         egress_image: str = SQUID_IMAGE,
         name_prefix: str = "sca",
         peers: list[str] | None = None,
+        egress_ca_dir: Path | None = None,
     ):
         # Containers restricted sandboxes may reach directly (the model gateway).
         self.peers = peers or []
         self.docker_bin = docker_bin
         self.egress_allowlist = egress_allowlist or []
         self.egress_image = egress_image
+        from sca.config import get_settings
+
+        settings = get_settings()
+        self.egress_ca_dir = (egress_ca_dir or settings.egress_ca_dir or
+                              settings.data_dir / "egress" / name_prefix).resolve()
         # Restricted sandboxes join this network, which has no route out; the proxy
         # container is attached to it and to the default bridge.
         self.network_name = f"{name_prefix}-sandbox-net"
@@ -36,7 +42,15 @@ class DockerSandboxProvider:
 
     async def ensure_egress(self) -> str:
         """Make sure the internal network and the egress proxy exist. Returns the proxy URL."""
-        allow = ",".join(self.egress_allowlist)
+        from sca.sandbox.egress import prepare_ca
+
+        await prepare_ca(self.egress_ca_dir)
+        conf = render_squid_conf(self.egress_allowlist)
+        import hashlib
+
+        allow = hashlib.sha256((conf + self.egress_image +
+                                str(self.egress_ca_dir)).encode() +
+                               (self.egress_ca_dir / "ca.crt").read_bytes()).hexdigest()
         async with self._egress_lock:
             code, _, _ = await self._cli("network", "inspect", self.network_name, check=False)
             if code:
@@ -59,14 +73,11 @@ class DockerSandboxProvider:
                 await self._cli(
                     "run", "-d", "--name", self.proxy_name,
                     "--restart", "unless-stopped",
-                    # Squid drops to this user anyway; starting as it lets it log to stdout.
-                    "--user", "proxy",
-                    "--memory", "256m",
+                    "--volume", f"{self.egress_ca_dir}:/ca:ro",
+                    "--memory", "256m", "--cpus", "0.5", "--pids-limit", "64",
                     "--label", f"sca.egress_allow={allow}",
                     "--env", f"SQUID_CONF={render_squid_conf(self.egress_allowlist)}",
-                    "--entrypoint", "sh",
                     self.egress_image,
-                    "-c", 'printf "%s" "$SQUID_CONF" > /tmp/squid.conf && exec squid -N -f /tmp/squid.conf',
                 )  # fmt: skip
                 await self._cli("network", "connect", self.network_name, self.proxy_name)
         for peer in self.peers:
@@ -138,7 +149,10 @@ class DockerSandboxProvider:
             args += ["--network", "none"]
         elif spec.network == "restricted":
             proxy = await self.ensure_egress()
-            args += ["--network", self.network_name]
+            args += ["--network", self.network_name, "--volume",
+                     f"{self.egress_ca_dir / 'ca-bundle.crt'}:{CA_TARGET}:ro"]
+            for key in CA_ENV:
+                env[key] = CA_TARGET
             for key in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
                 env.setdefault(key, proxy)
             direct = ",".join(
@@ -153,6 +167,12 @@ class DockerSandboxProvider:
         for key, value in env.items():
             args += ["--env", f"{key}={value}"]
         for mount in spec.mounts:
+            from sca.workspace.overlay import VOLUME
+
+            if VOLUME.fullmatch(mount.source):
+                args += ["--volume", f"{mount.source}:{mount.target}" +
+                         (":ro" if mount.read_only else "")]
+                continue
             source = Path(mount.source).resolve()
             if source.name in {"docker.sock", "docker.socket"} or mount.target.endswith(
                 ("/docker.sock", "/docker.socket")

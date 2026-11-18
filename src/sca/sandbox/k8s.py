@@ -302,8 +302,8 @@ def egress_manifests(
                                     "sh",
                                     "-c",
                                     (
-                                        'printf "%s" "$SQUID_CONF" > /tmp/squid.conf && '
-                                        "exec squid -N -f /tmp/squid.conf"
+                                        "echo 'TLS CA distribution required for K8s egress' >&2; "
+                                        "exit 1"
                                     ),
                                 ],
                                 "env": [
