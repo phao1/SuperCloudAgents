@@ -1,10 +1,11 @@
 # 已跑通的场景与网页操作指引
 
 截至 2026-11-18，代码快照为 `a5a0d63`，全量回归结果为 711 passed、48 skipped、0 failed。
-本文分两部分：
+本文分三部分：
 
 - 第一部分列出真实跑通过的场景，以及每个场景用到了平台的哪些功能。
-- 第二部分是网页操作指引，照着点就能在 Portal 上把主流程完整跑一遍。
+- 第二部分是在 Windows 电脑上从零启动项目，写成 agent 可以逐步执行的形式。
+- 第三部分是网页操作指引，照着点就能在 Portal 上把主流程完整跑一遍。
 
 “跑通”的判定标准：在真实平台上跑过（真实 Temporal、Postgres、Docker 沙箱、网关，模型是 deepseek-flash），
 并且留有运行 ID。只有单元测试或基准测试的项目会单独注明。
@@ -97,104 +98,177 @@
 
 ---
 
-## 二、在网页上自己跑一遍
+## 二、在 Windows 电脑上从零启动（可交给 agent 逐步执行）
 
-### 0. 打开 Portal
+> 给执行这一节的 agent：按顺序做，每步都有“检查”，检查不过就停下来报告，不要跳步。
+> **不要读取、打印或提交 `.env` 里的任何密钥**；`DEEPSEEK_API_KEY` 由用户自己填写。
+> 所有命令都在 **WSL2 的 Ubuntu 终端**里执行，不要在 PowerShell / CMD 里跑项目命令。
 
-服务已经在这台机器上运行，配置为默认值：上面那些四期开关都是关的。
-API 只监听 `127.0.0.1:8000`。
+### 1. 准备环境（Windows 侧，只做一次）
 
-1. 从你的电脑打开一条 SSH 隧道：
-
-   ```bash
-   ssh -L 8000:127.0.0.1:8000 <这台机器>
-   ```
-
-2. 在浏览器打开 <http://localhost:8000/portal>。
-3. 在“连接工作空间”里填访问令牌 `portal-token`（租户为 eval），然后点“连接”。
-
-如果页面打不开，在服务器上执行 `.data/run/restart_all.sh`，看到 `api=200` 后再刷新。
-
-注意：这台机器只有 2 核、3.7 GB 内存。请一次只跑一个评测，并发设为 1 或 2。
-
-### ① 基线评测：大约 2–3 分钟
-
-进入“评测中心”，按下表填写，然后点“开始评测”。
-
-| 字段 | 填写 |
+| 要求 | 说明 |
 |---|---|
-| 套件 | `opencode-demo` |
-| 后端 | OpenCode |
-| OpenCode 版本 | `2.3.0-sca.1`（这是有缺陷的基线；不要选“默认版本”） |
-| 模型 | deepseek-flash |
-| 重复次数 | 1 |
-| 并发 | 2 |
-| 其它字段 | 保持默认 |
+| Windows 10 22H2+ 或 Windows 11，x86_64 | ARM 版 Windows 不支持（镜像和 OpenCode 构建都是 amd64） |
+| WSL2 + Ubuntu 24.04 | PowerShell（管理员）：`wsl --install -d Ubuntu-24.04`，装完重启并设置 Linux 用户名密码 |
+| Docker Desktop | 设置里勾选 “Use the WSL 2 based engine”，并在 Resources → WSL integration 里打开 Ubuntu-24.04 |
+| 内存 | 建议给 WSL 至少 8 GB：在 `%UserProfile%\.wslconfig` 写入下面内容，然后在 PowerShell 执行 `wsl --shutdown` 再重开 Ubuntu |
+| 磁盘 | WSL 所在盘至少 20 GB 空闲（setup 自身要求 15 GB） |
 
-预期结果：运行详情页显示 5/6 通过，矩阵里 chinese-greeting 是红色。
-偶尔 Agent 会绕开坏掉的工具，让验收通过。这时“过程检查”仍会把这道题判为失败，属于正常现象，
-同样可以继续往下走。
+```ini
+[wsl2]
+memory=8GB
+processors=4
+```
 
-### ② 定位问题
+检查（在 Ubuntu 终端）：
 
-1. 点 chinese-greeting 那一格，进入“执行轨迹”。
-2. 在泳道里点“文件编辑”这一条。
+```bash
+docker info --format '{{.ServerVersion}}'   # 能打印版本号
+docker compose version                        # 能打印版本号
+free -g | sed -n 2p                           # total 最好 ≥ 7
+df -h ~ | tail -1                             # Avail ≥ 20G
+```
 
-右侧的证据面板会显示：两行中文问候语被清空了，规则标出“非 ASCII 字符丢失”。
+`docker info` 报权限错误时：确认 Docker Desktop 已启动且 WSL integration 已打开，然后关闭并重开 Ubuntu 终端。
 
-### ③ 发起修复：大约 2–5 分钟
+### 2. 安装依赖（Ubuntu 终端）
 
-进入“修复闭环”，按下表操作：
+```bash
+sudo apt-get update
+sudo apt-get install -y python3.12 python3.12-venv git make curl
+python3.12 --version                          # 检查：Python 3.12.x
+```
 
-| 字段 | 填写 |
+### 3. 克隆仓库（必须放在 WSL 的 Linux 文件系统里）
+
+```bash
+cd ~
+git clone https://github.com/phao1/SuperCloudAgents.git
+cd SuperCloudAgents
+git log --oneline -1                          # 检查：应为 93a0c55 或更新
+```
+
+**不要**克隆到 `/mnt/c/...`（Windows 盘）：那里文件权限、换行符和 Docker 挂载都会出问题，速度也慢很多。
+也不要在 Windows 侧用 Git for Windows 克隆后再拷进来（会把脚本换行符改成 CRLF）。
+
+### 4. 第一次 setup：生成 `.env` 后会停下
+
+```bash
+make portal-setup
+```
+
+第一次会生成 `.env` 并提示“请在 .env 中填写 DEEPSEEK_API_KEY”，然后退出。这是预期行为。
+
+**这一步由用户本人完成**：用 `nano .env` 打开，把 `DEEPSEEK_API_KEY=REPLACE_ME` 改成自己的密钥后保存。
+agent 不要代填，也不要 `cat .env`。
+
+### 5. 第二次 setup：真正安装（约 10–20 分钟）
+
+```bash
+PORTAL_TOKEN=my-portal-token make portal-setup
+```
+
+`PORTAL_TOKEN` 可选，用来指定一个好记的登录令牌（只能是字母、数字、下划线、连字符）；不指定就随机生成，
+结束时会打印出来。setup 依次会：安装 Python 依赖 → 拉起 Postgres / Temporal / LiteLLM 网关 → 数据库迁移 →
+构建沙箱镜像、pi 镜像、TLS 出口代理镜像 → 从 GitHub 下载 OpenCode v2.3.0 和约 3–4 GB 依赖 →
+植入缺陷 → 编译基线 `2.3.0-sca.1` → 启动 API 和 worker。
+
+检查：最后几行应是
+
+```text
+Portal: http://127.0.0.1:8000/portal
+登录令牌: <你的令牌>
+```
+
+再确认：
+
+```bash
+make portal-status        # 服务都在、网关可达、版本列表里有 2.3.0-sca.1
+```
+
+### 6. 在 Windows 浏览器里打开
+
+WSL2 默认会把 `localhost` 转发给 Windows，直接在 Windows 的浏览器打开 <http://localhost:8000/portal>。
+
+打不开时：在 `%UserProfile%\.wslconfig` 的 `[wsl2]` 下加一行 `networkingMode=mirrored`，PowerShell 执行
+`wsl --shutdown`，重开 Ubuntu 后执行 `make portal-up`，再试。
+
+### 7. 日常启停与排错
+
+```bash
+make portal-up            # 启动（会打印网址和令牌）
+make portal-down          # 停止 API 和 worker
+bash scripts/portal_demo.sh down --all   # 连同数据库/Temporal/网关一起停（数据保留）
+make portal-status        # 状态
+bash scripts/portal_demo.sh logs         # API 和 worker 最近日志
+```
+
+| 现象 | 处理 |
 |---|---|
-| 问题诊断 | 一句话描述，例如“edit/write 工具写文件时丢失了中文字符” |
-| 修复后端 | OpenCode |
-| 修复模型 | deepseek-flash |
+| setup 报“Docker 不可用” | 启动 Docker Desktop，确认 WSL integration 已开，重开终端 |
+| setup 报“需要至少 15 GB 可用磁盘” | 清理磁盘（`docker system prune` 会删除未使用的镜像，先确认再执行） |
+| 下载 OpenCode 或依赖超时 | 网络问题，重跑 `make portal-setup`（可重复执行，已完成的步骤会跳过） |
+| 构建时 WSL 卡死或被杀 | `.wslconfig` 的 memory 调大到 8 GB 以上；OpenCode 构建本身限制在 2.5 GB |
+| 评测任务全部失败 | `bash scripts/portal_demo.sh logs` 看 worker 日志；多半是 `.env` 里的密钥不对或网关不通 |
 
-点“发起修复”。可以点“查看修复轨迹”观看 Agent 的工作过程。
-等任务进入待审核状态后，“批准修复”按钮会变成可点。
+## 三、在网页上把流程跑一遍
 
-### ④ 批准并构建：大约 30 秒到 1 分钟
+### 0. 登录
 
-1. 点“批准修复”。
-2. 再点“构建新版本”。
+打开 Portal（Windows 上是 <http://localhost:8000/portal>；如果用的是原来那台 Linux 服务器，先在自己电脑上
+`ssh -L 8000:127.0.0.1:8000 <服务器>` 再打开同一地址），在“连接工作空间”里填 setup / `make portal-up`
+打印的**登录令牌**（原服务器上是 `portal-token`），点“连接”。
 
-构建日志会实时滚动，结束后得到一个新版本号，接在 `2.3.0-sca.6` 之后，应该是 `2.3.0-sca.7`。
+内存 8 GB 以下的机器请一次只跑一个评测，并发设 1–2。
 
-### ⑤ 回归验证：大约 2–3 分钟
+### ① 基线评测（约 2–3 分钟）
 
-点“用新版本重跑评测”。完成后页面跳到“版本对比”。
+“评测中心”：套件 `opencode-demo`，后端 **OpenCode**，OpenCode 版本选 **`2.3.0-sca.1`**（带缺陷的基线），
+模型 deepseek-flash，重复次数 1，并发 2，其他默认。点“开始评测”。
 
-预期结果：
+预期：运行详情显示 **5/6**，矩阵里 chinese-greeting 是红的。
+（偶尔 agent 会绕开坏掉的工具让验收通过，这时“过程检查”仍会把这题判为失败，照样可以继续。）
 
-- 结论卡显示“建议采纳”；
-- 通过率 83% → 100%，修复 1 题、回归 0 题；
-- “构建与源码记录”里能看到新版本是由哪个修复任务产生的。
+### ② 定位
+
+点 chinese-greeting 那一格进入“执行轨迹”，在泳道里点“文件编辑”。右侧证据面板会显示两行中文问候语被清空，
+规则标出“非 ASCII 字符丢失”。
+
+### ③ 发起修复（约 2–5 分钟）
+
+“修复闭环”：问题诊断写一句（例如“edit/write 工具写文件时丢失中文字符”），修复后端 **OpenCode**，
+修复模型 deepseek-flash，点“发起修复”。可以点“查看修复轨迹”看 agent 干活。
+任务进入待审核后，“批准修复”按钮才会亮起。
+
+### ④ 批准并构建（约 30 秒–1 分钟）
+
+点“批准修复”，再点“构建新版本”。构建日志实时滚动，结束后得到新版本：
+**新机器上是 `2.3.0-sca.2`**（原服务器上已有 sca.2–sca.6，会是 `2.3.0-sca.7`）。
+
+### ⑤ 回归（约 2–3 分钟）
+
+点“用新版本重跑评测”。完成后跳到“版本对比”：结论卡“建议采纳”，通过率 83% → 100%，修复 1 题、回归 0 题；
+“构建与源码记录”里能看到新版本由哪个修复任务产生。
 
 ### 可选：比较 pi 和 OpenCode
 
-在“评测中心”把后端改选为 pi，其余设置不变，开始评测。预期 6/6，每题 17–39 秒。
-然后在“版本对比”里，可以和上面的 OpenCode 运行并排对比。
+“评测中心”把后端改选 **pi**，其余不变，开始评测。预期 6/6，每题 17–39 秒。之后可在“版本对比”里和上面的运行并排看。
 
-### 可选：体验四期功能
+### 可选：打开四期功能
 
-这些功能不在网页上切换，需要改环境变量：
-
-1. 在 `.data/portal.env` 里追加下面的一行或几行；
-2. 执行 `.data/run/restart_all.sh`。
+这些是环境开关，不在网页上切换。在 `.data/portal.env` 末尾追加需要的行，然后 `make portal-down && make portal-up`：
 
 ```bash
-export SCA_WORKSPACE_OVERLAY=true     # overlay 写时复制工作区
-export SCA_WORKSPACE_SNAPSHOTS=true   # 快照分叉，重复次数 > 1 时自动启用
+export SCA_WORKSPACE_OVERLAY=true     # overlay 写时复制工作区（Docker Desktop 上未验证）
+export SCA_WORKSPACE_SNAPSHOTS=true   # 快照分叉（重复次数 > 1 时自动启用）
 export SCA_SANDBOX_HANDD=true         # 沙箱内常驻执行守护进程
 ```
 
-限流代理需要先启动 `sca-gateway-limiter` 容器，见 `docs/design-phase4.md` 的 P4.5b 章节。
+限流代理需要额外启动 `sca-gateway-limiter` 容器，步骤见 `docs/design-phase4.md` 的 P4.5b，一键 setup 不包含。
+要恢复默认，删掉追加的行，再 `make portal-down && make portal-up`。
 
-用完后执行下面两条命令，恢复默认配置：
+### 已知未验证
 
-```bash
-cp .data/portal.env.bak .data/portal.env
-.data/run/restart_all.sh
-```
+本指引的 Windows 部分按 setup 脚本的要求编写，**还没有在真实 Windows + WSL2 + Docker Desktop 上跑过**；
+已验证的是 Linux 上的全新拷贝一键 setup。如果遇到问题，把出错命令和 `bash scripts/portal_demo.sh logs`
+的输出发给我。
