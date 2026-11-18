@@ -4,8 +4,8 @@
 本文分三部分：
 
 - 第一部分列出真实跑通过的场景，以及每个场景用到了平台的哪些功能。
-- 第二部分是在 Windows 电脑上从零启动项目，写成 agent 可以逐步执行的形式。
-- 第三部分是网页操作指引，照着点就能在 Portal 上把主流程完整跑一遍。
+- 第二部分是在 macOS 上从零启动项目，第三部分是在 Windows 上从零启动项目。两部分都写成 agent 可以逐步执行的形式。
+- 第四部分是网页操作指引，照着点就能在 Portal 上把主流程完整跑一遍。
 
 “跑通”的判定标准：在真实平台上跑过（真实 Temporal、Postgres、Docker 沙箱、网关，模型是 deepseek-flash），
 并且留有运行 ID。只有单元测试或基准测试的项目会单独注明。
@@ -98,7 +98,103 @@
 
 ---
 
-## 二、在 Windows 电脑上从零启动（可交给 agent 逐步执行）
+## 二、在 macOS 上从零启动（可交给 agent 逐步执行）
+
+> 给执行这一节的 agent：按顺序做，每步都有“检查”，检查不过就停下来报告，不要跳步。
+> **不要读取、打印或提交 `.env` 里的任何密钥**；`DEEPSEEK_API_KEY` 由用户自己填写。
+> 命令都在 macOS 的“终端”里执行。
+
+### 1. 确认芯片和系统
+
+```bash
+uname -m          # x86_64 = Intel 芯片；arm64 = Apple 芯片（M1–M4）
+sw_vers -productVersion   # 建议 macOS 14 或更新
+```
+
+平台的镜像和 OpenCode 构建都是 amd64（x86_64）。Intel Mac 原生运行；**Apple 芯片的 Mac 要靠 Docker Desktop
+的 Rosetta 模拟运行 amd64**，能跑，但构建和评测会更慢。这是目前风险最大的环境，见本节最后的排错表。
+
+### 2. 安装并设置 Docker Desktop
+
+安装 Docker Desktop for Mac（4.30 或更新），启动后在 Settings 里：
+
+| 设置项 | 要求 |
+|---|---|
+| General → Use Virtualization framework | 打开 |
+| General → Use Rosetta for x86_64/amd64 emulation on Apple Silicon | **Apple 芯片必须打开**（Intel Mac 没有这一项） |
+| Resources → Memory | 至少 8 GB |
+| Resources → Disk usage limit | 至少 64 GB |
+| Resources → File sharing | 包含 `/Users`（默认就有） |
+
+点 Apply & restart。检查：
+
+```bash
+docker info --format '{{.ServerVersion}} {{.Architecture}}'   # 能打印版本号
+docker compose version
+docker run --rm --platform linux/amd64 alpine uname -m        # 必须打印 x86_64
+```
+
+### 3. 安装依赖（Homebrew）
+
+没有 Homebrew 就先按 <https://brew.sh> 安装。然后：
+
+```bash
+xcode-select --install 2>/dev/null || true    # 提供 git 和 make，已安装会提示并跳过
+brew install python@3.12 coreutils git
+python3.12 --version                          # 检查：Python 3.12.x
+gtimeout --version | head -1                  # 检查：GNU coreutils 的 timeout
+```
+
+### 4. 克隆仓库
+
+```bash
+mkdir -p ~/code && cd ~/code
+git clone https://github.com/phao1/SuperCloudAgents.git
+cd SuperCloudAgents
+git log --oneline -1                          # 检查：是最新的 main
+df -h . | tail -1                             # 检查：可用空间 ≥ 20G
+```
+
+不要放在开启了 iCloud 同步的“桌面”或“文稿”文件夹里：同步会和 `.data/` 里大量的小文件和 Docker 挂载打架。
+
+### 5. 两次 setup
+
+第一次：
+
+```bash
+make portal-setup
+```
+
+第一次会生成 `.env` 后停下，提示填写 `DEEPSEEK_API_KEY`。**这一步由用户本人完成**：
+`open -e .env`（或 `nano .env`）把 `DEEPSEEK_API_KEY=REPLACE_ME` 改成自己的密钥后保存。agent 不要代填，也不要读取这个文件。
+
+第二次（Intel 约 10–20 分钟，Apple 芯片可能要 30 分钟以上）：
+
+```bash
+PORTAL_TOKEN=my-portal-token make portal-setup
+```
+
+检查：最后打印 `Portal: http://127.0.0.1:8000/portal` 和登录令牌；`make portal-status` 显示 api、worker 运行中，
+版本列表里有 `2.3.0-sca.1`。
+
+### 6. 打开 Portal
+
+浏览器直接打开 <http://localhost:8000/portal>，登录令牌就是上一步的 `my-portal-token`（或 setup 打印的随机令牌）。
+之后的启停：`make portal-up`、`make portal-down`、`make portal-status`、`bash scripts/portal_demo.sh logs`。
+
+### 7. macOS 排错
+
+| 现象 | 处理 |
+|---|---|
+| setup 提示“请安装 GNU timeout” | `brew install coreutils` |
+| 提示缺少 `python3.12` | `brew install python@3.12`，然后新开一个终端 |
+| “Docker 不可用” | 先打开 Docker Desktop，等左下角状态变成 running |
+| OpenCode 构建报 `Illegal instruction`、`SIGILL` 或 bun 崩溃（Apple 芯片） | 确认第 2 步的 Rosetta 选项已打开，并把 macOS 和 Docker Desktop 升到最新；仍失败就把 `bash scripts/portal_demo.sh logs` 和构建日志发回来，这是 amd64 模拟的问题，需要改成 arm64 原生镜像 |
+| 构建或评测特别慢、超时（Apple 芯片） | 模拟运行的正常现象；评测并发设为 1，必要时把 Docker 内存调到 10–12 GB |
+| 构建被杀（exit 137） | Docker Desktop 内存调大到 8 GB 以上 |
+| 评测全部失败 | 看 `bash scripts/portal_demo.sh logs`；多半是 `.env` 密钥不对或网关不通 |
+
+## 三、在 Windows 上从零启动（可交给 agent 逐步执行）
 
 > 给执行这一节的 agent：按顺序做，每步都有“检查”，检查不过就停下来报告，不要跳步。
 > **不要读取、打印或提交 `.env` 里的任何密钥**；`DEEPSEEK_API_KEY` 由用户自己填写。
@@ -211,11 +307,11 @@ bash scripts/portal_demo.sh logs         # API 和 worker 最近日志
 | 构建时 WSL 卡死或被杀 | `.wslconfig` 的 memory 调大到 8 GB 以上；OpenCode 构建本身限制在 2.5 GB |
 | 评测任务全部失败 | `bash scripts/portal_demo.sh logs` 看 worker 日志；多半是 `.env` 里的密钥不对或网关不通 |
 
-## 三、在网页上把流程跑一遍
+## 四、在网页上把流程跑一遍
 
 ### 0. 登录
 
-打开 Portal（Windows 上是 <http://localhost:8000/portal>；如果用的是原来那台 Linux 服务器，先在自己电脑上
+打开 Portal（macOS 和 Windows 上都是 <http://localhost:8000/portal>；如果用的是原来那台 Linux 服务器，先在自己电脑上
 `ssh -L 8000:127.0.0.1:8000 <服务器>` 再打开同一地址），在“连接工作空间”里填 setup / `make portal-up`
 打印的**登录令牌**（原服务器上是 `portal-token`），点“连接”。
 
@@ -269,6 +365,6 @@ export SCA_SANDBOX_HANDD=true         # 沙箱内常驻执行守护进程
 
 ### 已知未验证
 
-本指引的 Windows 部分按 setup 脚本的要求编写，**还没有在真实 Windows + WSL2 + Docker Desktop 上跑过**；
-已验证的是 Linux 上的全新拷贝一键 setup。如果遇到问题，把出错命令和 `bash scripts/portal_demo.sh logs`
+本指引的 macOS 和 Windows 部分按 setup 脚本的要求编写，**都还没有在真实的 Mac 或 Windows 电脑上跑过**；
+已验证的是 x86_64 Linux 上的全新拷贝一键 setup。风险从高到低：Apple 芯片 Mac（amd64 模拟）> Windows（WSL2）> Intel Mac。如果遇到问题，把出错命令和 `bash scripts/portal_demo.sh logs`
 的输出发给我。
