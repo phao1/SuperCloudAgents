@@ -807,7 +807,8 @@
     $("audit-report").hidden = false;
   }
   for (const path of ["docs/archive/architecture-v1.md", "docs/architecture.md",
-    "docs/design-phase2b.md", "docs/design-phase3.md", "docs/handoff.md"]) {
+    "docs/design-phase2b.md", "docs/design-phase3.md", "docs/design-phase4.md",
+    "Milestone/main-flow-and-next.md", "Milestone/portal-demo.md", "docs/handoff.md"]) {
     $("evidence-links").append(pathPair(path));
   }
 
@@ -855,49 +856,67 @@
         "C4 评测：隐藏验收、成组运行、变体比较和回归闸门。",
       ],
     },
+    {
+      id: "04 / P4.1–P4.6", title: "四期 · 脑手分离与并行加固", source: "docs/design-phase4.md",
+      summary: "交付 Portal 评测→诊断→修复→构建→回归，增加 brain 池、轨迹评分、pi、准入、限流及可选本地工作区优化。",
+      scope: "负责人现场验证：overlay 闭环 5/6 → 6/6；pi 与限流各 6/6；kind TLS 23 passed。最新指定基线记录 491 passed、1 skipped；全量回归首轮 704 passed、5 failed 后有逐项修复，未记录最终全量全绿统计。",
+      items: [
+        "P4.1 / P4.1b：无网络、无模型 key 的 hand；warm p50 357 ms、RSS 约 374 MiB。池会话需 Worker 亲和，长期内存稳定性待验。",
+        "K 轨迹检查：验收与过程分别判定；绕开工具缺陷也可判失败，支持历史事件重评。",
+        "P4.3：只读依赖与 overlay；Portal 真实闭环通过，评测 upper 约 86 KB。仓库相对路径 intent 待接。",
+        "TLS 出口：Docker 21 项通过；K8s CA 的 kind 23 项通过，多副本 RWX CA PVC 未验证，K8s 模型网关仍未接通。",
+        "P 小修复：评测预建行与启动失败标记、迁移 0013 权限、Docker 可执行路径、brain 取消进程组；负责人实测确认。",
+        "pi 1.5.2：真实模型 6/6；不提供为 Portal 的 OpenCode 源码修复后端。",
+        "P4.5：父任务准入、优先级、加权排序与网关反压；limiter 真实 45 调用、6.4 秒排队、0 次上游 429。单副本限制仍在。",
+        "P4.2：冻结后 CPU 降到 0%，内存仍 60.7 MiB，不满足省内存退出条件；实际小套件活跃率 0.80–0.97。",
+        "P4.4：两个 Docker 测试与带 setup 分叉通过；fork 0.07 秒，进入 RUNNING 2.8 → 1.6 秒。无 setup 的 12/12 评测没有分叉，Best-of-N 未实现。",
+        "P4.6：provider handd 基准已验，串行 p50 为 2.0–7.6 ms；brain driver 路由尚未接入。",
+        "默认关闭：复制层、overlay、快照、limiter、空闲冻结及 handd。稳定性维度尚未完成，单次闭环不能证明稳定性。",
+      ],
+    },
   ];
   const roadmap = [
     {
-      priority: "P1", title: "验证真实告警通知渠道",
-      next: "在已验证的 Prometheus → Alertmanager → 本地 webhook 基础上，配置真实 Slack 或邮件接收端。",
-      exit: "记录实际渠道收到告警的结果；本地 webhook 通过不等同于真实 Slack / 邮件投递通过。",
-      modules: ["obs_store", "obs_risk"],
+      priority: "P0", title: "把 handd 接入 brain 工具路径",
+      next: "provider 的长连接已有真实容器和 500 次/组基准，brain driver 仍逐次 docker exec；接入共享 relay 并保持取消与冻结互斥。",
+      exit: "在脑手分离真实任务中确认工具经过 handd，重新量 p50/p99 与完整 CPU，并保持无 key hand 和取消清理。",
+      modules: ["handd", "brain_split", "idle_suspend"],
     },
     {
-      priority: "P0", title: "验证 K8s 的网关与 Worker 部署",
-      next: "补齐沙箱 Pod 的模型网关路径，在实际集群部署 Worker，明确网络与临时凭证边界。",
-      exit: "在集群部署 Worker 并验证 RBAC、探针、伸缩及排空或故障续跑；沙箱 Pod 经网关成功调用真实模型。",
-      modules: ["k8s", "model_gateway", "sandbox_sched"],
+      priority: "P0", title: "完成稳定性维度与困难评测",
+      next: "Portal 已展示重复一致性；稳定性维度尚未完成。扩充真实缺陷和多次重复，区分 Agent 绕行、真实修复与随机波动。",
+      exit: "报告重复次数、方差、失败证据及回归；单次 83% → 100% 不作稳定性结论。",
+      modules: ["portal_loop", "trajectory_checks", "evo_eval"],
     },
     {
-      priority: "P0", title: "验证真实模型的分析任务",
-      next: "固定一份脱敏 CSV 和问题，经真实模型把分析任务从上传跑到可下载制品。",
-      exit: "干净沙箱复跑脚本，报告、结构化结果与图表通过验收，记录模型和花费。",
-      modules: ["analysis_kind", "model_gateway"],
+      priority: "P1", title: "验证 K8s 多副本 CA 与模型闭环",
+      next: "保留 kind TLS 23 passed 的已验结果，验证共享 RWX CA PVC、flock、轮换与 Worker 部署；另接仍被 factory 拒绝的 K8s 模型网关。",
+      exit: "多副本共用 CA、排空轮换后信任正确；实际部署 Worker 验证 RBAC/探针/排空/伸缩，沙箱经临时 key 完成真实模型任务。",
+      modules: ["k8s", "net_sec", "model_gateway"],
     },
     {
-      priority: "P0", title: "验证真实 embeddings",
-      next: "通过网关对已批准的项目记忆生成向量，重复可复现的检索用例。",
-      exit: "记录模型与 pgvector 扩展版本、检索结果和成本；跨租户检索保持隔离。",
-      modules: ["memory", "knowledge", "vector_store"],
+      priority: "P1", title: "补齐快照分叉与 overlay 边界",
+      next: "快照已验证带 setup 的分叉，未实现 Best-of-N；补 CodingSpec 顶层字段、聚合预算与 API，处理 overlay 的仓库相对路径 intent。",
+      exit: "真实重复任务实际命中快照、结果一致；Best-of-N 有明确预算和汇总，intent 在隔离边界内读取。",
+      modules: ["workspace_forks", "workspace_overlay", "design_in"],
     },
     {
-      priority: "P1", title: "做能定位问题的产品看板",
-      next: "从已有任务状态、验证事件、成本与审阅记录连接产品视图和回放。",
-      exit: "用户能从失败任务跳到对应验证结果、轮次事件和待处理审阅。",
-      modules: ["ui_quality", "ui_history", "obs_replay"],
+      priority: "P1", title: "补齐多 Worker 会话与容量验证",
+      next: "常驻池仍需 Worker 亲和，父任务限槽不限制所有子沙箱。limiter 单副本且一键 setup 不部署，开关仍默认关闭。",
+      exit: "验证按任务会话导出/导入、长期 RSS、子任务资源上限及压力文件联调；多副本限流先提供共享桶。",
+      modules: ["brain_pool", "admission_control", "gateway_limiter"],
     },
     {
-      priority: "P1", title: "增加有区分度的评测",
-      next: "扩展更难且更接近真实任务的用例，保留隐藏验收，重复运行固定变体。",
-      exit: "比较报告包含质量、耗时与成本，并说明样本是否足以区分模型。",
-      modules: ["evo_goal", "evo_eval", "evo_release"],
+      priority: "P1", title: "验证真实分析、embeddings 与通知渠道",
+      next: "历史已有脚本化分析、pgvector 假向量与本地告警 webhook；补真实模型分析、embeddings 和 Slack/邮件投递。",
+      exit: "保存脱敏输入、模型及花费、重跑结果和真实渠道收件证据；不以已有 fake/本地接收器代替。",
+      modules: ["analysis_kind", "vector_store", "obs_store"],
     },
     {
-      priority: "P2", title: "同步架构与验证记录",
-      next: "把较早设计文档与后续交接记录的差异对齐，标注外部服务和条件性验证。",
-      exit: "当前实现、历史已验证和待验证各有明确出处；更新快照并重新生成页面。",
-      modules: ["verify_gw", "vector_store", "k8s"],
+      priority: "P2", title: "按实测收益启用可选优化",
+      next: "overlay、复制层、快照、limiter、冻结与 handd 默认关闭；冻结只省 CPU，当前小套件几乎没有收益。",
+      exit: "按部署条件逐项验证后启用，记录收益及回退方法；冻结不得宣称省内存或增加同等内存密度。",
+      modules: ["idle_suspend", "workspace_overlay", "workspace_forks", "gateway_limiter"],
     },
   ];
   for (const phase of phases) {

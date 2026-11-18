@@ -1,20 +1,26 @@
 """Validate the authored milestone snapshot and its generated HTML."""
 
+import json
+import re
+import subprocess
 from collections import Counter
 from hashlib import sha256
 from html.parser import HTMLParser
-import json
 from pathlib import Path, PurePosixPath
-import re
 from xml.etree import ElementTree
-
 
 MILESTONE = Path(__file__).resolve().parent
 REPOSITORY = MILESTONE.parent
-BASELINE_COMMIT = "196e8d1f7e040fdd497bcc9d8251031c27a47e87"
-BASELINE_DATE = "2026-11-16"
+BASELINE_COMMIT = "a5a0d63dfc1e25dfc75ec62a203761478d88e32a"
+BASELINE_DATE = "2026-11-18"
 ORIGINAL_NODE_COUNT = 50
-V2_ADDITIONS = {"analysis_kind", "model_gateway"}
+V2_ADDITIONS = {
+    "analysis_kind", "model_gateway", "portal_loop", "opencode_versions",
+    "brain_split", "brain_pool", "trajectory_checks", "admission_control",
+    "gateway_limiter", "workspace_overlay", "workspace_forks", "pi_backend",
+    "idle_suspend", "handd",
+}
+TOTAL_MODULE_COUNT = 64
 STATUSES = {"done", "partial", "adapted", "planned"}
 PLACEHOLDER = re.compile(r"@@[A-Z][A-Z0-9_]*@@")
 
@@ -102,6 +108,7 @@ def validate_snapshot(data):
     svg_ids = validate_svg(meta["diagramSha256"])
     require(not svg_ids & V2_ADDITIONS, "A V2 addition duplicates an original SVG node")
     expected_ids = svg_ids | V2_ADDITIONS
+    require(len(expected_ids) == TOTAL_MODULE_COUNT, "Module count constants disagree")
     ids = [module["id"] for module in modules]
     require(len(ids) == len(expected_ids) and len(set(ids)) == len(ids),
             f"Snapshot must contain {len(expected_ids)} unique module IDs")
@@ -110,6 +117,15 @@ def validate_snapshot(data):
             f"Unexpected: {sorted(set(ids) - expected_ids)}.")
     for module in modules:
         validate_module(module)
+    paths = {path.rstrip("/") for module in modules
+             for key in ("code", "tests", "docs") for path in module[key]}
+    for path in sorted(paths):
+        result = subprocess.run(
+            ["git", "cat-file", "-e", f"{BASELINE_COMMIT}:{path}"],
+            cwd=REPOSITORY, capture_output=True, timeout=5, check=False,
+        )
+        require(result.returncode == 0,
+                f"Evidence path does not exist at {BASELINE_COMMIT[:7]}: {path}")
     return svg_ids
 
 
@@ -132,12 +148,14 @@ def main():
         data = json.loads((MILESTONE / "data.json").read_text(encoding="utf-8"))
         svg_ids = validate_snapshot(data)
         validate_html(data, svg_ids)
-    except (OSError, ValueError, TypeError, KeyError, ElementTree.ParseError) as error:
+    except (OSError, ValueError, TypeError, KeyError, ElementTree.ParseError,
+            subprocess.TimeoutExpired) as error:
         print(f"Validation failed: {error}")
         return 1
 
     print(f"Validated {len(data['modules'])} modules ({len(svg_ids)} original SVG nodes), "
-          "status values, evidence paths, baseline, and embedded HTML snapshot.")
+          "status values, evidence paths in checkout and baseline commit, "
+          "baseline, and embedded HTML snapshot.")
     return 0
 
 
