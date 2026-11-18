@@ -8,11 +8,15 @@ from dataclasses import asdict, dataclass
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
 
+from sca.config import Settings
 from sca.core.errors import InvalidTaskError
+from sca.core.interfaces import AgentBackend
 from sca.core.models import (
+    AgentContext,
     EventType,
     ExecExit,
     RepoCredential,
+    SandboxAdditions,
     tail,
 )
 from sca.kernel.activities import (
@@ -35,6 +39,30 @@ from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskInput
 from sca.observability import business_metrics, metric_guard
 from sca.storage.local import key_for
 from sca.workspace.git import GitWorkspace
+
+
+class DependencyBackend:
+    def __init__(self, backend: AgentBackend, settings: Settings) -> None:
+        self.backend = backend
+        self.settings = settings
+
+    def __getattr__(self, name: str):
+        return getattr(self.backend, name)
+
+    def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
+        from sca.agents.opencode_build import dependency_paths
+        from sca.core.models import Mount
+
+        additions = self.backend.sandbox_additions(ctx)
+        cache = self.settings.opencode_src_cache.resolve()
+        for modules in dependency_paths(self.settings):
+            if (not modules.is_dir() or modules.is_symlink()
+                    or not modules.resolve().is_relative_to(cache)):
+                raise InvalidTaskError("OpenCode dependency cache missing or invalid")
+            additions.mounts.append(Mount(
+                source=str(modules), target=f"/workspace/{modules.relative_to(cache)}", read_only=True
+            ))
+        return additions
 
 
 @dataclass
@@ -63,6 +91,41 @@ PATCH_ARTIFACT = "changes.patch"
 
 
 class CodingActivities(KernelActivities):
+    def _workspace(self, task_id: str) -> GitWorkspace:
+        from sca.workspace.layers import LayerStore
+
+        ws = super()._workspace(task_id)
+        if (self.settings.workspace_overlay and self.settings.sandbox_driver == "docker"
+                and self.settings.state_transport == "mount"):
+            from sca.workspace.overlay import OverlayWorkspace
+
+            return OverlayWorkspace(ws.task_dir, ws.branch, cache=ws.cache,
+                                    image=self.settings.sandbox_image)
+        if (not self.settings.workspace_overlay and self.settings.workspace_layers and self.settings.sandbox_driver == "docker"
+                and self.settings.state_transport == "mount"):
+            ws.layers = LayerStore(self.settings.data_dir / "layers")
+        return ws
+
+    async def _workspace_usage(self, task_id: str) -> dict:
+        from sca.workspace.layers import disk_bytes
+
+        ws = self._workspace(task_id)
+        usage = {"workspace_bytes": await disk_bytes(getattr(ws, "upper", ws.workspace)),
+                 "workspace_method": ("overlay" if hasattr(ws, "volume") else
+                                      "reflink-auto" if ws.layers else "clone")}
+        usage["method"] = usage["workspace_method"]
+        await self.store.update_result(task_id, usage)
+        return usage
+
+    def _backend(self, spec: CodingSpec) -> AgentBackend:
+        backend = super()._backend(spec)
+        if (spec.repo_url == self.settings.opencode_repo_url
+                and spec.image == self.settings.opencode_sandbox_image):
+            if self.settings.state_transport != "mount":
+                raise InvalidTaskError("OpenCode fix tasks require mount state transport")
+            return DependencyBackend(backend, self.settings)
+        return backend
+
     async def _spec(self, task_id: str) -> CodingSpec:
         task = await self.store.get_task(task_id)
         return CodingSpec.model_validate({
@@ -193,6 +256,9 @@ class CodingActivities(KernelActivities):
         await self._ensure_state(task_id)
         task = await self.store.get_task(task_id)
         ws = self._workspace(task_id)
+        # Restoring state may already have built the pre-merge commit and marked it ready;
+        # the merged commit must replace it.
+        (ws.task_dir / "workspace.ready").unlink(missing_ok=True)
         await ws.build_workspace(task.result["commit"])
 
     @activity.defn(name="coding.prepare_workspace")
@@ -212,11 +278,12 @@ class CodingActivities(KernelActivities):
         except InvalidTaskError as e:
             raise _non_retryable(e) from e
         info = WorkspaceInfo(base_sha=prepared.base_sha, branch=prepared.branch)
+        usage = await self._workspace_usage(task_id)
         await self.store.update_result(task_id, {"base_sha": info.base_sha, "branch": info.branch})
         await self.store.append_event(
             task_id,
             EventType.WORKSPACE_PREPARED,
-            {"base_sha": info.base_sha, "branch": info.branch},
+            {"base_sha": info.base_sha, "branch": info.branch, **usage},
             dedup_key="workspace.prepared",
         )
         await self._save_state(task_id, 0, info.base_sha)
@@ -228,13 +295,15 @@ class CodingActivities(KernelActivities):
         task = await self.store.get_task(inp.task_id)
         sandbox_id = await self._sandbox_id(inp.task_id)
         ws = self._workspace(inp.task_id)
-        exit_event, output = await self._run(
-            sandbox_id,
-            ws.commit_argv(commit_message(f"sca: turn {inp.turn}", inp.task_id)),
-            timeout_s=90,
-        )
-        if exit_event.exit_code != 0:
-            raise ApplicationError(f"commit in sandbox failed: {tail(output, 1000)}")
+        from sca.workspace.overlay import OverlayWorkspace
+
+        argv = ws.commit_argv(commit_message(f"sca: turn {inp.turn}", inp.task_id))
+        if isinstance(ws, OverlayWorkspace):
+            await ws.helper(argv)
+        else:
+            exit_event, output = await self._run(sandbox_id, argv, timeout_s=90)
+            if exit_event.exit_code != 0:
+                raise ApplicationError(f"commit in sandbox failed: {tail(output, 1000)}")
         commit = await self.transport.pull_commit(sandbox_id, ws)
         await self.transport.pull_agent_home(sandbox_id, self._task_dir(inp.task_id))
         await self._save_state(inp.task_id, inp.turn, commit)

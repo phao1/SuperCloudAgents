@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     s3_region: str = "us-east-1"
 
     worker_metrics_port: int | None = None
+    workspace_retention_hours: float = Field(default=1, ge=0)
     archive_after_days: int = 30
     repo_cache_max_entries: int = 200
     maintenance_interval_s: int = 3600
@@ -72,6 +73,9 @@ class Settings(BaseSettings):
     openbao_mount: str = "secret"
     openbao_prefix: str = "sca/tenants"
 
+    workspace_overlay: bool = False
+    workspace_layers: bool = False
+    layer_retention_hours: float = Field(default=24, ge=0)
     repo_cache: bool = True
     pip_cache: bool = True
 
@@ -100,6 +104,7 @@ class Settings(BaseSettings):
     sandbox_network: str = "restricted"  # open | restricted | none
     sandbox_runtime: str | None = None  # e.g. "runsc" once gVisor is installed
     # Hosts a restricted sandbox may reach: the model service and Python packages.
+    egress_ca_dir: Path | None = None
     egress_allow: str = (
         "chatgpt.com,*.chatgpt.com,api.openai.com,auth.openai.com,"
         "pypi.org,files.pythonhosted.org"
@@ -117,6 +122,35 @@ class Settings(BaseSettings):
     model_gateway_turn_budget_usd: float = 1.0
     codex_bin_dir: Path | None = None
     codex_auth_file: Path = Path("~/.codex/auth.json")
+
+    opencode_brain_bun: Path = Path(".data/tools/bun-linux-x64/bun")
+    opencode_brain_host: Path = Path("deploy/opencode/brain/launch.py")
+    opencode_brain_gateway_url: str | None = None
+    opencode_brain_pool: bool = True
+    opencode_brain_pool_worker_id: str = Field(default="local", pattern=r"^[a-zA-Z0-9_-]{1,48}$")
+    opencode_brain_pool_concurrency: int = Field(default=3, ge=1, le=32)
+    opencode_brain_pool_idle_minutes: float = Field(default=10, gt=0)
+    opencode_brain_docker_prefix: list[str] = ["docker"]
+
+    opencode_versions_dir: Path | None = None
+    opencode_default_version: str = "2.3.0-sca.1"
+    opencode_repo_url: str | None = None
+    opencode_src_cache: Path | None = None
+    opencode_build_image: str = "oven/bun:1.4.4"
+    opencode_build_memory: str = "2500m"
+    opencode_sandbox_image: str = "sca-sandbox-opencode:latest"
+    eval_suites_dir: Path = Path("evals")
+
+    @model_validator(mode="after")
+    def opencode_paths(self) -> Settings:
+        self.opencode_brain_gateway_url = (self.opencode_brain_gateway_url or
+                                           (self.model_gateway_url.rstrip("/") + "/v1"
+                                            if self.model_gateway_url else None))
+        root = self.data_dir.resolve() / "opencode"
+        self.opencode_versions_dir = self.opencode_versions_dir or root / "bin"
+        self.opencode_repo_url = self.opencode_repo_url or str(root / "opencode.git")
+        self.opencode_src_cache = self.opencode_src_cache or root / "src"
+        return self
 
     def tasks_dir(self) -> Path:
         return self.data_dir.resolve() / "tasks"

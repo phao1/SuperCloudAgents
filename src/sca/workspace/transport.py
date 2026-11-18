@@ -17,6 +17,13 @@ class MountTransport:
         self.sandbox = sandbox
 
     def mounts(self, task_dir: Path) -> list[Mount]:
+        if (task_dir / "workspace.overlay").exists():
+            from sca.workspace.overlay import volume_name
+
+            context = task_dir / "workspace" / ".sca"
+            context.mkdir(parents=True, exist_ok=True)
+            return [Mount(source=volume_name(task_dir), target="/workspace"),
+                    Mount(source=str(context), target="/workspace/.sca")]
         return [Mount(source=str(task_dir / "workspace"), target="/workspace")]
 
     async def push(self, sandbox_id: str, task_dir: Path) -> None:

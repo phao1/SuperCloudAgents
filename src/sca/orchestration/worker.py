@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from datetime import timedelta
 from pathlib import Path
 
@@ -45,6 +46,20 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
         from sca.agents.fake import FakeBackend
 
         return FakeBackend()
+    if settings.agent_backend == "opencode-brain":
+        from sca.agents.opencode_brain import OpenCodeBrainBackend
+
+        return OpenCodeBrainBackend(
+            settings.opencode_src_cache, settings.opencode_brain_bun,
+            settings.opencode_brain_host, settings.default_model,
+            settings.opencode_brain_gateway_url, settings.opencode_brain_docker_prefix,
+            settings=settings,
+        )
+    if settings.agent_backend == "opencode":
+        from sca.agents.opencode import OpenCodeBackend
+
+        return OpenCodeBackend(settings.opencode_versions_dir,
+                               settings.opencode_default_version, settings.default_model)
     if settings.agent_backend == "codex":
         from sca.agents.codex import CodexBackend
 
@@ -120,7 +135,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         await maintenance.replenish_sandbox_pool()  # do not wait an hour for a warm pool
     kernel = KernelActivities(**{f: getattr(deps, f) for f in deps.__dataclass_fields__})
     backends = {settings.agent_backend: deps.agent}
-    for name in ("fake", "codex"):
+    for name in ("fake", "codex", "opencode", "opencode-brain"):
         if name not in backends:
             try:
                 backends[name] = make_agent_backend(settings.model_copy(update={"agent_backend": name}))
@@ -141,12 +156,15 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         if owner is not None:
             owner.backends = backends
             kernel.scenarios[kind.name] = owner
+    from sca.agents.opencode_build import OpenCodeBuildActivities, OpenCodeBuildWorkflow
+
+    builds = OpenCodeBuildActivities(settings)
     evaluation = EvalActivities(settings, store)
     return Worker(
         client,
         task_queue=settings.task_queue,
-        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow],
-        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all(),
+        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow],
+        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + [builds.build],
         max_concurrent_activities=8,
     )
 
@@ -198,7 +216,19 @@ async def main() -> None:
     logging.getLogger("sca.worker").info(
         "worker started: queue=%s backend=%s", settings.task_queue, settings.agent_backend
     )
-    await (await build_worker(client, settings)).run()
+    from sca.agents.opencode_brain import BrainPool
+
+    loop = asyncio.get_running_loop()
+    main_task = asyncio.current_task()
+    assert main_task is not None
+    loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
+    try:
+        await (await build_worker(client, settings)).run()
+    finally:
+        try:
+            await BrainPool.close_all()
+        finally:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 if __name__ == "__main__":

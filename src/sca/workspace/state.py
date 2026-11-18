@@ -39,6 +39,10 @@ class TaskStateStore:
             # A provider credential copied in for the agent must never be persisted.
             await asyncio.to_thread(pack, home, archive, CREDENTIAL_FILES)
             data = {"mirror.bundle": bundle.read_bytes(), "agent_home.tar": archive.getvalue()}
+        from sca.workspace.overlay import OverlayWorkspace
+
+        if isinstance(ws, OverlayWorkspace):
+            data["overlay.json"] = await asyncio.to_thread(ws.snapshot)
         manifest = {"turn": turn, "commit": commit, "sha256": {}}
         for name, blob in data.items():
             digest = hashlib.sha256(blob).hexdigest()
@@ -57,12 +61,14 @@ class TaskStateStore:
         if (
             not force
             and ws.mirror.exists()
+            and (ws.task_dir / "workspace.ready").exists()
             and marker.exists()
             and json.loads(marker.read_bytes()) == manifest
         ):
             return False
         data = {}
-        for name in ("mirror.bundle", "agent_home.tar"):
+        for name in ("mirror.bundle", "agent_home.tar",
+                     *(["overlay.json"] if "overlay.json" in manifest["sha256"] else [])):
             digest = manifest["sha256"][name]
             try:
                 blob = await self.objects.get(f"{self.prefix}/blobs/{digest}")
@@ -72,6 +78,7 @@ class TaskStateStore:
                 raise WorkspaceError(f"state checksum mismatch: {name}")
             data[name] = blob
         ws.task_dir.mkdir(parents=True, exist_ok=True)
+        marker.unlink(missing_ok=True)
         with tempfile.TemporaryDirectory(dir=ws.task_dir.parent) as directory:
             staging = Path(directory)
             bundle = staging / "mirror.bundle"
@@ -81,13 +88,25 @@ class TaskStateStore:
             await asyncio.to_thread(
                 extract, io.BytesIO(data["agent_home.tar"]), staging / "agent_home"
             )
-            await rebuilt.build_workspace(manifest["commit"])
-            for name in ("mirror.git", "workspace", "workspace.ready", "agent_home"):
+            from sca.workspace.overlay import OverlayWorkspace
+
+            overlay = isinstance(ws, OverlayWorkspace)
+            if not overlay:
+                await rebuilt.build_workspace(manifest["commit"])
+            names = ("mirror.git", "agent_home") if overlay else (
+                "mirror.git", "workspace", "workspace.ready", "agent_home")
+            for name in names:
                 dest = ws.task_dir / name
                 if dest.is_symlink() or dest.is_file():
                     dest.unlink()
                 elif dest.exists():
                     shutil.rmtree(dest)
                 (staging / name).replace(dest)
+        if overlay:
+            if "overlay.json" in data:
+                await ws.restore_snapshot(data["overlay.json"])
+            else:
+                (ws.task_dir / "workspace.ready").unlink(missing_ok=True)
+                await ws.build_workspace(manifest["commit"])
         marker.write_text(json.dumps(manifest, sort_keys=True))
         return True

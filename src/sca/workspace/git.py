@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -8,7 +10,8 @@ from pathlib import Path
 from sca.core.errors import InvalidTaskError, WorkspaceError
 from sca.core.models import RepoCredential
 from sca.secrets import git_env, redact
-from sca.workspace.cache import RepoCache
+from sca.workspace.cache import RepoCache, _normalise
+from sca.workspace.layers import LayerStore
 
 DEFAULT_EXCLUDES = (
     ".sca/",
@@ -31,7 +34,9 @@ class Prepared:
 
 
 class GitWorkspace:
-    def __init__(self, task_dir: Path, branch: str, cache: RepoCache | None = None):
+    def __init__(self, task_dir: Path, branch: str, cache: RepoCache | None = None,
+                 layers: LayerStore | None = None):
+        self.layers = layers
         self.cache = cache
         self.task_dir = task_dir.resolve()
         self.branch = branch
@@ -140,6 +145,10 @@ class GitWorkspace:
             f"{base_ref}^{{commit}}",
             invalid=True,
         )
+        (self.task_dir / "layer-source.json").write_text(
+            json.dumps({"repo_key": hashlib.sha256(_normalise(repo_url).encode()).hexdigest(),
+                        "tenant_id": tenant_id})
+        )
         if mirror_only:
             return Prepared(base.strip(), self.branch, self.workspace)
         return await self.build_workspace(base.strip())
@@ -150,7 +159,18 @@ class GitWorkspace:
             return Prepared(commit, self.branch, self.workspace)
         if self.workspace.exists():
             shutil.rmtree(self.workspace)
-        await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
+        if self.layers is None:
+            await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
+        else:
+            metadata = self.task_dir / "layer-source.json"
+            if metadata.exists():
+                source = json.loads(metadata.read_text())
+                await self.layers.copy(self.mirror, commit, source["repo_key"], self.workspace,
+                                       source["tenant_id"])
+                await self._git("-C", str(self.workspace), "remote", "set-url", "origin",
+                                str(self.mirror))
+            else:
+                await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
         # Preparation is the only time the host touches the trusted, freshly cloned checkout.
         await self._git("-C", str(self.workspace), "checkout", "-B", self.branch, commit)
         # Running the verify command leaves caches behind; a repo without a .gitignore

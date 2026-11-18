@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
@@ -52,6 +53,7 @@ MAX_CAPTURED_OUTPUT = 5 * 1024 * 1024
 _NON_RETRYABLE = (InvalidTaskError, ConflictError, NotFoundError)
 
 _AGENT_EVENT_TYPES = {
+    AgentEventType.TOOL: EventType.AGENT_TOOL,
     AgentEventType.MESSAGE: EventType.AGENT_MESSAGE,
     AgentEventType.COMMAND: EventType.AGENT_COMMAND,
     AgentEventType.FILE_CHANGE: EventType.AGENT_FILE_CHANGE,
@@ -183,7 +185,18 @@ class KernelActivities:
         return TaskStateStore(self.objects, task_id)
 
     async def _ensure_state(self, task_id: str) -> bool:
-        return await self._state(task_id).restore(self._workspace(task_id))
+        ws = self._workspace(task_id)
+        if hasattr(ws, "volume"):
+            manifest = await self._state(task_id).manifest()
+            marker = ws.task_dir / "state.manifest.json"
+            if manifest is not None and (not marker.exists() or
+                                         json.loads(marker.read_bytes()) != manifest or
+                                         not ws.mirror.exists() or
+                                         not (ws.task_dir / "workspace.ready").exists()):
+                task = await self.store.get_task(task_id)
+                if task.result.get("sandbox_id"):
+                    await self.sandbox.destroy(task.result["sandbox_id"])
+        return await self._state(task_id).restore(ws)
 
     async def _save_state(self, task_id: str, turn: int, commit: str) -> None:
         await self._state(task_id).save(self._workspace(task_id), turn, commit)
@@ -224,12 +237,20 @@ class KernelActivities:
     def _workspace(self, task_id: str) -> GitWorkspace:
         cache_root = self.settings.data_dir.resolve() / "cache" / "repos"
         cache = RepoCache(cache_root) if self.settings.repo_cache else None
+        if ((self._task_dir(task_id) / "workspace.overlay").exists()
+                and self.settings.sandbox_driver == "docker"
+                and self.settings.state_transport == "mount"):
+            from sca.workspace.overlay import OverlayWorkspace
+
+            return OverlayWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache,
+                                    image=self.settings.sandbox_image)
         return GitWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache)
 
     def _agent_ctx(self, task_id: str, spec: ExecutionSpec) -> AgentContext:
         return AgentContext(
             task_id=task_id,
             agent_home_host=str(self._task_dir(task_id) / "agent_home"),
+            agent_version=getattr(spec, "agent_version", None),
             model=spec.model or self.settings.default_model,
         )
 
@@ -569,7 +590,11 @@ class KernelActivities:
             from sca.memory.context import write_memory
 
             write_memory(self._workspace(task_id).workspace, task.result['memory_context'])
-        additions = self._backend(spec).sandbox_additions(self._agent_ctx(task_id, spec))
+        # The kind may wrap the backend (e.g. coding adds the OpenCode dependency mounts); the
+        # kernel instance that runs this activity must ask the kind's activities, not itself.
+        owner = self.scenarios.get(task.kind, self) if self.scenarios else self
+        backend = owner._backend(spec)
+        additions = backend.sandbox_additions(self._agent_ctx(task_id, spec))
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -587,7 +612,7 @@ class KernelActivities:
             env={**cache_env, **additions.env},
             cpus=self.settings.sandbox_cpus,
             memory_mb=self.settings.sandbox_memory_mb,
-            network=self.settings.sandbox_network,
+            network=getattr(backend, "sandbox_network", self.settings.sandbox_network),
             runtime=self.settings.sandbox_runtime,
             labels={"sca.task_id": task_id, "sca.state_transport": self.settings.state_transport},
         )
@@ -635,6 +660,17 @@ class KernelActivities:
                 non_retryable=True,
             )
 
+        ws = self._workspace(task_id)
+        if hasattr(ws, "volume"):
+            from sca.workspace.layers import disk_bytes
+
+            usage = {"workspace_bytes": await disk_bytes(ws.upper),
+                     "workspace_method": "overlay", "method": "overlay"}
+            await self.store.update_result(task_id, usage)
+            await self.store.append_event(task_id, EventType.WORKSPACE_PREPARED,
+                                          {**usage, "phase": "after_setup"},
+                                          dedup_key="workspace.prepared.after_setup")
+
     @activity.defn
     async def run_agent_turn(self, inp: TurnInput) -> TurnResult:
         async def beat() -> None:
@@ -656,8 +692,8 @@ class KernelActivities:
         attempt = activity.info().attempt
         key = f"turn{turn}.attempt{attempt}"
         if restored or attempt > 1:
-            await self._state(task_id).restore(self._workspace(task_id), force=True)
             await self.sandbox.destroy(await self._sandbox_id(task_id))
+            await self._state(task_id).restore(self._workspace(task_id), force=True)
             await self.restore_sandbox(StepInput(task_id, turn - 1))
         spec = await self._spec(task_id)
         agent = self._backend(spec)
@@ -807,6 +843,9 @@ class KernelActivities:
         with contextlib.suppress(NotFoundError):
             sandbox_id = (await self.store.get_task(task_id)).result.get("sandbox_id", sandbox_id)
         await self.sandbox.destroy(sandbox_id)
+        ws = self._workspace(task_id)
+        if hasattr(ws, "remove_volume") and (ws.task_dir / "workspace.overlay").exists():
+            await ws.remove_volume()
         await self.store.append_event(
             task_id,
             EventType.SANDBOX_DESTROYED,
@@ -872,7 +911,7 @@ class KernelActivities:
                 mounts=self.transport.mounts(clean.task_dir),
                 cpus=self.settings.sandbox_cpus,
                 memory_mb=self.settings.sandbox_memory_mb,
-                network=self.settings.sandbox_network,
+                network=getattr(self._backend(spec), "sandbox_network", self.settings.sandbox_network),
                 runtime=self.settings.sandbox_runtime,
                 labels={"sca.task_id": task_id, "sca.acceptance": "true"},
             )
