@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import time
 from dataclasses import asdict, dataclass
 
 from temporalio import activity
@@ -17,6 +19,7 @@ from sca.core.models import (
     ExecExit,
     RepoCredential,
     SandboxAdditions,
+    Task,
     tail,
 )
 from sca.kernel.activities import (
@@ -39,6 +42,7 @@ from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskInput
 from sca.observability import business_metrics, metric_guard
 from sca.storage.local import key_for
 from sca.workspace.git import GitWorkspace
+from sca.workspace.snapshots import SnapshotStore
 
 
 class DependencyBackend:
@@ -100,7 +104,8 @@ class CodingActivities(KernelActivities):
             from sca.workspace.overlay import OverlayWorkspace
 
             return OverlayWorkspace(ws.task_dir, ws.branch, cache=ws.cache,
-                                    image=self.settings.sandbox_image)
+                                    image=self.settings.sandbox_image,
+                                    docker_bin=self.settings.docker_bin)
         if (not self.settings.workspace_overlay and self.settings.workspace_layers and self.settings.sandbox_driver == "docker"
                 and self.settings.state_transport == "mount"):
             ws.layers = LayerStore(self.settings.data_dir / "layers")
@@ -267,14 +272,51 @@ class CodingActivities(KernelActivities):
             task = await self.store.get_task(task_id)
             return WorkspaceInfo(task.result["base_sha"], self._workspace(task_id).branch)
         spec = await self._spec(task_id)
+        started = time.monotonic()
         try:
             task = await self.store.get_task(task_id)
-            prepared = await self._workspace(task_id).prepare(
+            ws = self._workspace(task_id)
+            enabled = self._snapshots_enabled(task, spec)
+            prepared = await ws.prepare(
                 spec.repo_url,
                 spec.base_ref,
+                mirror_only=enabled,
                 tenant_id=task.tenant_id,
                 credential=await self._repo_credential(task.tenant_id, spec.repo_url),
             )
+            if enabled:
+                key = await self._snapshot_key(task_id, prepared.base_sha)
+                snapshot = await self._snapshots().fork(
+                    key, ws.overlay if hasattr(ws, "volume") else ws.workspace,
+                    overlay=hasattr(ws, "volume"))
+                if snapshot is None:
+                    prepared = await ws.build_workspace(prepared.base_sha)
+                else:
+                    if hasattr(ws, "volume"):
+                        source_file = ws.task_dir / "layer-source.json"
+                        source_file.write_text(json.dumps({**json.loads(source_file.read_text()),
+                                                           "snapshot_key": key}))
+                        ws.overlay.mkdir(parents=True, exist_ok=True)
+                        for name in ("upper", "work"):
+                            (ws.overlay / name).mkdir(exist_ok=True)
+                        (ws.task_dir / "workspace.overlay").write_text(json.dumps({
+                            "volume": ws.volume,
+                            "lower": str(self._snapshots().root / snapshot["id"])}))
+                        ws.workspace.mkdir(exist_ok=True)
+                        await ws.ensure_volume()
+                    (ws.task_dir / "workspace.ready").write_text(prepared.base_sha)
+                    await self.store.update_result(task_id, {
+                        "snapshot_id": snapshot["id"], "workspace_forked": True,
+                        "snapshot_bytes": snapshot["size_bytes"],
+                    })
+                    await self.store.append_event(
+                        task_id, "workspace.forked",
+                        {"snapshot_id": snapshot["id"],
+                         "saved_seconds": snapshot["saved_seconds"],
+                         "fork_seconds": time.monotonic() - started},
+                        dedup_key="workspace.forked")
+            await self.store.update_result(task_id, {
+                "preparation_seconds": time.monotonic() - started})
         except InvalidTaskError as e:
             raise _non_retryable(e) from e
         info = WorkspaceInfo(base_sha=prepared.base_sha, branch=prepared.branch)
@@ -288,6 +330,62 @@ class CodingActivities(KernelActivities):
         )
         await self._save_state(task_id, 0, info.base_sha)
         return info
+
+    def _snapshots(self) -> SnapshotStore:
+        return SnapshotStore(self.settings.data_dir / "snapshots", self.settings.snapshot_max_bytes)
+
+    def _snapshots_enabled(self, task: Task, spec: CodingSpec) -> bool:
+        return (self.settings.workspace_snapshots and self.settings.state_transport == "mount"
+                and self.settings.sandbox_driver == "docker" and not spec.intents
+                and not spec.subtasks and spec.plan == "none"
+                and (task.spec.get("fork_from_snapshot") is True
+                     or spec.labels.get("fork_from_snapshot") == "true"))
+
+    async def _snapshot_key(self, task_id: str, commit: str) -> str:
+        from sca.workspace.snapshots import preparation_key
+
+        task = await self.store.get_task(task_id)
+        spec = await self._spec(task_id)
+        source = json.loads((self._workspace(task_id).task_dir / "layer-source.json").read_text())
+        image = (spec.image or getattr(self._backend(spec), "sandbox_image", None)
+                 or self.settings.sandbox_image)
+        return preparation_key(task.tenant_id, source["repo_key"], commit,
+                               await self._setup_command(task_id, spec), image)
+
+    async def _forked_setup(self, task_id: str, sandbox_id: str) -> bool:
+        task = await self.store.get_task(task_id)
+        if not task.result.get("workspace_forked"):
+            return False
+        ws = self._workspace(task_id)
+        target = ws.overlay if hasattr(ws, "volume") else ws.workspace
+        marker = target.parent / f"{target.name}.snapshot"
+        if not marker.is_file() or marker.read_text() != task.result.get("snapshot_id"):
+            await self.store.update_result(task_id, {"workspace_forked": False})
+            return False
+        # Snapshot Git metadata is untrusted; only the sandbox may change its branch.
+        exit_event, _ = await self._run(sandbox_id, [
+            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "checkout", "-B", self._workspace(task_id).branch, task.result["base_sha"]],
+            timeout_s=90)
+        if exit_event.exit_code:
+            raise ApplicationError("Snapshot branch initialization failed")
+        return True
+
+    async def _snapshot_after_setup(self, task_id: str, sandbox_id: str,
+                                    setup_seconds: float) -> None:
+        task = await self.store.get_task(task_id)
+        spec = await self._spec(task_id)
+        if not self._snapshots_enabled(task, spec):
+            return
+        metadata = await self._snapshots().publish(
+            await self._snapshot_key(task_id, task.result["base_sha"]),
+            self.sandbox.download(sandbox_id, "/workspace/."),
+            base_commit=task.result["base_sha"],
+            saved_seconds=setup_seconds + task.result.get("preparation_seconds", 0))
+        await self.store.update_result(task_id, {"snapshot_id": metadata["id"],
+                                                "snapshot_bytes": metadata["size_bytes"]})
+        await self.store.append_event(task_id, "workspace.snapshotted", metadata,
+                                      dedup_key="workspace.snapshotted")
 
     @activity.defn(name="coding.checkpoint_workspace")
     async def checkpoint_workspace(self, inp: StepInput) -> CheckpointResult:

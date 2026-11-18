@@ -13,6 +13,7 @@ def test_pod_security_resources_and_runtime():
         "A_bad name",
         SandboxSpec(
             image="test",
+            network="open",
             runtime="runsc",
             cpus=1.5,
             memory_mb=256,
@@ -46,6 +47,7 @@ def test_hostpaths(tmp_path):
     file.touch()
     spec = SandboxSpec(
         image="test",
+        network="open",
         mounts=[
             Mount(source=str(tmp_path / "missing"), target="/work"),
             Mount(source=str(file), target="/file", read_only=True),
@@ -173,12 +175,16 @@ def test_blocked_cidrs_excluded_from_proxy():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("network", ["none", "restricted"])
-async def test_provider_applies_calico_to_both_modes(network):
+async def test_provider_applies_calico_to_both_modes(network, tmp_path):
     from unittest.mock import AsyncMock
 
     from sca.sandbox.k8s import K8sSandboxProvider
 
-    provider = K8sSandboxProvider(network_policy_flavor="calico", blocked_cidrs=["172.18.0.0/16"])
+    provider = K8sSandboxProvider(
+        network_policy_flavor="calico",
+        blocked_cidrs=["172.18.0.0/16"],
+        egress_ca_dir=tmp_path / "ca",
+    )
     provider._cli = AsyncMock(
         side_effect=lambda *args, **kwargs: (
             (0, "10.96.0.1", "")
@@ -300,6 +306,7 @@ async def test_pool_replenish_has_no_task_env():
     from sca.sandbox.k8s import K8sSandboxProvider, pool_hash
 
     provider = K8sSandboxProvider(pool_size=2)
+    provider.ensure_egress = AsyncMock()
     provider._namespace = AsyncMock()
     provider._pods = AsyncMock(return_value=[])
     provider.create = AsyncMock()
@@ -380,6 +387,7 @@ async def test_replenish_obsolete_delete_has_claim_precondition():
     from sca.sandbox.k8s import K8sSandboxProvider
 
     provider = K8sSandboxProvider()
+    provider.ensure_egress = AsyncMock()
     provider._namespace = AsyncMock()
     provider._pods = AsyncMock(
         return_value=[
@@ -398,3 +406,74 @@ async def test_replenish_obsolete_delete_has_claim_precondition():
     await provider.replenish(SandboxSpec(image="img"), 0)
     options = json.loads(provider._cli.call_args.kwargs["data"])
     assert options["preconditions"] == {"uid": "unique", "resourceVersion": "42"}
+
+
+async def test_tls_ca_distribution_and_rotation(tmp_path):
+    import base64
+    import json
+    from unittest.mock import AsyncMock
+
+    from sca.sandbox.egress import CA_ENV, CA_TARGET
+    from sca.sandbox.k8s import CA_LABEL, K8sSandboxProvider
+
+    provider = K8sSandboxProvider(egress_ca_dir=tmp_path / "ca")
+    provider._namespace = AsyncMock()
+    provider._cli = AsyncMock(return_value=(0, '{"spec":{"clusterIP":"10.96.0.2"}}', ""))
+    provider._apply = AsyncMock()
+    await provider.ensure_egress()
+    secret = json.loads(provider._cli.call_args_list[0].kwargs["data"])
+    assert secret["kind"] == "Secret"
+    assert base64.b64decode(secret["data"]["ca.key"]) == (tmp_path / "ca/ca.key").read_bytes()
+    resources = [m for call in provider._apply.call_args_list for m in call.args[0]]
+    bundle = next(m for m in resources if m["metadata"]["name"].startswith("sca-egress-bundle-"))
+    assert set(bundle["data"]) == {"ca-bundle.crt"}
+    assert "PRIVATE KEY" not in json.dumps(bundle)
+    fingerprint = provider._ca_fingerprint
+    deployment = next(m for m in resources if m["kind"] == "Deployment")
+    proxy = deployment["spec"]["template"]
+    assert proxy["metadata"]["labels"][CA_LABEL] == fingerprint
+    assert proxy["spec"]["volumes"][0]["secret"]["secretName"] == secret["metadata"]["name"]
+    assert proxy["spec"]["containers"][0]["image"] == "sca-egress:tls-v1"
+    pod = pod_manifest(
+        "tls", SandboxSpec(image="test", env={"PIP_CERT": "/wrong"}), ca_fingerprint=fingerprint
+    )
+    assert pod["metadata"]["labels"][CA_LABEL] == fingerprint
+    assert all("secret" not in v for v in pod["spec"]["volumes"])
+    assert pod["spec"]["volumes"][0]["configMap"]["name"] == bundle["metadata"]["name"]
+    container = pod["spec"]["containers"][0]
+    assert container["volumeMounts"][0]["readOnly"] is True
+    assert container["volumeMounts"][0]["mountPath"] == CA_TARGET
+    env = {e["name"]: e["value"] for e in container["env"]}
+    assert all(env[k] == CA_TARGET for k in CA_ENV)
+    await provider.ensure_egress()
+    assert provider._ca_fingerprint == fingerprint
+    (tmp_path / "ca/ca.key").unlink()
+    (tmp_path / "ca/ca.crt").unlink()
+    await provider.ensure_egress()
+    assert provider._ca_fingerprint != fingerprint
+
+
+async def test_ca_secret_publication_failure_is_sanitized(tmp_path):
+    from unittest.mock import AsyncMock
+
+    from sca.sandbox.k8s import K8sSandboxProvider
+
+    provider = K8sSandboxProvider(egress_ca_dir=tmp_path / "ca")
+    provider._namespace = AsyncMock()
+    provider._cli = AsyncMock(return_value=(1, "", "sensitive server response"))
+    provider._apply = AsyncMock()
+    with pytest.raises(SandboxError, match="^Unable to publish egress CA Secret$"):
+        await provider.ensure_egress()
+    provider._apply.assert_not_awaited()
+
+
+async def test_restricted_pool_claim_selects_current_ca():
+    from unittest.mock import AsyncMock
+
+    from sca.sandbox.k8s import CA_LABEL, K8sSandboxProvider
+
+    provider = K8sSandboxProvider()
+    provider._ca_fingerprint = "current"
+    provider._pods = AsyncMock(return_value=[])
+    assert await provider._claim("task", SandboxSpec(image="test")) is None
+    assert f",{CA_LABEL}=current" in provider._pods.call_args.args[0]

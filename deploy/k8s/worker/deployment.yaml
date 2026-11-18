@@ -45,6 +45,11 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /var/lib/sca
+            - name: egress-ca
+              mountPath: /var/lib/sca/egress
       volumes:
         - name: data
           emptyDir: {}
+        - name: egress-ca
+          persistentVolumeClaim:
+            claimName: sca-egress-ca

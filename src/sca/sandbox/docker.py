@@ -4,13 +4,15 @@ import asyncio
 import os
 import stat
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from sca.core.errors import SandboxError
-from sca.core.models import ExecEvent, SandboxSpec
+from sca.core.models import ExecEvent, ExecOutput, SandboxSpec
 from sca.sandbox._exec import stream_exec
 from sca.sandbox._transfer import transfer
 from sca.sandbox.egress import CA_ENV, CA_TARGET, SQUID_IMAGE, SQUID_PORT, render_squid_conf
+from sca.sandbox.handd import DAEMON, HanddClient
 
 
 class DockerSandboxProvider:
@@ -39,6 +41,13 @@ class DockerSandboxProvider:
         self.network_name = f"{name_prefix}-sandbox-net"
         self.proxy_name = f"{name_prefix}-egress"
         self._egress_lock = asyncio.Lock()
+        self._use_locks: dict[str, asyncio.Lock] = {}
+        self._handd_enabled = settings.sandbox_handd
+        # Only a deployment that freezes sandboxes needs the unpause before every command.
+        self._suspend_enabled = settings.sandbox_suspend_idle
+        self._handd_clients: dict[str, HanddClient] = {}
+        self._handd_gates: dict[str, asyncio.Lock] = {}
+        self._handd_users: dict[str, int] = {}
 
     async def ensure_egress(self) -> str:
         """Make sure the internal network and the egress proxy exist. Returns the proxy URL."""
@@ -206,6 +215,25 @@ class DockerSandboxProvider:
         if code and "no such" not in err.lower():
             raise SandboxError(err)
 
+    def _use_lock(self, sandbox_id: str) -> asyncio.Lock:
+        return self._use_locks.setdefault(sandbox_id, asyncio.Lock())
+
+    async def pause(self, sandbox_id: str) -> None:
+        async with self._use_lock(sandbox_id):
+            code, _, err = await self._cli("pause", sandbox_id, check=False)
+            if code and "already paused" not in err.lower():
+                raise SandboxError(err)
+
+    async def _unpause(self, sandbox_id: str) -> None:
+        # The host brain can freeze independently of this provider instance.
+        code, _, err = await self._cli("unpause", sandbox_id, check=False)
+        if code and "not paused" not in err.lower():
+            raise SandboxError(err)
+
+    async def unpause(self, sandbox_id: str) -> None:
+        async with self._use_lock(sandbox_id):
+            await self._unpause(sandbox_id)
+
     def exec(
         self,
         sandbox_id: str,
@@ -227,7 +255,81 @@ class DockerSandboxProvider:
         async def cleanup(script: str, marker: str) -> None:
             await self._cli("exec", sandbox_id, "python3", "-c", script, marker, check=False)
 
-        return stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+        @asynccontextmanager
+        async def lease():
+            # Commands share the sandbox; only pause() is exclusive. The first concurrent
+            # user takes the lock (blocking pauses) and the last one gives it back.
+            gate = self._handd_gates.setdefault(sandbox_id, asyncio.Lock())
+            async with gate:
+                if not self._handd_users.get(sandbox_id):
+                    lock = self._use_lock(sandbox_id)
+                    await lock.acquire()
+                    try:
+                        if self._suspend_enabled:
+                            await self._unpause(sandbox_id)
+                    except BaseException:
+                        lock.release()
+                        raise
+                self._handd_users[sandbox_id] = self._handd_users.get(sandbox_id, 0) + 1
+            try:
+                yield
+            finally:
+                async with gate:
+                    self._handd_users[sandbox_id] -= 1
+                    if not self._handd_users[sandbox_id]:
+                        self._use_lock(sandbox_id).release()
+
+        async def run() -> AsyncIterator[ExecEvent]:
+            async with lease():
+                if self._handd_enabled:
+                    client = self._handd_clients.get(sandbox_id)
+                    if client is None:
+                        client = HanddClient([self.docker_bin, "exec", "-i", sandbox_id,
+                                              "python3", "-u", "-c",
+                                              DAEMON.read_text() if DAEMON.is_file() else ""])
+                        self._handd_clients[sandbox_id] = client
+                    for handd_attempt in range(2):
+                        try:
+                            await client.start()
+                            break
+                        except SandboxError:
+                            if handd_attempt == 1:
+                                client = None
+                    if client is not None:
+                        stream = client.exec(argv, workdir=workdir, env=env, stdin=stdin,
+                                             timeout_s=timeout_s)
+                        try:
+                            async for event in stream:
+                                yield event
+                        finally:
+                            await stream.aclose()
+                        return
+                for attempt in range(2):
+                    buffered: list[ExecEvent] = []
+                    paused = False
+                    stream = stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+                    try:
+                        async for event in stream:
+                            if (isinstance(event, ExecOutput) and event.stream == "stderr"
+                                    and event.text.startswith("Error response from daemon:")
+                                    and "container" in event.text.lower()
+                                    and "is paused" in event.text.lower()):
+                                paused = True
+                                buffered.append(event)
+                            elif paused:
+                                buffered.append(event)
+                            else:
+                                yield event
+                    finally:
+                        await stream.aclose()
+                    if paused and attempt == 0:
+                        await self._unpause(sandbox_id)
+                        continue
+                    for event in buffered:
+                        yield event
+                    break
+
+        return run()
 
     async def upload(self, sandbox_id: str, target_dir: str, archive: AsyncIterator[bytes]) -> None:
         # docker cp extracts as root; fix ownership using the configured container user.

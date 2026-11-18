@@ -55,10 +55,11 @@ def volume_name(task_dir: Path) -> str:
     return name
 
 
-def helper_argv(volume: str, image: str, argv: list[str]) -> list[str]:
+def helper_argv(volume: str, image: str, argv: list[str],
+                docker_bin: str = "docker") -> list[str]:
     if not VOLUME.fullmatch(volume):
         raise WorkspaceError("Invalid overlay volume")
-    return ["docker", "run", "--rm", "--network=none", "--read-only", "--tmpfs", "/tmp",
+    return [docker_bin, "run", "--rm", "--network=none", "--read-only", "--tmpfs", "/tmp",
             "--cap-drop=ALL", "--security-opt=no-new-privileges", "--memory=256m", "--cpus=1",
             "--user", f"{os.getuid()}:{os.getgid()}", "--volume", f"{volume}:/w",
             "--workdir", "/w", "--entrypoint", argv[0], image, *argv[1:]]
@@ -66,9 +67,11 @@ def helper_argv(volume: str, image: str, argv: list[str]) -> list[str]:
 
 class OverlayWorkspace(GitWorkspace):
     def __init__(self, task_dir: Path, branch: str, cache: RepoCache | None = None,
-                 layers: LayerStore | None = None, *, image: str = "sca-sandbox:latest"):
+                 layers: LayerStore | None = None, *, image: str = "sca-sandbox:latest",
+                 docker_bin: str = "docker"):
         super().__init__(task_dir, branch, cache=cache, layers=layers)
         self.image = image
+        self.docker_bin = docker_bin
         self.overlay = self.task_dir / "overlay"
         self.upper = self.overlay / "upper"
         self.volume = volume_name(self.task_dir)
@@ -76,13 +79,13 @@ class OverlayWorkspace(GitWorkspace):
 
     async def helper(self, argv: list[str]) -> str:
         name = f"sca-task-{self.task_dir.name}-helper-{uuid4().hex}"
-        args = helper_argv(self.volume, self.image, argv)
+        args = helper_argv(self.volume, self.image, argv, self.docker_bin)
         args[2:2] = ["--name", name, "--label", f"sca.task_id={self.task_dir.name}"]
         try:
             return await command(*args)
         finally:
             with suppress(WorkspaceError):
-                await command("docker", "rm", "-f", name)
+                await command(self.docker_bin, "rm", "-f", name)
 
     async def prepare(self, repo_url: str, base_ref: str, *, mirror_only: bool = False,
                       credential: RepoCredential | None = None,
@@ -101,12 +104,22 @@ class OverlayWorkspace(GitWorkspace):
             "repo_key": str(self.mirror), "tenant_id": "default"}
         metadata.write_text(json.dumps(source))
         self.overlay.mkdir(parents=True, exist_ok=True)
-        key = await self.layers.copy(self.mirror, commit, source["repo_key"], self.overlay,
-                                     source["tenant_id"], overlay=True)
+        if source.get("snapshot_key"):
+            from sca.workspace.snapshots import SnapshotStore
+
+            snapshots = SnapshotStore(self.task_dir.parent.parent / "snapshots")
+            snapshot = await snapshots.fork(source["snapshot_key"], self.overlay, overlay=True)
+            if snapshot is None:
+                raise WorkspaceError("Prepared snapshot missing; shared snapshot storage required")
+            lower = snapshots.root / snapshot["id"]
+        else:
+            key = await self.layers.copy(self.mirror, commit, source["repo_key"], self.overlay,
+                                         source["tenant_id"], overlay=True)
+            lower = self.layers.root / key
         for name in ("upper", "work"):
             (self.overlay / name).mkdir(exist_ok=True)
         (self.task_dir / "workspace.overlay").write_text(json.dumps({
-            "volume": self.volume, "lower": str(self.layers.root / key)}))
+            "volume": self.volume, "lower": str(lower)}))
         await self.ensure_volume()
         await self.helper(["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
                            "checkout", "-B", self.branch, commit])
@@ -121,12 +134,13 @@ class OverlayWorkspace(GitWorkspace):
     async def ensure_volume(self) -> None:
         metadata = json.loads((self.task_dir / "workspace.overlay").read_text())
         lower = Path(metadata["lower"])
-        if lower.parent != self.layers.root or not re.fullmatch(r"[0-9a-f]{64}", lower.name):
+        allowed = {self.layers.root, self.task_dir.parent.parent / "snapshots"}
+        if lower.parent not in allowed or not re.fullmatch(r"[0-9a-f]{64}", lower.name):
             raise WorkspaceError("Invalid overlay lower layer")
         paths = [lower, self.upper, self.overlay / "work"]
         if any(any(c in str(p) for c in ",:\n") or p.is_symlink() for p in paths):
             raise WorkspaceError("Invalid overlay directories")
-        await command("docker", "volume", "create", "--driver", "local",
+        await command(self.docker_bin, "volume", "create", "--driver", "local",
                       "--label", "sca.workspace=overlay", "--label", f"sca.task_id={self.task_dir.name}",
                       "--opt", "type=overlay", "--opt", "device=overlay", "--opt",
                       f"o=lowerdir={lower},upperdir={self.upper},workdir={self.overlay / 'work'},"
@@ -147,15 +161,15 @@ class OverlayWorkspace(GitWorkspace):
             return await self.fetch_bundle(bundle)
 
     async def remove_volume(self) -> None:
-        names = await command("docker", "volume", "ls", "--format", "{{.Name}}")
+        names = await command(self.docker_bin, "volume", "ls", "--format", "{{.Name}}")
         if self.volume in names.splitlines():
-            await command("docker", "volume", "rm", self.volume)
+            await command(self.docker_bin, "volume", "rm", self.volume)
 
     async def clear_upper(self) -> None:
         if not self.overlay.exists():
             return
         # Docker owns work/work (mode 000); only this cleanup helper runs as root.
-        await command("docker", "run", "--rm", "--network=none", "--read-only",
+        await command(self.docker_bin, "run", "--rm", "--network=none", "--read-only",
                       "--cap-drop=ALL", "--cap-add=DAC_OVERRIDE", "--cap-add=FOWNER",
                       "--security-opt=no-new-privileges", "--memory=128m", "--cpus=1",
                       "--user=0", "--volume", f"{self.overlay}:/cleanup",
@@ -170,6 +184,8 @@ class OverlayWorkspace(GitWorkspace):
             shutil.rmtree(self.workspace)
         for name in ("workspace.overlay", "overlay.layer", "workspace.ready"):
             (self.task_dir / name).unlink(missing_ok=True)
+        if not (self.task_dir / "state.manifest.json").exists():
+            (self.task_dir / "overlay.snapshot").unlink(missing_ok=True)
 
     def snapshot(self) -> bytes:
         whiteouts: list[str] = []

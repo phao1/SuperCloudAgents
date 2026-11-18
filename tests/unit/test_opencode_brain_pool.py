@@ -178,3 +178,22 @@ async def test_backend_timeout_cleans_turn_marker(pool, tmp_path):
     assert len(markers[0][1]) == 32
     await asyncio.sleep(.02)
     assert (await pool.ping(pool.servers["2.3.0-sca.1"]))["cancelled"] == 1
+
+
+async def test_suspend_cancel_waits_for_quiescence(pool):
+    script = Path(pool.command[1])
+    script.write_text(FAKE.replace(
+        '    if r["id"] in tasks: tasks[r["id"]].cancel()',
+        '    if r["id"] in tasks: tasks[r["id"]].cancel()\n'
+        '    await asyncio.sleep(0.04)\n'
+        '    writer.write((json.dumps({"id":r["id"],"done":True,"exit_code":1})+"\\n").encode())\n'
+        '    await writer.drain()'))
+    await collect(pool)
+    server = pool.servers["2.3.0-sca.1"]
+    pid = (await pool.ping(server))["pid"]
+    stream = pool.stream("2.3.0-sca.1", Path("."), {"prompt": "sleep", "suspend_idle": True})
+    await anext(stream)
+    started = asyncio.get_running_loop().time()
+    await stream.aclose()
+    assert asyncio.get_running_loop().time() - started >= 0.03
+    assert (await pool.ping(server))["pid"] == pid

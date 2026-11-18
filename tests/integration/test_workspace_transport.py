@@ -85,14 +85,16 @@ async def test_sync_commit_bundle_and_home(tmp_path):
 
 
 def test_sync_k8s_volumes_have_no_hostpaths():
+    from sca.sandbox.egress import CA_TARGET
+
     pod = pod_manifest("sync", SandboxSpec(image="test", labels={"sca.state_transport": "sync"}))[
         "spec"
     ]
-    assert all("emptyDir" in volume for volume in pod["volumes"])
-    assert {mount["mountPath"] for mount in pod["containers"][0]["volumeMounts"]} == {
-        "/workspace",
-        "/agent_home",
-    }
+    assert not any("hostPath" in volume for volume in pod["volumes"])
+    # Besides the two emptyDirs, restricted pods only get the public egress CA bundle.
+    assert {v["name"] for v in pod["volumes"] if "emptyDir" not in v} <= {"egress-ca"}
+    assert {mount["mountPath"] for mount in pod["containers"][0]["volumeMounts"]} - {
+        CA_TARGET} == {"/workspace", "/agent_home"}
     assert pod["initContainers"][0]["command"][0] == "chown"
 
 

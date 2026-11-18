@@ -135,3 +135,17 @@ make portal-down
 | 许可 | MIT | MIT |
 
 结论：OpenCode 能编译，所以按目标原话不需要退到 pi。更重要的是，OpenCode 的 `WorkspaceDriver` 让“脑在沙箱外、手在沙箱内”不改源码就能实现，pi 目前做不到这一点。pi 更轻、`--mode rpc` 也很适合做常驻进程，值得作为第二个被测 Agent 接进来（按 `opencode.py` 的写法写一个 `pi` 后端，整体放在沙箱里跑），用同一套评测集对比两者，这件事放在后续。
+
+### pi 后端
+
+新增整体运行于沙箱的 `pi` 后端，固定 npm 包 `@earendil-works/pi-coding-agent@1.5.2`（Node ≥22.19）。Portal 选择 pi 时使用镜像内版本和默认模型（演示为 `deepseek-flash`），可用同一套件对比 OpenCode。`SCA_PI_SANDBOX_IMAGE` 默认 `sca-sandbox-pi:latest`，`SCA_PI_VERSION` 默认 `1.5.2`；更改版本需同步镜像构建参数 `PI_VERSION`。会话与不含密钥的 `models.json` 保存在 `/agent_home/pi/`，临时密钥仅通过进程环境传入。内核在任务没有指定镜像时使用后端声明的镜像，所以 pi 任务会自动跑在 pi 镜像里。
+
+2026-11-18 用真实模型（deepseek-flash）跑同一套 opencode-demo：
+
+| 后端 | 结果 | 单例耗时 | 单例费用 |
+| --- | --- | --- | --- |
+| OpenCode 2.3.0-sca.1（含预埋缺陷） | 5/6，chinese-greeting 过程检查不通过 | 22–57 秒 | 0.0013–0.0079 美元 |
+| OpenCode 2.3.0-sca.6（修复版） | 6/6 | 19–39 秒 | 0.0010–0.0040 美元 |
+| pi 1.5.2 | 6/6 | 17–39 秒 | 0.0007–0.0047 美元 |
+
+pi 的 chinese-greeting 能通过，是因为预埋缺陷只在 OpenCode 里。pi 跑 bug-clamp 时总时长 752 秒，其中 728 秒是排队，不是 pi 本身慢（原因见 `docs/design-phase4.md` 的负责人验证一节）。在 Portal 的“版本对比”里选两次运行即可对比。

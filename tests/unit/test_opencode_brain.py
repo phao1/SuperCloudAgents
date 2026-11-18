@@ -110,7 +110,8 @@ def test_host_gateway_and_cleanup(tmp_path):
     command = OpenCodeBrainBackend.cleanup_command(agent, "container", "unique-marker")
     assert command[:3] == ["docker", "exec", "container"]
     assert command[-1] == "unique-marker"
-    assert "SCA_BRAIN_TURN=$1" in command[-3]
+    assert "os.killpg" in command[-2]
+    compile(command[-2], "brain-cleanup", "exec")
     agent.docker_prefix = ["sg", "docker", "-c"]
     assert OpenCodeBrainBackend.cleanup_command(agent, "c", "m")[:3] == agent.docker_prefix
 
@@ -175,3 +176,111 @@ def test_materialize_version_and_prune(tmp_path):
     from sca.core.errors import AgentTurnError
     with pytest.raises(AgentTurnError, match="marker"):
         agent.materialize(version)
+
+
+@pytest.mark.parametrize("pooled", [False, True])
+async def test_cancel_runs_remote_cleanup(tmp_path, pooled):
+    import asyncio
+    import sys
+    from unittest.mock import AsyncMock
+
+    agent = backend(tmp_path)
+    agent.settings = agent.settings.model_copy(update={"opencode_brain_pool": pooled})
+    ready = asyncio.Event()
+    closed = asyncio.Event()
+    markers = []
+
+    async def pool_stream(version, source, request):
+        markers.append(request['turn_marker'])
+        try:
+            ready.set()
+            await asyncio.Future()
+            yield {}
+        finally:
+            closed.set()
+
+    agent.pool.stream = pool_stream
+    agent.command = lambda: [sys.executable, "-c", "import time; time.sleep(300)"]
+    original = asyncio.create_subprocess_exec
+    cleanup = AsyncMock()
+
+    async def spawn(*args, **kwargs):
+        if args[0] == '/bin/true':
+            await cleanup(*args)
+        proc = await original(*args, **kwargs)
+        if args[0] != '/bin/true':
+            ready.set()
+        return proc
+
+    from unittest.mock import patch
+
+    ctx = AgentContext(task_id='cancel', agent_home_host=str(tmp_path), model_api_key='fake')
+
+    async def consume():
+        async for _ in agent.run_turn(None, 'container', ctx, 'wait',
+                                      session_id=None, timeout_s=30):
+            pass
+
+    with patch('asyncio.create_subprocess_exec', spawn):
+        task = asyncio.create_task(consume())
+        await asyncio.wait_for(ready.wait(), 5)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    cleanup.assert_awaited_once()
+    if pooled:
+        assert closed.is_set()
+        assert len(markers) == 1 and len(markers[0]) == 32
+
+
+async def test_cleanup_kills_group_without_environment_marker(tmp_path):
+    import asyncio
+    import sys
+    import uuid
+
+    agent = backend(tmp_path)
+    marker = uuid.uuid4().hex
+    marker_file = Path('/tmp') / f'sca-brain-{marker}-test'
+    cancelled = Path('/tmp') / f'sca-brain-{marker}.cancelled'
+    child = await asyncio.create_subprocess_exec(
+        sys.executable, '-c', 'import time; time.sleep(300)',
+        env={}, start_new_session=True)
+    marker_file.write_text(str(child.pid))
+    try:
+        command = OpenCodeBrainBackend.cleanup_command(agent, 'unused', marker)
+        proc = await asyncio.create_subprocess_exec(sys.executable, '-c', command[-2], marker)
+        assert await asyncio.wait_for(proc.wait(), 5) == 0
+        assert await asyncio.wait_for(child.wait(), 5) == -9
+        assert not marker_file.exists()
+        assert cancelled.exists()
+    finally:
+        if child.returncode is None:
+            child.kill()
+            await child.wait()
+        marker_file.unlink(missing_ok=True)
+        cancelled.unlink(missing_ok=True)
+
+
+async def test_suspend_control_mapping_and_cleanup_resume(tmp_path):
+    import sys
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    agent = backend(tmp_path)
+    records = [
+        {"sca_suspend_transition": True, "paused": True, "at": 100.0},
+        {"sca_suspend_transition": True, "paused": False, "at": 103.0},
+        {"sca_suspend": True, "suspended_s": 3.0},
+        {"type": "step_finish", "part": {"reason": "stop", "tokens": {}}},
+    ]
+    script = "import sys; sys.stdin.read()\n" + "\n".join(
+        f"print({json.dumps(json.dumps(record))})" for record in records)
+    agent.command = lambda: [sys.executable, "-c", script]
+    sandbox = SimpleNamespace(unpause=AsyncMock())
+    ctx = AgentContext(task_id="task", agent_home_host=str(tmp_path), model_api_key="fake")
+    events = [event async for event in agent.run_turn(
+        sandbox, "one", ctx, "hello", session_id=None, timeout_s=5)]
+    assert events[0].data == {"summary": "sandbox_transition", "paused": True, "at": 100.0}
+    assert events[1].data["paused"] is False
+    assert events[2].data["sandbox_suspended_s"] == 3
+    sandbox.unpause.assert_awaited_once_with("one")

@@ -3,6 +3,7 @@ from uuid import UUID, uuid4
 
 import httpx
 import pytest
+from sqlalchemy import text
 
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
@@ -16,13 +17,20 @@ pytestmark = pytest.mark.integration
 class FakeTemporal:
     def __init__(self):
         self.starts = []
+        self.down = False
 
     async def start_workflow(self, workflow, payload, **kwargs):
+        if self.down:
+            raise OSError("temporal unreachable")
         self.starts.append((workflow, payload, kwargs))
 
 
 @pytest.fixture
 async def eval_api(store, api_store, tmp_path):
+    # Production needs the same narrow grant in a lead-owned migration.
+    async with store.sessionmaker.begin() as session:
+        await session.execute(text("GRANT INSERT ON eval_runs TO sca_api"))
+        await session.execute(text("GRANT UPDATE (status, finished_at) ON eval_runs TO sca_api"))
     temporal = FakeTemporal()
     app = create_app(store=api_store, orchestrator=SimpleNamespace(client=temporal),
                      object_store=LocalObjectStore(tmp_path),
@@ -41,6 +49,10 @@ async def test_suites_and_start(eval_api):
             "agent_version": "2.3.0"}, "budget": 1, "case_budget": .05}
     r = await client.post('/v1/evals/runs', json=body)
     assert r.status_code == 201, r.text
+    detail = await client.get('/v1/evals/runs/' + r.json()['id'])
+    assert detail.status_code == 200, detail.text
+    assert detail.json()['status'] == 'queued'
+    assert detail.json()['results'] == []
     _, payload, kwargs = temporal.starts[0]
     assert kwargs['id'] == 'eval-' + r.json()['id']
     assert payload['suite'] == str(suite_path('coding-basic'))
@@ -102,3 +114,13 @@ def test_suite_path_rejects_symlinks(tmp_path, monkeypatch):
     with pytest.raises(HTTPException) as exc:
         suite_path('escape')
     assert exc.value.status_code == 404
+
+
+async def test_failed_workflow_start_fails_the_run(eval_api):
+    client, temporal = eval_api
+    temporal.down = True
+    body = {"suite": "coding-basic", "variant": {"agent_backend": "opencode"}, "budget": 1,
+            "case_budget": .05}
+    assert (await client.post('/v1/evals/runs', json=body)).status_code == 503
+    runs = (await client.get('/v1/evals/runs')).json()
+    assert runs and runs[0]['status'] == 'failed'

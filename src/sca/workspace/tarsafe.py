@@ -8,10 +8,14 @@ from pathlib import Path, PurePosixPath
 from typing import BinaryIO
 
 
-def extract(archive: BinaryIO, target: Path) -> None:
+def extract(archive: BinaryIO, target: Path, max_bytes: int | None = None) -> None:
     target.mkdir(parents=True, exist_ok=True)
+    size = 0
     with tarfile.open(fileobj=archive, mode="r|*") as tar:
         for member in tar:
+            size += member.size
+            if max_bytes is not None and size > max_bytes:
+                raise ValueError("Archive exceeds expanded size limit")
             # data_filter normalizes absolute paths; this contract rejects them outright.
             if PurePosixPath(member.name).is_absolute():
                 raise tarfile.AbsolutePathError(member)

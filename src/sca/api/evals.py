@@ -102,13 +102,18 @@ async def start_run(body: RunRequest, request: Request,
     require_eval(user)
     path = suite_path(body.suite)
     try:
-        await asyncio.to_thread(load_suite, path)
+        suite = await asyncio.to_thread(load_suite, path)
     except (ValueError, OSError):
         raise HTTPException(422, "Invalid suite") from None
     settings = get_settings()
     run_id = str(uuid4())
     payload = {**body.model_dump(), "id": run_id, "suite": str(path.resolve()),
                "variant": body.variant.model_dump(exclude_none=True)}
+    await request.app.state.store.for_tenant("eval").create_eval_run({
+        "id": UUID(run_id), "tenant_id": "eval", "suite": suite["name"],
+        "suite_hash": suite["hash"], "variant": payload,
+        "created_by": user.subject, "status": "queued",
+    })
     try:
         async with asyncio.timeout(10):
             client = getattr(request.app.state.orchestrator, "client", None)
@@ -118,6 +123,8 @@ async def start_run(body: RunRequest, request: Request,
             await client.start_workflow(EvalRunWorkflow.run, payload, id=f"eval-{run_id}",
                                         task_queue=settings.task_queue)
     except (TimeoutError, RuntimeError, RPCError, OSError):
+        # The row exists already; without a workflow it would stay queued forever.
+        await request.app.state.store.for_tenant("eval").finish_eval_run(run_id, "failed")
         raise HTTPException(503, "Evaluation service unavailable") from None
     return {"id": run_id}
 

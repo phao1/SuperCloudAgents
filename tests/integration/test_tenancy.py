@@ -79,7 +79,10 @@ async def test_raw_rls(store, api_store):
         await store.for_tenant("b").get_artifact(a.id, "patch")
 
 
-async def test_quota_concurrency(store, api_store):
+async def test_quota_concurrency(store, api_store, monkeypatch):
+    from sca.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "tenant_max_queued", 2)
     await store.set_tenant_quota("a", 2)
     scoped = api_store.for_tenant("a")
     results = await asyncio.gather(
@@ -97,7 +100,10 @@ async def test_quota_concurrency(store, api_store):
     assert len(await scoped.list_tasks("a")) == 3
 
 
-async def test_api_quota(api, store):  # noqa: F811
+async def test_api_quota(api, store, monkeypatch):  # noqa: F811
+    from sca.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "tenant_max_queued", 1)
     from test_api import submit
 
     client, _, _ = api
@@ -154,7 +160,10 @@ async def test_api_oidc(api_store, store, monkeypatch, roles, status):
             assert response.json()["tenant_id"] == "a"
 
 
-async def test_concurrent_api_submits(api, store):  # noqa: F811
+async def test_concurrent_api_submits(api, store, monkeypatch):  # noqa: F811
+    from sca.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "tenant_max_queued", 2)
     from test_api import submit
 
     client, _, _ = api

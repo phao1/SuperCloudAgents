@@ -174,3 +174,16 @@ class ModelGateway(Protocol):
 
 class SecretProvider(Protocol):
     async def repo_credential(self, tenant_id: str, repo_url: str) -> RepoCredential | None: ...
+
+
+async def pause_sandbox(provider: SandboxProvider, sandbox_id: str) -> None:
+    """Optional freezer capability; providers without it keep running."""
+    method = getattr(provider, "pause", None)
+    if method is not None:
+        await method(sandbox_id)
+
+
+async def unpause_sandbox(provider: SandboxProvider, sandbox_id: str) -> None:
+    method = getattr(provider, "unpause", None)
+    if method is not None:
+        await method(sandbox_id)

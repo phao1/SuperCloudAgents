@@ -43,6 +43,7 @@ class EvalActivities:
             "id": UUID(request["id"]), "tenant_id": "eval", "suite": suite["name"],
             "suite_hash": suite["hash"], "variant": request, "created_by": "cli", "status": "running",
         })
+        await self.store.start_eval_run(request["id"])
         return {"cases": [{**case, "kind": suite.get("kind", "coding"),
                            "suite_hash": suite["hash"],
                            "spec": {**suite.get("defaults", {}), **case["spec"]}}
@@ -64,9 +65,11 @@ class EvalActivities:
             raise ValueError("suite changed after evaluation started")
         spec = {**case["spec"], **request["variant"], "auto_finish": True,
                 "eval_run_id": request["id"], "max_cost_usd": request["case_budget"]}
+        if case["kind"] == "coding" and request.get("repeat", 1) > 1:
+            spec["labels"] = {**spec.get("labels", {}), "fork_from_snapshot": "true"}
         source = Path(case["path"])
         # Stable retry paths and API keys make an interrupted submit safe to repeat.
-        root = self.settings.data_dir.resolve() / "eval" / request["id"] / case["id"] / str(request["iteration"])
+        root = self.settings.data_dir.resolve() / "eval" / request["id"] / case["id"]
         root.mkdir(parents=True, exist_ok=True)
         async with self.http() as http:
             async def upload(path: Path) -> str:
@@ -86,21 +89,25 @@ class EvalActivities:
             if case["kind"] == "coding":
                 repo = root / "repo.git"
                 seed = root / "seed"
-                if not (root / "ready").exists():
-                    if repo.exists():
-                        shutil.rmtree(repo)
-                    if (source / "repo.bundle").exists():
-                        await self.git(root, "clone", "--bare", str(source / "repo.bundle"), str(repo))
-                    else:
-                        if seed.exists():
-                            shutil.rmtree(seed)
-                        shutil.copytree(source / "repo", seed)
-                        await self.git(seed, "init", "-b", "main")
-                        await self.git(seed, "add", ".")
-                        await self.git(seed, "-c", "user.name=Eval", "-c", "user.email=eval@invalid",
-                                       "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
-                        await self.git(root, "clone", "--bare", str(seed), str(repo))
-                    (root / "ready").touch()
+                from sca.workspace.cache import RepoCache
+
+                locks = RepoCache(root / "locks")
+                async with locks._lock(root / "locks" / "fixture"):
+                    if not (root / "ready").exists():
+                        if repo.exists():
+                            shutil.rmtree(repo)
+                        if (source / "repo.bundle").exists():
+                            await self.git(root, "clone", "--bare", str(source / "repo.bundle"), str(repo))
+                        else:
+                            if seed.exists():
+                                shutil.rmtree(seed)
+                            shutil.copytree(source / "repo", seed)
+                            await self.git(seed, "init", "-b", "main")
+                            await self.git(seed, "add", ".")
+                            await self.git(seed, "-c", "user.name=Eval", "-c", "user.email=eval@invalid",
+                                           "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
+                            await self.git(root, "clone", "--bare", str(seed), str(repo))
+                        (root / "ready").touch()
                 spec["repo_url"] = str(repo)
             else:
                 inputs = sorted((source / "data").iterdir())
@@ -110,7 +117,7 @@ class EvalActivities:
             spec["acceptance_files"] = await upload(source / "acceptance")
             spec["acceptance_command"] = case["acceptance_command"]
             response = await http.post("/v1/tasks", json={
-                "kind": case["kind"], "spec": spec,
+                "kind": case["kind"], "spec": spec, "priority": "eval",
             }, headers={"Idempotency-Key": f"eval:{request['id']}:{case['id']}:{request['iteration']}"})
             response.raise_for_status()
             task = response.json()

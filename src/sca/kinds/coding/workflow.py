@@ -56,6 +56,7 @@ class CodingTaskWorkflow(TaskWorkflow):
 class CodingBeforeTurn(TaskWorkflow):
     @workflow.run
     async def run(self, task_id: str, spec: dict) -> dict:
+        self._admission = spec.get("_admission", False)
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
         subtasks = spec.get("subtasks", [])
         if spec.get("plan") == "auto":
@@ -83,12 +84,15 @@ class CodingBeforeTurn(TaskWorkflow):
                 if spec.get("plan_review"):
                     # The existing state graph enters review through VERIFYING.
                     await self._set_state(task_id, "VERIFYING")
+                    if self._admission:
+                        await workflow.execute_activity("release_slot", task_id, **_QUICK)
                     await self._set_state(task_id, "AWAITING_REVIEW")
                     await workflow.wait_condition(lambda: bool(self._reviews))
                     decision, feedback = self._reviews.pop(0)
                     if decision == "reject":
                         await self._set_state(task_id, "CANCELLED", feedback)
                         return {"cancelled": True}
+                    await self._acquire_slot(task_id)
                     if decision == "request_changes":
                         await self._set_state(task_id, "RUNNING")
                         continue

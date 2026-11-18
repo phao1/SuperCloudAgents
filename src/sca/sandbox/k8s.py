@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 import os
@@ -16,12 +17,13 @@ from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, SandboxSpec
 from sca.sandbox._exec import stream_exec
 from sca.sandbox._transfer import transfer
-from sca.sandbox.egress import SQUID_IMAGE, render_squid_conf
+from sca.sandbox.egress import CA_ENV, CA_TARGET, SQUID_IMAGE, prepare_ca, render_squid_conf
 
 UID, GID = os.getuid(), os.getgid()
 
 NETWORK = "sca.network"
 PROXY = {"sca.role": "egress"}
+CA_LABEL = "sca.ca-fingerprint"
 
 
 def pool_hash(spec: SandboxSpec) -> str:
@@ -82,6 +84,7 @@ def pod_manifest(
     run_as_gid: int = GID,
     proxy_url: str | None = None,
     node_selector: dict[str, str] | None = None,
+    ca_fingerprint: str = "",
 ) -> dict:
     env = dict(spec.env)
     if spec.network == "restricted" and proxy_url:
@@ -90,6 +93,27 @@ def pod_manifest(
         for key in ("NO_PROXY", "no_proxy"):
             env.setdefault(key, "localhost,127.0.0.1")
     volumes, mounts = [], []
+    if spec.network == "restricted":
+        env.update(dict.fromkeys(CA_ENV, CA_TARGET))
+        volumes.append(
+            {
+                "name": "egress-ca",
+                "configMap": {
+                    "name": f"sca-egress-bundle-{ca_fingerprint}"
+                    if ca_fingerprint
+                    else "sca-egress-bundle",
+                    "items": [{"key": "ca-bundle.crt", "path": "ca-bundle.crt"}],
+                },
+            }
+        )
+        mounts.append(
+            {
+                "name": "egress-ca",
+                "mountPath": CA_TARGET,
+                "subPath": "ca-bundle.crt",
+                "readOnly": True,
+            }
+        )
     for index, mount in enumerate(spec.mounts):
         source = Path(mount.source).resolve()
         if (
@@ -171,7 +195,12 @@ def pod_manifest(
         "metadata": {
             "name": safe_name(name),
             "namespace": namespace,
-            "labels": {**_labels(spec.labels), NETWORK: spec.network, "sca.role": "sandbox"},
+            "labels": {
+                **_labels(spec.labels),
+                NETWORK: spec.network,
+                "sca.role": "sandbox",
+                **({CA_LABEL: ca_fingerprint} if ca_fingerprint else {}),
+            },
         },
         "spec": pod,
     }
@@ -252,6 +281,7 @@ def egress_manifests(
     image: str = SQUID_IMAGE,
     network_policy_flavor: Literal["standard", "calico"] = "standard",
     blocked_cidrs: list[str] | None = None,
+    ca_fingerprint: str = "",
 ) -> list[dict]:
     conf = render_squid_conf(allowlist)
     metadata = {"name": "sca-egress", "namespace": namespace}
@@ -284,7 +314,10 @@ def egress_manifests(
                 "selector": {"matchLabels": PROXY},
                 "template": {
                     "metadata": {
-                        "labels": PROXY,
+                        "labels": {
+                            **PROXY,
+                            **({CA_LABEL: ca_fingerprint} if ca_fingerprint else {}),
+                        },
                         "annotations": {
                             "sca.config-hash": hashlib.sha256(conf.encode()).hexdigest()
                         },
@@ -292,18 +325,33 @@ def egress_manifests(
                     "spec": {
                         "automountServiceAccountToken": False,
                         "enableServiceLinks": False,
-                        "securityContext": {"runAsUser": 13, "runAsGroup": 13},
+                        "securityContext": {"runAsUser": 13, "runAsGroup": 13, "fsGroup": 13},
+                        "volumes": [
+                            {
+                                "name": "egress-ca",
+                                "secret": {
+                                    "secretName": f"sca-egress-ca-{ca_fingerprint}"
+                                    if ca_fingerprint
+                                    else "sca-egress-ca",
+                                    "defaultMode": 0o440,
+                                },
+                            }
+                        ],
                         "containers": [
                             {
                                 "name": "squid",
+                                "volumeMounts": [
+                                    {"name": "egress-ca", "mountPath": "/ca", "readOnly": True}
+                                ],
                                 "image": image,
                                 "imagePullPolicy": "IfNotPresent",
                                 "command": [
                                     "sh",
                                     "-c",
                                     (
-                                        "echo 'TLS CA distribution required for K8s egress' >&2; "
-                                        "exit 1"
+                                        "set -eu; umask 077; printf '%s' \"$SQUID_CONF\" > /tmp/squid.conf; "
+                                        "/usr/lib/squid/security_file_certgen -c -s /tmp/ssl_db -M 4MB; "
+                                        "exec squid -N -f /tmp/squid.conf"
                                     ),
                                 ],
                                 "env": [
@@ -422,6 +470,7 @@ class K8sSandboxProvider:
         network_policy_flavor: Literal["standard", "calico"] = "standard",
         blocked_cidrs: list[str] | None = None,
         pool_size: int = 0,
+        egress_ca_dir: Path | None = None,
     ):
         self.kubectl_bin, self.context, self.namespace = kubectl_bin, context, namespace
         self.egress_allowlist, self.egress_image = egress_allowlist or [], egress_image
@@ -431,6 +480,15 @@ class K8sSandboxProvider:
         self.blocked_cidrs = [str(ip_network(c)) for c in blocked_cidrs or []]
         self._egress_lock = asyncio.Lock()
         self.pool_size = pool_size
+        from sca.config import get_settings
+
+        settings = get_settings()
+        self.egress_ca_dir = (
+            egress_ca_dir
+            or settings.egress_ca_dir
+            or settings.data_dir / "egress" / safe_name(namespace)
+        ).resolve()
+        self._ca_fingerprint = ""
 
     def _command(self, *args):
         return [
@@ -492,11 +550,56 @@ class K8sSandboxProvider:
     async def ensure_egress(self):
         async with self._egress_lock:
             await self._namespace()
+            await prepare_ca(self.egress_ca_dir)
+            cert = (self.egress_ca_dir / "ca.crt").read_text()
+            bundle = (self.egress_ca_dir / "ca-bundle.crt").read_text()
+            self._ca_fingerprint = hashlib.sha256((cert + bundle).encode()).hexdigest()[:32]
+            fingerprint = self._ca_fingerprint
+            # Create avoids kubectl's last-applied annotation retaining private material.
+            secret = {
+                "apiVersion": "v1",
+                "kind": "Secret",
+                "type": "Opaque",
+                "metadata": {
+                    "name": f"sca-egress-ca-{fingerprint}",
+                    "namespace": self.namespace,
+                    "labels": {CA_LABEL: fingerprint},
+                },
+                "data": {
+                    name: base64.b64encode((self.egress_ca_dir / name).read_bytes()).decode()
+                    for name in ("ca.crt", "ca.key")
+                },
+            }
+            code, _, _ = await self._cli(
+                "create", "-f", "-", check=False, data=json.dumps(secret).encode()
+            )
+            if code:
+                # Replace also repairs a pre-existing resource without logging key data.
+                code, _, _ = await self._cli(
+                    "replace", "-f", "-", check=False, data=json.dumps(secret).encode()
+                )
+                if code:
+                    raise SandboxError("Unable to publish egress CA Secret")
+            await self._apply(
+                [
+                    {
+                        "apiVersion": "v1",
+                        "kind": "ConfigMap",
+                        "metadata": {
+                            "name": f"sca-egress-bundle-{fingerprint}",
+                            "namespace": self.namespace,
+                            "labels": {CA_LABEL: fingerprint},
+                        },
+                        "data": {"ca-bundle.crt": bundle},
+                    }
+                ]
+            )
             await self._apply(
                 egress_manifests(
                     self.egress_allowlist,
                     namespace=self.namespace,
                     image=self.egress_image,
+                    ca_fingerprint=self._ca_fingerprint,
                     **await self._isolation_settings(),
                 )
             )
@@ -513,7 +616,10 @@ class K8sSandboxProvider:
         return json.loads(raw)["metadata"].get("labels", {}).get("sca.task_id")
 
     async def _claim(self, name: str, spec: SandboxSpec) -> str | None:
-        for pod in await self._pods(f"sca.pool={pool_hash(spec)},sca.state=idle"):
+        selector = f"sca.pool={pool_hash(spec)},sca.state=idle"
+        if spec.network == "restricted":
+            selector += f",{CA_LABEL}={self._ca_fingerprint}"
+        for pod in await self._pods(selector):
             if pod.get("status", {}).get("phase") != "Running" or pod["metadata"].get(
                 "deletionTimestamp"
             ):
@@ -550,6 +656,8 @@ class K8sSandboxProvider:
 
     async def replenish(self, spec_template: SandboxSpec, size: int) -> None:
         await self._namespace()
+        if spec_template.network == "restricted":
+            await self.ensure_egress()
         template_hash = pool_hash(spec_template)
         idle = await self._pods("sca.pool,sca.state=idle")
         current = []
@@ -557,6 +665,10 @@ class K8sSandboxProvider:
             metadata = pod["metadata"]
             if (
                 size <= 0
+                or (
+                    spec_template.network == "restricted"
+                    and metadata["labels"].get(CA_LABEL) != self._ca_fingerprint
+                )
                 or metadata["labels"]["sca.pool"] != template_hash
                 or pod.get("status", {}).get("phase") in {"Failed", "Succeeded"}
             ):
@@ -610,6 +722,8 @@ class K8sSandboxProvider:
                 return sid
             await self.destroy(sid)
             await self._cli("wait", "--for=delete", f"pod/{sid}", "--timeout=180s")
+        if spec.network == "restricted" and self.pool_size > 0:
+            await self.ensure_egress()
         if self.pool_size > 0 and spec.labels.get("sca.state") != "idle" and pool_compatible(spec):
             claimed = await self._claim(name, spec)
             if claimed:
@@ -637,6 +751,7 @@ class K8sSandboxProvider:
                     run_as_gid=self.run_as_gid,
                     proxy_url=proxy,
                     node_selector=self.node_selector,
+                    ca_fingerprint=self._ca_fingerprint if proxy else "",
                 )
             ]
         )

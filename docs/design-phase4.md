@@ -664,3 +664,629 @@ IP-literal SNI 和 ECH 应继续作为对抗回归；当前只有 IP-literal SNI
 - `SCA_TEST_EGRESS=1` 下 egress 单测和两个集成测试共 21 个，全部通过。线上 `sca-egress` 在 worker
   重启时按指纹自动换成新镜像。
 - 已知缺口：K8s 的 restricted 出口在补齐 CA 分发之前会主动拒绝启动（故意不回退到可被绕过的旧代理）。
+
+## P 小修复（2026-11-18）
+
+- 评测启动：`POST /v1/evals/runs` 在启动 Temporal 前提交 `queued` 行，成功响应仍为
+  `201 {"id": "..."}`；紧接着 `GET /v1/evals/runs/{id}` 可读。CLI `run` / `gate`
+  共用同一预建逻辑。`eval_prepare` 保留冲突忽略，只把 `queued` 更新成 `running`，重试不会
+  重建记录或把已结束的运行改回运行中。Temporal 启动失败仍返回 503；预建行可能保留为 queued。
+- 权限集成缺口：现有 0011 仅给 `sca_api` SELECT，负责人需要在自己的迁移中增加
+  `GRANT INSERT ON eval_runs TO sca_api`，保留现有租户 RLS；否则 API 预建会权限失败。
+  迁移不在 P 的可编辑清单内，因此未修改；API 测试只在各自临时数据库授予该窄权限。
+- Overlay 新增关键字参数 `docker_bin: str = "docker"`，Coding 和 Kernel 构造处传入
+  `Settings.docker_bin`（环境变量 `SCA_DOCKER_BIN`）。helper、volume、清理命令全部使用它。
+  参数是可执行文件路径，可指向执行 `sg docker` 的 wrapper；不是 shell 命令字符串。
+  `layers.py` 没有 Docker 调用，无需修改。
+- Brain 工具命令通过 Python wrapper 建立进程组，原子写入容器内
+  `/tmp/sca-brain-<turn_marker>-<pid>`；结束、超时或取消时按标记 SIGKILL 进程组并删除标记。
+  `/tmp/sca-brain-<turn_marker>.cancelled` 阻止迟到命令启动，随任务容器销毁。
+  清空环境的子进程仍在组内；本轮清理不影响其他轮。沙箱需有 `python3`。
+- 定向验证：Overlay、Brain、评测 API/存储与 CLI 共 **31 passed、1 skipped**；
+  Bun driver **4 passed**；`ruff check src tests` 通过。真实 Postgres 使用隔离临时库。
+  首次 pytest 因 `/tmp/pytest-of-ubuntu` 所有者不符出现 fixture 错误，后续通过
+  `PYTEST_ADDOPTS=--basetemp=/tmp/sca-p-*` 使用独立临时目录。
+- 未运行 Docker、OpenCode 构建或完整 e2e。新增 `tests/integration/test_brain_cancellation.py`：
+  `SCA_TEST_DOCKER_BRAIN=1` 启用；假 Brain 调用真实 TS driver，在真实无网络容器启动
+  `sh -c 'env -i sleep 300 & wait'`，取消后要求 10 秒内没有该 sleep。
+  负责人运行：`timeout 120 env SCA_TEST_DOCKER_BRAIN=1 .venv/bin/pytest
+  tests/integration/test_brain_cancellation.py -q -p no:cacheprovider`。
+- 指定基线实跑：`timeout 900 env PYTEST_ADDOPTS=--basetemp=/tmp/sca-p-baseline-20261118
+  .venv/bin/pytest tests/unit tests/integration/test_store.py tests/integration/test_api.py
+  tests/integration/test_workflow.py -q -p no:cacheprovider`，**424 passed、1 skipped，188.75 秒**。
+  最后调整取消测试同步方式后，Brain 单测另跑 **12 passed**，Ruff 再跑通过。
+
+## P4.5b 网关限流与负载测试
+
+实现位于 `src/sca/gateway/limiter.py`，以单进程 ASGI/httpx 转发模型请求；
+`timeout 3600 .venv/bin/python -m sca.gateway.limiter` 启动 uvicorn，默认端口 4100。
+本次没有迁移，也没有修改 LiteLLM 签发、计费或吊销逻辑。
+
+### 接口与调度契约
+
+- 转发 `POST /v1/chat/completions`、`/v1/completions`、`/v1/embeddings`、
+  `/v1/responses`；URL 参数、JSON 原始字节、Bearer key 和 SSE 字节保留，移除逐跳头。
+  不转发 key 管理端点。请求 JSON 上限 2 MiB；`GET /metrics` 提供 Prometheus 指标。
+- 全上游聚合桶（保守地把 LiteLLM 后的提供商视为一个预算组）、模型桶、租户桶、
+  虚拟 key 桶均检查 RPM/TPM；请求桶容量为 1，按 RPM 平滑放行，token 桶容量为对应 TPM。
+  单请求估算超过 TPM 时也等待，达到超时后拒绝。模型覆盖值按 LiteLLM 的模型别名配置。
+- 每租户 FIFO，跨租户等额 round-robin；被自己的桶阻塞的租户不会阻塞其他租户。
+  权重仅用于负载脚本分配会话需求，不表示生产调度的租户优先级权重。
+  所有重试合计排队预算默认 120 秒，耗尽返回中文错误、HTTP 429 和 `Retry-After: 1`。
+- token 预留使用 `max_completion_tokens` / `max_tokens`（缺省 1024，乘以 `n`）加
+  请求字节数约四分之一；普通 JSON 或 SSE 中可解析的 `usage.total_tokens` 校正最终尝试。
+  没有 usage、压缩的响应及失败尝试保留保守估算；不改变 LiteLLM 的实际账单。
+- 上游 429/5xx 在尚未向客户端发送正文、且响应不是 SSE 时最多重试 3 次，
+  每次重新排队，指数退避带随机抖动。成功 SSE、错误状态的 SSE，以及结果不明确的
+  transport/read failure 均不重放，避免重复执行已接受的 completion。
+  原有 key/会话与上游路由头保留，不另行轮换模型凭证。
+- key 所属租户来自 LiteLLM `/key/info` 的可信 metadata.tenant_id；缺失时用 metadata.task_id
+  或 `task-<UUID>-turn<N>-attempt<N>[-<worker>]` alias，通过平台 Store 取得 task.tenant_id。
+  当前 alias 本身没有 tenant。缓存只保存 key 的 SHA-256、租户和过期时间，TTL 60 秒，
+  最多 10000 项；不相信客户端租户头。没有有效归属时拒绝转发。
+- 指标为 `sca_gateway_queue_depth`、`sca_gateway_queue_wait_seconds{tenant=...}` histogram、
+  `sca_gateway_upstream_429_total`、`sca_gateway_rejected_total`。
+  每个成功响应附 `x-sca-queue-wait-seconds`，为该请求所有尝试的排队时间总和。
+  服务仅支持一个进程/一个副本；多 worker/多副本没有共享桶，不能按此配置扩容。
+
+### 设置、反压文件与沙箱网络
+
+下列名称均带 `SCA_` 前缀：
+
+| 设置 | 默认值 / 语义 |
+| --- | --- |
+| `GATEWAY_LIMITER` | `false`，由负责人现场检查后启用 |
+| `GATEWAY_LIMITER_PORT` | `4100` |
+| `GATEWAY_LIMITER_CONTAINER` | `sca-gateway-limiter` |
+| `GATEWAY_LIMITER_URL` | `http://127.0.0.1:<limiter_port>`，宿主 brain 的地址；可覆盖 |
+| `GATEWAY_QUEUE_TIMEOUT_S` | `120` |
+| `GATEWAY_RPM` / `GATEWAY_TPM` | `600` / `1000000`，聚合上游预算 |
+| `GATEWAY_TENANT_RPM` / `GATEWAY_TENANT_TPM` | `600` / `1000000`，每租户预算 |
+| `GATEWAY_KEY_RPM` / `GATEWAY_KEY_TPM` | `60` / `100000`，每 key 预算 |
+| `GATEWAY_MODEL_LIMITS` | `{}`；JSON 如 `{"deepseek-flash":{"rpm":120,"tpm":100000}}`，未指定字段沿用聚合值 |
+| `GATEWAY_PRESSURE_FILE` | `data_dir/run/gateway-pressure.json` |
+| `GATEWAY_PRESSURE_DEPTH` / `GATEWAY_PRESSURE_WAIT_S` | `50` / `5` |
+| `GATEWAY_TEST_KEYS` | `{}`；仅隔离假模型使用的 JSON key→tenant 映射，生产必须为空 |
+
+反压文件在启动时和之后每两秒写入，同目录临时文件原子 replace，内容严格为
+`{"saturated":bool,"updated_at":"<UTC ISO 8601>"}`。队深达到阈值或最老等待达到阈值即饱和；
+队列清空后会恢复 false。R 的 admission 应检查时间戳新鲜度，不能把陈旧 false 当作健康。
+启动时路径不可写会拒绝启动；运行中写入失败记录无凭证错误，继续调度，文件随后可能陈旧。
+
+开关开启时，Settings 将现有 `model_gateway_container` / `model_gateway_port` 选择为 limiter，
+因此 worker 现有 `peers`、`ensure_egress` 与 `address_of` 链路会把 limiter 容器接到 restricted
+内部网，并把该网络的 IP（不是容器 DNS 名）交给 gVisor 沙箱。管理 URL 仍是
+`SCA_MODEL_GATEWAY_URL`，用于签发/吊销；limiter 也用自己的同名设置作为转发目标。
+宿主 brain 缺省切到 `GATEWAY_LIMITER_URL/v1`；显式 `OPENCODE_BRAIN_GATEWAY_URL` 优先，
+已有显式直连配置需负责人同步修改。无需修改 docker.py 或放开宿主/公网路由。
+
+新增镜像文件 `deploy/gateway-limiter/Dockerfile`，从仓库根作为 build context，入口同上，
+非 root UID/GID 65534；本次未构建。上线需由负责人预建并启动命名为
+`sca-gateway-limiter` 的容器，设置内存上限（建议 256 MiB）、单进程，发布宿主 loopback 的
+4100 端口供 brain 使用。容器先接可访问 LiteLLM/Postgres 的受信任服务网络，worker 再接内部网；
+容器的 `MODEL_GATEWAY_URL` 必须是它可访问的 LiteLLM 地址，不能照抄宿主 localhost。
+`DATABASE_URL` 同理，且该受信任服务需要读取任务租户的权限。密钥通过私有 env 文件注入，
+不放 argv、文档或测试输出。将宿主 `data_dir/run` 绑定到容器的压力目录并授予 UID 65534
+写权限，确保 R 读取同一个文件；禁止给沙箱挂该目录。只运行宿主 limiter 不能满足 restricted
+沙箱的 peer 契约，需要这个容器。启用前应先重建已有沙箱，移除此前直接连接 LiteLLM 的旧 peer。
+
+### 假模型与实测
+
+`scripts/fake_model.py` 提供 OpenAI chat-completions 普通/流式输出与 usage：
+`--port 4200 --latency .01 --rpm 1800 --reject-every 0`；RPM 使用滚动 60 秒窗口，
+超过上限返回 429，`--reject-every N` 可额外每 N 次确定性注入 429。
+
+`scripts/gateway_load.py` 在一个 asyncio 进程内运行临时端口 fake、limiter 和所有客户端，
+不调用 Docker、不加载真实模型。默认 `--sessions 300 --calls 2 --weights 1,2,3`，
+`--rpm 1500 --fake-rpm 1800 --reject-every 97 --latency .01`，交替普通 JSON/SSE。
+也支持 `--upstream <LiteLLM URL，不含 /v1> --keys-file <私有 JSON>` 和 `--model`；
+私有 JSON 将 `tenant-0`、`tenant-1`、`tenant-2` 映射到该租户的真实临时 key 数组，
+服务会实际执行 key/info 归属查询，需沿用安全配置中的 master key / Postgres。
+本次实测只走 limiter→fake，**没有经过 LiteLLM**。
+
+首次真实运行 `timeout 180 .venv/bin/python scripts/gateway_load.py --sessions 300`：
+300 个会话、600 次调用，26.959 秒，600 成功、失败原因 `{}`，上游 429 共 6 次且全部恢复。
+三租户会话数 50/100/150，整体完成量占比 16.67%/33.33%/50%；前 100 次持续竞争样本为
+33%/34%/33%，体现等额轮转，不能把最终需求占比误当作公平性。
+
+| 租户 | 排队 p50（秒） | 排队 p99（秒） |
+| --- | --- | --- |
+| tenant-0 | 6.2452 | 6.4475 |
+| tenant-1 | 9.8161 | 12.8393 |
+| tenant-2 | 11.7141 | 17.2983 |
+
+定向验证命令：
+`timeout 60 .venv/bin/pytest tests/unit/test_limiter.py tests/integration/test_limiter_http.py -q -p no:cacheprovider --basetemp=/tmp/sca-s-limiter-focused3`，
+**18 passed，5.30 秒**。覆盖桶补充/usage 校正、共享桶的 A/B/C/A 轮转、阻塞租户绕过、
+取消清队、超时 429、原子反压文件与恢复、缓存及 task alias 归属、管理端点拒绝、
+上游 429/5xx 重试次数、已接受 SSE/模糊传输故障不重放；真实 socket 测试在释放上游尾块前
+已收到首块，证明不是缓冲完整 SSE 才返回。Docker peer/管理 URL 分离使用 fake 验证。
+
+第一轮指定基线：**448 passed、1 skipped，190.90 秒**；
+`timeout 30 .venv/bin/ruff check src tests scripts/fake_model.py scripts/gateway_load.py` 已通过。
+该轮期间补了少量设置/测试，最终版本复跑结果追加如下。
+
+未验证：Docker 镜像及受限沙箱实连、LiteLLM 实际 key/info 与数据库归属联查、真实提供商限额、
+OpenCode 整体闭环、多进程/多机限流。没有运行 Bun 安装、OpenCode 构建/全量测试、SCA e2e。
+负责人需完成上述容器/共享压力目录部署，验证 peer IP、key 归属和旧沙箱撤销直连，再开启开关；
+跨副本限流需要另行使用共享状态。本次没有修改允许清单外代码，也没有 Git 写操作。
+
+
+## P4.5a 准入与公平调度
+
+### 契约与实现
+
+- `POST /v1/tasks` 新增顶层 `priority: interactive | eval | batch`，默认 `interactive`，保存于 `task.spec.priority`；评测提交固定使用 `eval`。非法优先级返回 422。任务创建不再检查活跃配额，始终创建为 `QUEUED`，仅租户排队积压达到 `SCA_TENANT_MAX_QUEUED`（默认 1000）时仍返回 429；幂等重试不消耗新配额。
+- `SCA_MAX_RUNNING_TASKS` 默认 4；`tenants.max_active_tasks` 限制持槽任务数，`tenants.weight` 为正整数、默认 1。迁移 `0014_admission`（revision `0014`，接 `0013`）为现有任务表增加 `slot_held`、`slot_requested_at`、`slot_generation`，沿用原表 RLS，不新增跨租户 API 权限。
+- `Store.acquire_slot(task_id, maximum, saturated=False) -> dict` 仅供无租户的 worker Store 调用。返回 `granted`，等待时带 `position/reason`，首次授予带 `wait_seconds`，终态带 `terminal`。每个全局决策事务先取得 advisory lock `73421045`，再锁目标任务；按优先级、租户当前持槽数/权重、申请时间、任务 ID 授予，跳过已达租户配额的候选。`release_slot(task_id)` 幂等释放。
+- 工作流在准备工作区和创建沙箱前申请槽位，等待只使用 Temporal durable timer，指数退避 1→2→4→8→10 秒、确定性随机抖动 0.8～1 倍，无等待沙箱。审核与暂停释放沙箱和槽位，反馈与恢复先重新申请；取消、失败、成功均释放。队列中取消已经由真实 Temporal + Postgres 测试验证。
+- 子任务共用父任务槽位，当前仍可并行。因此全局限制的是父任务并发数，而不是所有子沙箱数量；一个拆分任务可能持有多个子沙箱。将子任务独立限槽需要后续扩展独立队列记录。本阶段避免父任务持槽等待子任务独立槽位造成死锁。
+- 每次申请周期用 `slot_generation` 构造事件去重键：`admission.waiting` 仅一次，包含首次位置与原因；`admission.granted` 包含等待秒数。最新轮询位置写入 `task.result.admission.position`，授予或释放时清除；Portal 状态显示“排队中（第 N 位）”。位置为最近一次轮询时的全局排序快照。
+- Prometheus histogram：`sca_admission_wait_seconds`，由 worker 记录，无租户标签。
+- `src/sca/admission/pressure.py` 导出 `async def gateway_pressure() -> bool`。网关通过 `SCA_GATEWAY_PRESSURE_FILE` 指定路径原子发布 `{"saturated": bool, "updated_at": ISO-8601 带时区字符串}`；超过 30 秒、缺失或无效视为未饱和。饱和时只拒绝新授予，不撤销已有槽位。
+- 文件布局：`admission/order.py` 是纯排序规则，`admission/pressure.py` 是网关接口，`kernel/activities.py` 与 `kernel/workflow.py` 接活动和 durable timer，`api/tasks_admission.py` 实现新提交路由。因本任务禁止修改 `api/routes.py`，`api/app.py` 组合路由时排除旧 POST `/v1/tasks`，保留其余端点；负责人后续可将提交实现归并回原路由文件。
+
+### Postgres 模拟实测
+
+运行 `timeout 300 .venv/bin/python scripts/admission_sim.py`，脚本创建并最终删除独立 `test_admission_sim_<uuid>` 数据库，不接沙箱和模型。单调度器驱动同一生产准入逻辑，4 个全局槽位、每租户 3 个，权重均为 1，假工作为 sleep 20 ms；三个租户分别提交 200/70/30 个任务，优先级循环为 interactive/eval/batch。
+
+| 租户 | 授予数 | 总授予份额 | 等待 p50 / p90（秒） | 前 30 次授予数 |
+| --- | --- | --- | --- | --- |
+| 0 | 200 | 66.67% | 15.401 / 19.648 | 14 |
+| 1 | 70 | 23.33% | 10.384 / 14.902 | 12 |
+| 2 | 30 | 10.00% | 9.217 / 13.004 | 4 |
+
+300 个任务全部完成；总份额由有限输入量决定，并非权重指标。前 30 次授予和小租户较短等待说明小租户在大租户排空前已经获得资源。这是本机 Postgres 胶水开销实验，不代表真实模型吞吐量。首版 300 个独立轮询者产生过高查询负载，已中止并确认其临时数据库清理完成；最终脚本使用集中调度器，多 worker 并发安全另外由集成测试覆盖。
+
+### 验证与限制
+
+- 已运行准入单元与 Postgres 集成：9 passed；之后补充了权重集成断言。
+- 首轮带独立临时目录的完整基线加租户/准入集成：460 passed、1 skipped（205.54 秒）。API 优先级、评测提交与评测工作流专项：17 passed（27.63 秒）。真实 Postgres + Temporal 的审核释放/反馈重获、排队取消：2 passed（14.71 秒）。
+- 默认 pytest 临时目录 `/tmp/pytest-of-ubuntu` 所有权不匹配，原样基线命令曾出现 158 个环境错误；后续加 `--basetemp=/tmp/sca-r-*` 运行。高并发模拟期间，另一次基线出现网关结算时间敏感测试 `test_settle_and_revoke[grows]` 失败；停止多余负载后 `tests/unit/test_gateway.py` 单独重跑 23 passed（3.65 秒）。停止多余负载后的最终基线结果见下方补记。
+- `timeout 30 .venv/bin/ruff check src tests` 已通过。未使用 Docker，未构建 OpenCode，未运行全套 e2e；真实沙箱生命周期与网关发布压力文件的跨进程联调仍需负责人验证。
+- 负责人需要在部署库执行迁移并更新 worker；迁移将现有 PROVISIONING/RUNNING/VERIFYING 标记为持槽。已保存旧工作流历史不强插新活动，部署前应排空旧任务，以使所有执行都遵循新准入流程。
+
+最终代码的负载复测命令：
+`timeout 180 /usr/bin/time -f 'peak_rss_kib=%M' .venv/bin/python scripts/gateway_load.py --sessions 300`。
+**600/600 成功、失败 `{}`、29.320 秒、上游 429 为 6 且全部恢复，峰值 RSS 77260 KiB（约 75.4 MiB）**。
+整体份额仍为 16.67%/33.33%/50%，前 100 次竞争份额仍为 33%/34%/33%。
+排队 p50/p99：tenant-0 为 6.5450/7.1647 秒，tenant-1 为 10.8833/13.8384 秒，
+tenant-2 为 12.7769/19.1191 秒。两轮均与基线回归并行，延迟包含本机 CPU 竞争影响。
+两个脚本的 `--help` 均已实跑通过。
+
+第二轮基线（与上述负载复测并行）为 **1 failed、450 passed、1 skipped，191.42 秒**。
+失败是现有 `tests/unit/test_gateway.py::test_settle_and_revoke[grows]`：该测试把整个结算过程
+压到 40 毫秒，在 CPU 竞争下得到 `(0.3, False)` 而非 `(0.3, True)`。
+没有修改该范围外测试；随后在不运行负载的情况下再次执行完整指定基线。
+
+最终独立基线：
+`timeout 900 .venv/bin/pytest tests/unit tests/integration/test_store.py tests/integration/test_api.py tests/integration/test_workflow.py -q -p no:cacheprovider --basetemp=/tmp/sca-s-limiter-isolated-baseline`
+为 **453 passed、1 skipped，172.12 秒**。共享 checkout 期间另一工程师新增测试，收集数随之变化；
+上面各轮数字均为实际输出。最终代码没有修改 40 毫秒的原测试。
+
+
+最终补记：
+
+- 完整基线最终重跑：`timeout 900 .venv/bin/pytest tests/unit tests/integration/test_store.py tests/integration/test_api.py tests/integration/test_workflow.py -q -p no:cacheprovider --basetemp=/tmp/sca-r-clean-final`，**453 passed、1 skipped，169.10 秒**。
+- 准入专项最终重跑（排序/压力文件/配额/公平性/优先级/权重/并发安全/审核反馈/排队取消）：`timeout 90 .venv/bin/pytest tests/unit/test_admission.py tests/integration/test_admission_store.py tests/integration/test_workflow.py -k 'admission or postgres or feedback_reacquires or idle_review' -q -p no:cacheprovider --basetemp=/tmp/sca-r-admission-final`，**15 passed、26 deselected，35.15 秒**。
+- 新增 eval 优先级持久化断言后单跑 `tests/integration/test_eval_submission.py`：**2 passed，3.41 秒**。
+- 模拟时同机还有回归与旧版模拟负载，等待分位数包含共享主机负载影响；结果用于验证有限任务的授予分布，不作为吞吐量承诺。
+
+## 负责人现场验证：P 小修复、pi 后端、P4.5（2026-11-18）
+
+- **评测运行 404**：迁移 `0013_eval_run_insert` 给 `sca_api` 授予 `eval_runs` 的 INSERT 权限（P 预先建行需要）。
+  线上新建运行后立即 GET 返回 200。
+- **脑手分离取消**：`SCA_TEST_DOCKER_BRAIN=1` 下的真实容器测试通过：容器里先出现 `sleep 300`，
+  取消后 10 秒内消失。
+- **pi 后端**：构建镜像 `sca-sandbox-pi:latest`（pi 1.5.2，1.11 GB）。负责人补了三处接线：
+  后端可声明自己的沙箱镜像（任务没指定镜像时，内核用 `backend.sandbox_image`）；Portal 的后端列表加入 pi；
+  把 pi 从修复任务的后端选项里撤掉（修复任务改的是 OpenCode 源码，要用带 bun 的 OpenCode 镜像）。
+  opencode-demo 跑 pi（运行 `c822cb6a`）：**6/6 通过**，每个用例 17–39 秒，每个用例 0.0007–0.0047 美元。
+  bug-clamp 的 752 秒里有 728 秒是排队，原因见下一条。
+- **P4.5a 准入**：上线时发现 R 把 `priority` 存进了任务 spec，但 `CodingSpec` 不允许多余字段，worker 校验失败，
+  任务一直停在 QUEUED（等到修复后才放行，`admission.granted` 记录等待 728 秒）。已在 `CommonSpec` 里
+  加上 `priority` 字段，并补了 `tests/unit/test_spec_priority.py`。修复后评测任务按 `eval` 优先级正常放行。
+- **P4.5b 限流代理**：仓库根新增 `.dockerignore`，避免把 `.data` 打进构建上下文。构建镜像
+  `sca-gateway-limiter:latest`（521 MB），作为容器 `sca-gateway-limiter` 跑在 compose 网络里
+  （256 MiB、0.5 CPU，宿主 `127.0.0.1:4100`），反压文件放在宿主共享目录。
+  打开 `SCA_GATEWAY_LIMITER=true` 后用 OpenCode 2.3.0-sca.6 跑 opencode-demo（运行 `bc9c9caf`）：
+  **6/6 通过**；45 次模型调用全部经过代理，租户识别为 `eval`，累计排队 6.4 秒（平均 0.14 秒，
+  来自每 key 60 RPM 的平滑），上游 429 为 0，拒绝为 0。
+  开关仍默认关闭：一键 setup 还不会部署这个容器，代理也只支持单副本。
+
+## K8s 出口 CA 分发
+
+K8s restricted 出口改为完整 TLS 检查路径，移除 Deployment 的 `exit 1`。
+无新增 HTTP endpoint、设置或迁移；Docker 行为和共享 CA helper 均未改动。
+
+契约与布局：
+
+- `K8sSandboxProvider(..., egress_ca_dir=Path(...))` 复用 `prepare_ca`；缺省读取
+  `SCA_EGRESS_CA_DIR`，否则使用 `SCA_DATA_DIR/egress/<safe_name(namespace)>/`。
+  目录内仍为 `ca.key`、`ca.crt`、`ca-bundle.crt`、`ca.lock`，系统根与部署 CA 合并。
+- 公共证书与 bundle 的 SHA-256 前 32 位作为指纹；创建/更新
+  `Secret/sca-egress-ca-<fingerprint>`（仅 `ca.crt`、`ca.key`）和
+  `ConfigMap/sca-egress-bundle-<fingerprint>`（仅 `ca-bundle.crt`）。Secret 通过
+  kubectl stdin create/replace 发布，不生成含私钥的 last-applied annotation；失败只报告
+  固定错误，不回显可能含敏感信息的服务端响应。旧资源保留，待旧任务结束后由管理员清理。
+- Secret 只挂到代理 `/ca`，只读、0440、fsGroup 13；代理使用 `sca-egress:tls-v1`，
+  UID/GID 13，直接初始化临时证书库并执行 Squid，不依赖镜像默认 root 入口。
+  代理模板的 `sca.ca-fingerprint` 标签变化触发滚动更新。
+- restricted 沙箱只读挂载公共 ConfigMap 的单文件到
+  `/etc/sca-egress/ca-bundle.crt`（`CA_TARGET`），强制设置 `SSL_CERT_FILE`、
+  `REQUESTS_CA_BUNDLE`、`PIP_CERT`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`。
+  沙箱标签包含同一指纹，不挂 Secret；open/none 不注入 CA。
+  预热池只认领当前指纹的 restricted Pod，补池回收旧指纹空闲 Pod。
+  已运行任务不自动重启，轮换须先排空任务，避免旧 bundle 不信任新代理。
+- NetworkPolicy 保持原有隔离；本任务未新增模型网关连接能力。当前 worker factory 仍拒绝
+  K8s + model gateway，需负责人另行接通，不能宣称 K8s 已支持完整真实模型闭环。
+- `deploy/k8s/worker/egress-rbac.yaml` 补 sandbox namespace 中 Secret create/update、
+  ConfigMap get/create/patch/update 权限。RoleBinding 默认绑定 default namespace 的
+  sca-worker ServiceAccount，其他部署命名空间须修改。原有驱动 RBAC 仍需部署方提供。
+- Worker Deployment 引用预建 `sca-egress-ca` PVC，挂 `/var/lib/sca/egress`。
+  多 Worker 必须共享支持 POSIX flock 的 RWX 持久卷并保护/备份私钥，禁止每副本 emptyDir。
+  PVC 供应及原有控制面权限不在本模板自动创建范围内。
+- kind 先执行 `timeout 120 kind load docker-image sca-egress:tls-v1 --name sca`，
+  或 `timeout 130 bash deploy/kind/load-egress.sh sca`。详见 deploy/kind/README.md。
+
+验证：专项 `tests/unit/test_k8s_manifest.py tests/unit/test_egress_rules.py` 共 44 passed，
+覆盖 Secret/公共 bundle 分离、只读挂载、环境变量、指纹稳定与轮换、预热池选择和错误脱敏。
+修改的 Python 文件 ruff 通过；deploy/k8s YAML 解析、kind 加载脚本 bash 语法检查通过。
+首次专项运行因 `/tmp/pytest-of-ubuntu` 属主不符失败，后续指定独立 `--basetemp` 重跑通过。
+全仓 ruff 当前失败项为范围外 `src/sca/kernel/activities.py` 导入排序，交负责人修复。
+
+未执行 Docker、kind、镜像构建或真实 K8s 集成测试。`tests/integration/test_k8s_sandbox.py`
+使用独立临时 CA 目录，删除已禁止的 IP 白名单条目，并增加真实 TLS 检查探针：验证 CA 信任、
+域前置/Host 绕过、缺失 SNI 和 IP 目标拒绝。负责人需在可用 kind + Calico 上运行该文件，
+确认镜像 UID、Secret 权限、rollout、RBAC 与实际网络行为。
+
+指定基线实跑结果：`timeout 900 .venv/bin/pytest tests/unit
+ tests/integration/test_store.py tests/integration/test_api.py tests/integration/test_workflow.py
+ -q -p no:cacheprovider --basetemp=/tmp/sca-v-baseline`：455 passed、1 skipped，125.41 秒。
+基线收集后新增的两项 CA 错误脱敏/预热池指纹选择测试包含在随后专项重跑的 44 passed 内。
+专项命令：`timeout 180 .venv/bin/pytest tests/unit/test_k8s_manifest.py
+ tests/unit/test_egress_rules.py -q -p no:cacheprovider --basetemp=/tmp/sca-v-unit-complete`。
+`timeout 60 .venv/bin/ruff check src tests` 因上述范围外导入排序失败；
+修改文件的定向 ruff 检查通过。
+
+
+## P4.2 空闲挂起
+
+实现默认关闭。`SCA_SANDBOX_SUSPEND_IDLE=true` 启用；
+`SCA_SANDBOX_SUSPEND_IDLE_MIN_S` 默认 2，必须大于 0。不新增 HTTP 端点、迁移或依赖。
+
+### 执行与生命周期契约
+
+- `DockerSandboxProvider.pause(sandbox_id)` / `unpause(sandbox_id)` 使用 Docker cgroup freezer，
+  容忍已冻结／未冻结状态；其他错误仍报告。`core.interfaces` 中的
+  `pause_sandbox` / `unpause_sandbox` 对没有该可选能力的 provider 是空操作，
+  不增加 `SandboxProvider` 的结构类型必需方法，不影响 K8s/fake 实现。
+- Provider 按沙箱串行化冻结与整个 exec 生命周期；exec 先恢复，遇 Docker daemon 的
+  “Container ... is paused”错误再恢复并重试一次。普通工具输出不会触发重试。
+  `destroy` 沿用 `docker rm -f`，冻结容器无需先恢复即可删除。
+- `deploy/opencode/brain/driver.ts` 增加每轮冻结控制器：没有运行中的进程才开始空闲计时，
+  任一工具启动立即取消计时；冻结完成与工具恢复串行化；并行工具全部退出后重新计时。
+  文件操作也通过同一 spawner，受相同保护。单次宿主与常驻池都使用该控制器。
+- 已核对上游 `packages/core/src/workspace/driver.ts` 与 `workspace.ts`：
+  `suspendForIdle` 接收 workspaceID、binding、saveBinding，返回 Effect<void, Error>。
+  Core 仅在连接无活跃调用且超过默认 20 分钟空闲阈值后、默认一分钟轮询中调用它，
+  然后关闭连接 scope；所以仅接该回调不足以覆盖短模型等待。
+  本实现将回调接到同一个延迟冻结控制器，并主动在工具之间计时。
+- 结束或取消时关闭计时器并恢复。常驻池取消在启用冻结时等待结束确认（最多 25 秒），
+  无法确认则停止该版本的 brain 进程，其他在途请求会失败并交现有重试处理，
+  防止旧计时器冻结后续内核命令。Python 清理远端进程组前再次恢复。
+- 内核取得沙箱 ID、执行命令、初始同步工作区前恢复；验证、检查点和下载使用这些路径。
+  `sandbox.upload/download` 本身没有改变，内核调用前负责恢复；释放、取消和销毁仍可删除冻结容器。
+
+### 计量与文件
+
+Brain 协议新增内部记录 `{sca_suspend_transition:true, paused:boolean, at:Unix秒}`，
+以及结束摘要 `{sca_suspend:true, suspended_s:秒}`，不含模型凭证。
+转换即时持久化成 `sandbox.transition`，轮次结束补恢复边界；中断时不依赖完整结束摘要。
+`sandbox.activity` 在每次释放／销毁时按沙箱存活段写入，包含
+`segment`、`sandbox_alive_s`、`sandbox_active_s`、`sandbox_activity_ratio`，带去重键。
+任务 result 汇总所有已结束段的同名三个数值，内部 `sandbox_opened_at` 标记当前段。
+释放后的无容器等待时间不计入存活时间。Prometheus 直方图
+`sca_sandbox_activity_ratio{kind}` 记录汇总比例，不引入 task_id 高基数标签。
+
+这里 active 表示“未冻结时间”，包含 setup、验证和两秒防抖窗口，
+不等于纯工具 CPU 时间；工具执行时长仍使用 P4.1 的 `total_tool_ms`。
+计量采用宿主时间戳；控制面硬崩溃、时钟跳变及未送达的最后一次转换可能造成误差，
+不是计费用精确账本。
+
+新增 `scripts/suspend_bench.py`，负责人可运行：
+
+```bash
+timeout 240 .venv/bin/python scripts/suspend_bench.py --containers 3 --seconds 15
+```
+
+支持 `--image`（默认 python:3.12-alpine）、`--docker-bin`；容器限制为 32 MiB、0.1 CPU、
+无网络、16 PID，使用持有 4 MiB 内存且每 50 ms 唤醒的轻量 Python 循环。
+同一批 N 个真实容器先运行再冻结，输出 JSON：两阶段的主机 `/proc/stat` CPU 使用率、
+逐次 `docker stats` 原始数据（含 CPUPerc、MemUsage），最后删除本脚本的随机命名容器。
+主机 CPU 会受其他任务干扰，应多次测量；镜像须由负责人提前准备。
+
+**冻结预期节省 CPU 与调度唤醒，不释放内存。** 原计划“同等内存提升并发沙箱数”
+不能由 cgroup freezer 单独保证。本次没有 Docker 实测数字，不能据此宣称密度或内存收益。
+
+### 验证与待补
+
+专项命令（均实际执行）：
+
+- `timeout 60 env TMPDIR=/tmp/sca-suspend-test-tmp .venv/bin/pytest tests/unit/test_sandbox_suspend.py tests/unit/test_opencode_brain.py tests/unit/test_opencode_brain_pool.py tests/integration/test_docker_suspend.py -q -p no:cacheprovider`：30 passed、1 skipped（3.74 秒）。
+- `timeout 40 .venv/bin/python deploy/opencode/brain/launch.py .data/opencode/src .data/tools/bun-linux-x64/bun --test`：8 pass、0 fail，24 expectations。只执行本地驱动测试，没有安装依赖或构建 OpenCode。
+- `timeout 20 .venv/bin/ruff check src tests scripts/suspend_bench.py`：通过。
+- `timeout 20 .venv/bin/python scripts/suspend_bench.py --help`：通过；基准没有实际运行。
+
+Fake 测试覆盖幂等、exec 先恢复、冻结与 exec 互斥、daemon 冻结错误重试、普通输出不重试、
+延迟防抖、并行工具、冻结中启动工具的顺序、结束时恢复、冻结容器删除、转换事件映射、
+活动段累加／去重、中断转换计量以及常驻池取消确认。
+首次 pytest 因共享 `/tmp/pytest-of-ubuntu` 属主不符报错，改用独立 TMPDIR 后重跑通过。
+
+新增 `tests/integration/test_docker_suspend.py`，标记 docker/integration，默认跳过。
+负责人准备镜像后运行：
+
+```bash
+timeout 120 env SCA_TEST_DOCKER_SUSPEND=1 .venv/bin/pytest tests/integration/test_docker_suspend.py -q -p no:cacheprovider
+```
+
+可用 `SCA_TEST_DOCKER_IMAGE` 覆盖默认 sca-sandbox:latest。
+本环境禁止 Docker，未运行该 opt-in、CPU/内存基准、真实模型闭环或 OpenCode 构建。
+负责人需补这些真实组件验证；没有所需范围外代码变更。
+
+指定基线实际执行：
+`timeout 900 env TMPDIR=/tmp/sca-suspend-test-tmp .venv/bin/pytest tests/unit tests/integration/test_store.py tests/integration/test_api.py tests/integration/test_workflow.py -q -p no:cacheprovider`：
+467 passed、1 skipped，108.54 秒。该轮收集后补入的取消确认测试已包含在上述
+30 passed 的最终专项重跑内；随后全仓 Ruff 通过。
+
+## P4.6 handd
+
+工程师 W（2026-11-18）：先交付 provider 路径，尚未达到性能退出条件。
+
+- `deploy/handd/handd.py`：Python 标准库单文件，无网络监听，以沙箱默认用户通过
+  一条 `docker exec -i ... python3 -u -c <source>` 启动。源码来自宿主部署目录，
+  不从不可信工作区读取；部署时需保留该文件与 `src/` 的相对布局。
+- `src/sca/sandbox/handd.py`：asyncio `HanddClient`，按请求 ID 分流；
+  `start()`、`exec(argv, workdir, env, stdin, timeout_s)`、`close()`。
+  `exec()` 仍返回按行去换行、UTF-8 replacement 解码的 `ExecOutput` 和 `ExecExit`。
+  wire 上保留原始二进制。没有新增 HTTP endpoint、依赖或数据库迁移。
+- `SCA_SANDBOX_HANDD=true` 开启，默认 false。每个 provider/sandbox 缓存一个连接，
+  首次 exec 懒启动；启动／握手失败再试一次，然后本次走原 docker exec。
+  运行中断线报告结果未知，不重放可能已产生副作用的命令；下一次请求尝试重建。
+  并发 exec 共用连接，pause 等待全部活跃 exec 释放后才能冻结。
+- 协议：每行一个 JSON，帧上限 16 MiB。执行请求
+  `{id,argv,cwd,env,stdin,timeout}`，stdin 为 base64，timeout 为秒或 null；
+  输出 `{id,stdout:<base64>}` 或 `{id,stderr:<base64>}`，
+  终态 `{id,exit:<int>,timed_out:<bool>}`。
+  `{id,cancel:true}` 杀独立进程组并由原请求返回终态；
+  `{id,ping:true}` 返回 `{id,pong:true}`。ID 应唯一，不支持交互 stdin 或 PTY。
+  timeout 返回 124；无法启动子进程返回 127。EOF 清理所有命令组。
+
+Brain 的 `driver.ts` 和 P4.1b 常驻池保持现有路径；后续需把 driver spawner 接入
+共享 relay 或 helper，不能以本次 provider 交付宣称模型工具路径已提速。
+
+`scripts/handd_bench.py <sandbox> --file <fixture> --count 500` 对现有可丢弃容器测量
+true、cat、rg x，每种分别 500 次、串行和 4 路并发，对比裸 docker exec 与原始
+HanddClient；输出 JSON 的 p50_ms、p99_ms、wall_s 和 host_cpu_s。fixture 必须存在且含 x，
+镜像需有 rg。host_cpu_s 只含宿主脚本及其退出子进程，不含 Docker daemon／容器 CPU，
+不是总系统 CPU；采样不含 handd 冷启动。负责人应另采容器与 Docker daemon CPU。
+建议命令 `timeout 900 .venv/bin/python scripts/handd_bench.py <sandbox> --file <fixture>`。
+本环境禁止 Docker，未执行基准，没有 p50/p99 收益数字。
+
+新增 `tests/unit/test_handd.py` 覆盖分片 NDJSON、二进制、大输出、复用、超时、
+取消进程组、启动回退、断线不重放，以及重启、cwd/env/stderr 和并发冻结互斥。
+`tests/integration/test_docker_handd.py` 为 docker/integration opt-in：
+`timeout 120 env SCA_TEST_DOCKER_HANDD=1 .venv/bin/pytest tests/integration/test_docker_handd.py -q -p no:cacheprovider`，
+镜像可用 `SCA_TEST_DOCKER_IMAGE` 覆盖。未执行 Docker 集成。
+
+实跑记录：
+
+- 最终专项：`timeout 180 .venv/bin/pytest tests/unit/test_handd.py tests/unit/test_sandbox_suspend.py tests/integration/test_docker_handd.py -q -p no:cacheprovider --basetemp=/tmp/sca-handd-final2`：18 passed、1 skipped，24.85 秒。
+- `timeout 20 .venv/bin/ruff check src tests scripts/handd_bench.py deploy/handd/handd.py`：通过；benchmark `--help` 已执行成功。
+- 指定基线加独立 `--basetemp=/tmp/sca-handd-baseline` 实跑，900 秒超时（退出码 124），
+  期间有失败／错误，未产生最终统计，不能宣称通过。同期观察到可用内存约 112 MiB、
+  swap 耗尽、负载 14–18；早期专项一次也因握手超时失败／命令超时。
+  已把启动握手容忍时间调到 30 秒，之后上述最终专项通过。
+  这些观察不足以证明所有基线失败都由资源压力造成，负责人仍需在资源稳定时重跑基线。
+
+负责人待办：运行 opt-in Docker 测试与基准，补 p50/p99 和完整 CPU 数据，验收 daemon
+退出后的组清理；补 Brain driver routing。部署产物需包含 deploy/handd/handd.py，
+仅安装当前 Python wheel 不包含该仓库级文件，此时 provider 自动回退。无所需迁移或 API 改动。
+
+最终补记：共享 checkout 随后继续变化，最后一次全仓 Ruff 报
+`src/sca/kinds/coding/activities.py:3 I001`（范围外 import 排序），此前全仓检查通过。
+未修改另一位工程师的文件；负责人整合时需解决该项再跑全仓检查。
+
+## P4.4 快照与分叉
+
+实现默认关闭：`SCA_WORKSPACE_SNAPSHOTS=true` 开启，仅支持 Docker + mount。
+`SCA_SNAPSHOT_RETENTION_HOURS` 默认 24（非负），`SCA_SNAPSHOT_MAX_BYTES` 默认
+8589934592；归档传输和解包后的文件总大小均受限制，归档落临时磁盘，不整份读入内存。
+无迁移、无新增 HTTP 端点。
+
+### 契约与文件布局
+
+- `workspace/snapshots.py`：准备索引键为 SHA-256(JSON([tenant, repo_key, base_commit,
+  SHA-256(setup), image]))，各字段分别编码，避免分隔符歧义。repo_key 复用
+  `layer-source.json` 的规范化仓库身份哈希；image 使用场景最终选择的镜像名。
+  镜像标签必须保持内容不变，更新镜像应换标签或使用 digest。
+- 工作树内容、相对路径、类型和权限生成内容 ID，并纳入准备索引键，禁止跨租户共享。
+  `data_dir/snapshots/<content-id>/` 保存只读树，`<preparation-key>.json` 保存 base_commit、
+  content ID、大小和首次准备耗时，`<content-id>.refs/` 保存分叉工作区引用；
+  `locks/` 用 flock 串行化同键发布、分叉和清理。索引最后原子发布。
+  `workspace.snapshot` / `overlay.snapshot` 是工作区旁的引用标记。
+- setup 成功后通过 sandbox.download(`/workspace/.`) 导出，不在宿主工作副本运行 Git。
+  归档经现有 data filter 解包，拒绝绝对路径、父目录穿越和特殊设备；不保留任务的 `.sca`。
+  首版将 overlay 的合并视图导出为完整只读准备层，而不是保存原始 upper + base 引用。
+  这是与 3.3 的存储表示差异：避免在非特权宿主重建 whiteout，代价是首次导出较大，
+  不承诺快照本身只有差异大小。分叉仍为 overlay lower=准备层、upper=新任务私有目录。
+  关闭 overlay 使用 `cp -a --reflink=auto`，不使用硬链接。
+- 可通过现有 POST `/v1/tasks` 的 `spec.labels.fork_from_snapshot="true"` 选择复用；
+  系统开关关闭时标签没有效果。顶层 `spec.fork_from_snapshot` 的模型接线需要负责人在
+  本任务范围外的 `src/sca/kinds/coding/spec.py` 加 `fork_from_snapshot: bool = False`。
+  活动端已经读取该字段。当前不宣称顶层字段已可提交。
+- 仅缓存无 intents、无 subtasks、plan=none 的编码任务，避免漏掉上下文相关准备条件。
+  setup 必须把可复用结果留在工作区；容器系统目录、进程和环境变量不在文件快照内。
+  agent_home、凭证挂载不进入归档。
+- `workspace.snapshotted` 记录索引/内容 ID、base commit、大小和准备耗时；
+  `workspace.forked` 包含 snapshot_id、saved_seconds（首次准备耗时估计）、fork_seconds。
+  `setup.completed` 对分叉记录 `skipped: true`，带去重键；分支切换仅在沙箱执行。
+  普通路径记录 `skipped: false`。任务 result 增加 snapshot_id、snapshot_bytes、
+  workspace_forked、preparation_seconds。
+- eval 的 repeat>1 为编码任务加上述标签；同一次 run/case 共享固定 repo.git，
+  建仓通过 flock 保护，避免每次重复换仓库身份与时间戳提交。
+  并发冷启动可各自准备，后续已有索引的重复才跳过 setup，不阻塞任务等待首个快照。
+  Best-of-N 的结果聚合、预算和 Portal/API 参数需要一起设计，首版未实现。
+- maintenance 的 prune_repo_cache 同时清理超过保留时间且没有有效引用的快照；
+  `sca_workspace_snapshot_bytes` Gauge 记录清理后保留大小，不含任务 ID 高基数标签。
+  Overlay 检查点保存 snapshot_key，恢复重新引用准备层；跨 worker 恢复要求共享 snapshots
+  目录，缺失时明确失败。plain 的 Git 状态恢复不保留 ignored setup 输出，因此清除分叉标记，
+  后续重新 setup，避免误跳过。
+
+### 基准与验证边界
+
+负责人可执行：
+
+```bash
+timeout 900 .venv/bin/python scripts/fork_bench.py --forks 2 --overlay
+```
+
+脚本顺序测 opencode-demo 每个用例和 `.data/opencode/opencode.git`，每次只创建一个
+512 MiB / 1 CPU 沙箱，输出准备+setup、每次 fork（包含镜像容器创建和私有 mirror）、
+准备层大小、工作树/任务磁盘，以及文件内容指纹一致性。`--heavy-repo`、`--heavy-ref`、
+`--image` 可覆盖；重仓库 setup 默认 true，只有显式 `--heavy-setup` 才执行其他命令。
+脚本不隐式安装依赖、不编译 OpenCode、不调用模型；文件指纹相等不能替代真实评测结果相等。
+未执行 Docker、重型构建或真实评测，因此尚未证明退出条件中的耗时下降和评测结果一致。
+
+### P4.2 负责人现场验证（2026-11-18）
+
+- `SCA_TEST_DOCKER_SUSPEND=1` 的真实容器测试通过。
+- `scripts/suspend_bench.py --containers 8 --seconds 30`（python:3.12-alpine 空闲容器）：
+  不冻结时 8 个容器合计 CPU 0.32–0.38%，冻结后为 0.00%；内存在两种情况下都是 60.7 MiB，完全没变；
+  宿主 CPU 13.9% → 12.9%。结论：冻结只省 CPU 和调度唤醒，不省内存。
+  “同等内存下并发沙箱数提升”这一退出条件**达不到**；要省内存，需要 checkpoint 或把内存换出，不在本步范围内。
+- 打开 `SCA_SANDBOX_SUSPEND_IDLE=true`，用 opencode-brain 跑 sca.6（运行 `3da076b2`）：6/6 通过，结果不受影响。
+  每个任务的活跃率是 0.80–0.97，冻结很少触发。用 `docker events` 记录 60 秒（覆盖两个任务）：
+  `exec` 48 次，`pause` 3 次。原因是这些用例很小，deepseek-flash 每步一两秒；OpenCode 读写文件也走
+  `docker exec`，平均约 1 秒一次，很难连续空闲 2 秒。这是控制器按设计工作的结果，不是 bug。
+  早先测到的“沙箱里的工具约占 21% 时间”，算的是工具执行时长，不是能被冻结的空档。
+- 结论：P4.2 保持默认关闭。它适合长时间思考、沙箱里又有后台进程的任务；对现在的评测集几乎没有收益。
+- 顺带修复：评测运行先建行后，如果启动工作流失败（线上碰到过一次 Temporal 10 秒超时），
+  接口返回 503，但那一行会一直停在 `queued`。现在启动失败时把它标为 `failed`。
+  0013 迁移相应补上 `GRANT UPDATE (status, finished_at)`，并新增测试
+  `test_failed_workflow_start_fails_the_run`。
+
+准备层保留文件权限（overlay copy-up 前会检查原文件权限）；不可变性由原子发布后不再修改、
+以及只作为 overlay lower 使用保证，不把该目录作为可写 bind mount 暴露给任务。
+
+Overlay 的 durable checkpoint 仍引用准备层时，该层算“正在使用”：即使维护已删除本地 upper，
+也保留 `overlay.snapshot` 和 `layer-source.json` 的引用，防止 GC 破坏后续恢复。
+删除相应任务状态元数据后才能回收；因此长久保留检查点也会长久保留它引用的准备层。
+多节点若共用该缓存，引用标记所在的任务目录也必须共享，否则不能由本地路径可靠判断使用情况。
+本实现只在 Docker + mount 的本地路径启用，不改变 sync/K8s 的持久化契约。
+孤儿树（树已发布、索引未发布时崩溃）和过期临时目录也由 GC 清理。
+
+专项最终命令：
+
+```bash
+timeout 240 .venv/bin/pytest tests/unit/test_workspace_snapshots.py tests/integration/test_prepared_workspace_forks.py tests/integration/test_eval_submission.py tests/integration/test_snapshot_docker.py -q -p no:cacheprovider --basetemp=/tmp/sca-u-targeted-gc --tb=short
+```
+
+结果 **19 passed、1 skipped，5.27 秒**；跳过的是 Docker opt-in。
+覆盖五字段键隔离、内容寻址、私有副本、租户隔离、并发发布、穿越归档拒绝、压缩展开上限、
+年龄/引用/孤儿/检查点 GC、overlay lower 参数与恢复引用、真实 Postgres/Git 的准备与分叉、
+setup 跳过去重和丢失文件状态后的回退，以及公开 API 的 eval repeat 提交。
+真实 Docker 测试须由负责人运行：
+
+```bash
+timeout 120 env SCA_TEST_DOCKER_SNAPSHOTS=1 .venv/bin/pytest tests/integration/test_snapshot_docker.py -q -p no:cacheprovider
+```
+
+`timeout 30 .venv/bin/ruff check src tests scripts/fork_bench.py` 通过；
+`timeout 30 .venv/bin/python scripts/fork_bench.py --help` 通过，未运行基准本体。
+首轮基线在主机 load≈20、可用内存不足 200 MiB、swap 已满时为
+**6 failed、481 passed、1 skipped，541.41 秒**，失败是两个 brain pool 超时和四个 Temporal
+工作流超时；随后同一基线独立重跑 **487 passed、1 skipped，121.58 秒**。
+早期专项的只读目录重命名问题已修复；测试文件重名、测试漏传 idempotency_key 也已修正。
+
+包含最终 GC/检查点引用保护和四项新增单元测试后的完整基线：
+
+```bash
+timeout 900 .venv/bin/pytest tests/unit tests/integration/test_store.py tests/integration/test_api.py tests/integration/test_workflow.py -q -p no:cacheprovider --basetemp=/tmp/sca-u-baseline-gc-final --tb=short
+```
+
+**491 passed、1 skipped，112.59 秒**。最终专项仍为 **19 passed、1 skipped，5.27 秒**。
+全部检查均使用本机 Python 3.12 虚拟环境，没有执行 Docker、bun install、OpenCode 构建或全套 e2e。
+负责人还需补顶层 CodingSpec 字段、真实 Docker 分叉/恢复与基准、两次真实评测对照；
+Best-of-N 和 overlay 仅存 upper+base 的差分格式列为后续工作。
+
+## 负责人现场验证：P4.6 handd、P4.4 快照与分叉（2026-11-18）
+
+### handd
+
+`SCA_TEST_DOCKER_HANDD=1` 的真实容器测试通过。负责人修了基准脚本里的一个 bug：在纯数字文件里搜 `x`，
+`rg` 没有匹配时按约定返回 1，被当成失败；改成搜 `1`。
+`scripts/handd_bench.py`，sca-sandbox 容器，每组 500 次：
+
+| 方式 | 并发 | 命令 | p50 | p99 | 宿主 CPU |
+| --- | --- | --- | --- | --- | --- |
+| docker exec | 1 | `true` / `cat` / `rg` | 60–61 ms | 94–117 ms | 8.1 秒 |
+| docker exec | 4 | 同上 | 157–166 ms | 277–282 ms | 8.6 秒 |
+| handd | 1 | `true` / `cat` / `rg` | 2.0 / 7.6 / 6.2 ms | 7–18 ms | 0.1–2.7 秒 |
+| handd | 4 | 同上 | 4.2 / 21.6 / 16.7 ms | 8–34 ms | 0.1–2.6 秒 |
+
+退出条件（工具调用开销 p50/p99 低于直通）达到：单命令开销降到原来的 1/30 到 1/8，宿主 CPU 也大幅下降。
+已知限制：brain 驱动里的命令还是每次 `docker exec`，没有走 handd（W 留作下一步）。
+所以脑手分离模式下的工具调用还拿不到这部分收益。handd 默认关闭。
+
+### 快照与分叉
+
+两个 Docker 测试都通过。负责人修了 `test_prepared_workspace_forks.py`：它没有加载任务类型注册表
+（`builtin.load()`），单独运行时报 “unknown task kind: coding”。
+`scripts/fork_bench.py --overlay --forks 3`：
+
+| 仓库 | 准备 + setup | 分叉（3 次） | 文件一致 | 单个分叉工作区 | 快照 |
+| --- | --- | --- | --- | --- | --- |
+| opencode-demo 6 个用例 | 1.07–1.16 秒 | 0.46–0.67 秒 | 是 | 86 KB | 217–221 KB |
+| OpenCode 源码 | 5.56 秒 | 3.81 / 1.62 / 2.26 秒 | 是 | 1.4 MB | 263 MB |
+
+这里的 setup 很轻，不装依赖，所以分叉省下的时间有限；setup 越重（例如 pip/bun install），收益越大。
+Best-of-N 没有做（U 留作下一步）。快照默认关闭（`SCA_WORKSPACE_SNAPSHOTS=false`）。
+
+快照的线上验证：打开 `SCA_WORKSPACE_SNAPSHOTS=true` 后，opencode-demo 跑重复 2 次（运行 `86e9ad11`）12/12 通过，
+但没有一个任务分叉。原因是这些用例都没有 setup 命令，而快照只在 setup 成功后生成，按设计如此。
+另做了一个带 setup 的小仓库（`PIP_USER=0 pip install --target .deps six==1.17.0`，经 TLS 出口代理下载），
+用假 agent 提交两次同样的任务：
+
+| 任务 | 进入 RUNNING | setup | 结果 |
+| --- | --- | --- | --- |
+| 第 1 次 `4ea19169` | 2.8 秒 | 实际执行 2.1 秒，之后生成快照（336 KB） | 验证通过 |
+| 第 2 次 `051793ca` | 1.6 秒 | 跳过（`workspace.forked`，分叉 0.07 秒，省 1.55 秒） | 验证通过，依赖仍在 |
+
+结论：分叉路径在真实平台上工作正常，省下的时间约等于 setup 的时长。
+
+### K8s 出口 CA 分发：负责人现场验证（2026-11-18）
+
+为了腾出内存（Temporal 开发服务器约占 2 GB），先暂停了 Temporal、LiteLLM 和限流代理，再启动已有的两节点
+kind + Calico 集群（`sca`），用 `kind load` 加载 `sca-egress:tls-v1` 和 `sca-sandbox:latest`。
+`SCA_TEST_EGRESS=1` 下 `tests/integration/test_k8s_sandbox.py` **23 passed**，没有跳过，
+其中包括 TLS 出口：允许的 HTTPS 正常，SNI/Host 前置、缺失 SNI 和 IP 目标都被拒绝。
+测完已停掉 kind 节点，恢复平台服务。
+未验证：多副本 Worker 共享 CA 用的 RWX PVC（kind 测试使用单个 Worker 宿主目录）。
+
+### 全量回归中发现并修复的问题（负责人，2026-11-18）
+
+第一次全量回归是 704 passed、5 failed。逐个查出来的原因：
+
+1. **同一沙箱里的命令被串行执行（T 引入）。** 为了冻结，T 让每次 exec 全程持有沙箱级别的锁，
+   结果同一沙箱里的并发命令（并行校验、并行工具）一个接一个地跑。冻结功能关着时也是这样，
+   而且每次 exec 前还多一次 `docker unpause`（约 60 ms）。
+   修复：两条路径统一用“使用者计数”，多个命令共享沙箱，只有冻结是独占的；只有打开冻结时才在 exec 前解冻。
+   新增 `test_concurrent_execs_share_the_sandbox`。
+2. **审核一开始就销毁沙箱（R 引入）。** 开着准入时，任务一进入审核，沙箱就被释放，
+   原有的“审核期间保留沙箱、空闲 10 分钟后才释放”被破坏，要求修改时必须重建沙箱
+   （e2e 里表现为沙箱不存在）。修复：槽位跟着沙箱走，审核期间两者都保留，空闲计时到了就一起释放。
+   恢复原测试 `test_prompt_review_keeps_the_sandbox`；R 的两个测试改为在空闲释放后验证重新排队。
+3. **K8s sync Pod 的测试断言过严（V 引入后）。** restricted Pod 多了一个只读的 CA ConfigMap 卷，
+   而测试要求“所有卷都是 emptyDir”。测试本意是“不能有 hostPath”，已按本意修改。
+4. 网关 e2e 和 worker 迁移 e2e：修完第 1、2 条后都通过。

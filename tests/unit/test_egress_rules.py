@@ -5,7 +5,9 @@ from sca.sandbox.egress import render_squid_conf, squid_domains
 
 def test_allowlist_translation():
     assert squid_domains(["PyPI.org.", "*.chatgpt.com", "chatgpt.com", "a.b.c"]) == [
-        ".chatgpt.com", "a.b.c", "pypi.org",
+        ".chatgpt.com",
+        "a.b.c",
+        "pypi.org",
     ]
 
 
@@ -78,8 +80,9 @@ async def test_docker_only_mounts_public_bundle_into_sandbox(tmp_path):
                 return 1, "", "No such container"
             return 0, "", ""
 
-    provider = FakeDocker(egress_ca_dir=tmp_path / "ca", egress_allowlist=["pypi.org"],
-                          name_prefix="egress-unit")
+    provider = FakeDocker(
+        egress_ca_dir=tmp_path / "ca", egress_allowlist=["pypi.org"], name_prefix="egress-unit"
+    )
     await provider.create("egress-unit", SandboxSpec(image="fake"))
     runs = [call for call in provider.calls if call[0] == "run"]
     assert len(runs) == 2
@@ -91,13 +94,13 @@ async def test_docker_only_mounts_public_bundle_into_sandbox(tmp_path):
         assert f"{key}={CA_TARGET}" in sandbox
 
 
-def test_k8s_restricted_egress_fails_closed():
+def test_k8s_restricted_egress_uses_tls_proxy():
     from sca.sandbox.k8s import egress_manifests
 
     deployment = next(m for m in egress_manifests(["pypi.org"]) if m["kind"] == "Deployment")
     command = deployment["spec"]["template"]["spec"]["containers"][0]["command"]
-    assert "exit 1" in command[-1]
-    assert "TLS CA distribution required" in command[-1]
+    assert "exec squid -N" in command[-1]
+    assert "exit 1" not in command[-1]
 
 
 def test_raw_sni_helper_rejects_missing_ip_and_malformed_sni():
@@ -107,7 +110,11 @@ def test_raw_sni_helper_rejects_missing_ip_and_malformed_sni():
 
     helper = Path(__file__).resolve().parents[2] / "deploy/egress/check-sni"
     result = subprocess.run(
-        [sys.executable, str(helper)], input="pypi.org -\n- -\n1.1.1.1 -\n::1 -\n%20 -\n",
-        text=True, capture_output=True, check=True, timeout=5,
+        [sys.executable, str(helper)],
+        input="pypi.org -\n- -\n1.1.1.1 -\n::1 -\n%20 -\n",
+        text=True,
+        capture_output=True,
+        check=True,
+        timeout=5,
     )
     assert result.stdout.splitlines() == ["OK", "ERR", "ERR", "ERR", "ERR"]

@@ -126,6 +126,11 @@ class MaintenanceActivities:
             self.settings.layer_retention_hours
         )
         activity.logger.info("Workspace layer bytes: %d", total)
+        from sca.workspace.snapshots import SnapshotStore
+
+        snapshot_bytes = await SnapshotStore(self.settings.data_dir / "snapshots").prune(
+            self.settings.snapshot_retention_hours)
+        activity.logger.info("Workspace snapshot bytes: %d", snapshot_bytes)
         await RepoCache(self.settings.data_dir / "cache" / "repos").prune(
             self.settings.repo_cache_max_entries
         )

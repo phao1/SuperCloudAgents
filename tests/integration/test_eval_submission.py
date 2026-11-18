@@ -16,8 +16,9 @@ from sca.storage.local import LocalObjectStore
 pytestmark = pytest.mark.integration
 
 
+@pytest.mark.parametrize("repeat", [1, 2])
 @pytest.mark.parametrize("kind", ["coding", "analysis"])
-async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, monkeypatch, kind):
+async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, monkeypatch, kind, repeat):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
@@ -42,7 +43,7 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
     (case / 'acceptance').mkdir()
     (case / 'acceptance' / 'hidden.py').write_text('assert True\n')
     (case / 'acceptance.yaml').write_text('command: python hidden.py\n')
-    request = {'id': str(uuid4()), 'suite': str(suite), 'repeat': 1, 'concurrency': 1,
+    request = {'id': str(uuid4()), 'suite': str(suite), 'repeat': repeat, 'concurrency': 1,
                'budget': .5, 'case_budget': .1, 'variant': {'memory_enabled': False}}
     env = ActivityEnvironment()
     plan = await env.run(acts.prepare, request)
@@ -51,6 +52,7 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
     second = await env.run(acts.submit, submission)
     assert first == second
     task = await store.for_tenant('eval').get_task(first)
+    assert task.spec['priority'] == 'eval'
     assert task.spec['auto_finish'] is True
     assert task.spec['eval_run_id'] == request['id']
     assert task.spec['acceptance_command'] == 'python hidden.py'
@@ -62,6 +64,11 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
         repo = Path(task.spec['repo_url'])
         assert (repo / 'HEAD').is_file() and (repo / 'objects').is_dir()
         assert not (repo / 'app.py').exists()
+    if kind == 'coding' and repeat > 1:
+        assert task.spec['labels']['fork_from_snapshot'] == 'true'
+        next_id = await env.run(acts.submit, {**submission, 'iteration': 1})
+        next_task = await store.for_tenant('eval').get_task(next_id)
+        assert next_task.spec['repo_url'] == task.spec['repo_url']
     (case / 'task.yaml').write_text('question: changed\n')
     with pytest.raises(ValueError, match='suite changed'):
         await env.run(acts.submit, submission)

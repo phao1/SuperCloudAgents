@@ -26,3 +26,18 @@ CPU HPA 依赖 metrics-server；远端 Agent 执行期间 CPU 可能很低。可
 
 已做离线 YAML 解析和客户端 kustomize 渲染；未部署到集群，未验证镜像、RBAC、
 探针、排空、实际伸缩或 KEDA。负责人需在 kind 做服务端 dry-run 和运行验证。
+
+### TLS 出口 CA
+
+模板增加 `egress-rbac.yaml`，仅补 CA Secret/ConfigMap 权限；原有 Pod、exec、
+Deployment、Service、NetworkPolicy 和 Namespace 权限仍由部署方配置。
+RoleBinding 的 Worker 命名空间默认 `default`，部署到其他命名空间时必须同步修改。
+沙箱默认 ServiceAccount 不获得这些权限，且不挂载服务账号令牌。
+
+部署前创建名为 `sca-egress-ca` 的持久卷声明，多个 Worker 必须共享同一个支持
+ReadWriteMany、POSIX 文件锁的卷，挂到 `/var/lib/sca/egress`；禁止改回 emptyDir。
+该卷包含私钥，应只允许 Worker 访问，并纳入加密备份。`SCA_EGRESS_CA_DIR` 可显式指定
+受保护的共享目录；默认目录为 `SCA_DATA_DIR/egress/sca-<sandbox namespace>`。
+Worker 镜像需提供系统根证书。kind 镜像加载见 `deploy/kind/load-egress.sh`。
+CA 轮换后代理滚动重启，新沙箱使用新 bundle；已有任务保留原 bundle，应先排空任务再轮换。
+旧指纹 Secret/ConfigMap 需在旧任务结束后由管理员回收，provider 不自动删除。

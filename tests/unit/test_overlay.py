@@ -165,3 +165,23 @@ def test_embedded_cleanup_scripts_compile():
 
     compile(CLEANUP_SCRIPT, "cleanup", "exec")
     compile(WHITEOUT_SCRIPT, "whiteouts", "exec")
+
+
+async def test_configured_binary_for_every_overlay_command(tmp_path, monkeypatch):
+    import json
+
+    ws = OverlayWorkspace(tmp_path / "tasks" / "binary", "sca/test",
+                          docker_bin="/fake/docker-wrapper")
+    ws.overlay.mkdir(parents=True)
+    lower = ws.layers.root / ("b" * 64)
+    lower.mkdir()
+    (ws.task_dir / "workspace.overlay").write_text(json.dumps({"lower": str(lower)}))
+    run = AsyncMock(return_value=ws.volume)
+    monkeypatch.setattr("sca.workspace.overlay.command", run)
+    await ws.helper(["git", "status"])
+    await ws.ensure_volume()
+    await ws.remove_volume()
+    # Fake helper does not remove directories itself.
+    await ws.clear_upper()
+    assert len(run.call_args_list) == 6
+    assert all(call.args[0] == "/fake/docker-wrapper" for call in run.call_args_list)

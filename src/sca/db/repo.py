@@ -163,7 +163,7 @@ class Store:
                 .values(id=tenant_id, max_active_tasks=self.default_max_active_tasks)
                 .on_conflict_do_nothing(index_elements=[tenants.c.id])
             )
-            quota = await session.scalar(
+            await session.scalar(
                 select(tenants.c.max_active_tasks)
                 .where(tenants.c.id == tenant_id)
                 .with_for_update()
@@ -186,10 +186,14 @@ class Store:
             active = await session.scalar(
                 select(func.count())
                 .select_from(tasks)
-                .where(tasks.c.tenant_id == tenant_id, tasks.c.state.not_in(TERMINAL_STATES))
+                .where(tasks.c.tenant_id == tenant_id, tasks.c.state == TaskState.QUEUED)
             )
-            if active >= quota:
-                raise QuotaExceededError("Active task quota exceeded")
+            from sca.config import get_settings
+
+            if active >= get_settings().tenant_max_queued:
+                raise QuotaExceededError("Queued task backlog exceeded")
+            if spec.get("priority", "interactive") not in ("interactive", "eval", "batch"):
+                raise ValueError("Invalid admission priority")
             stmt = pg_insert(tasks).values(
                 id=uuid4(),
                 tenant_id=tenant_id,
@@ -218,6 +222,61 @@ class Store:
                 return Task.model_validate(dict(row)), False
             await self._event(session, row["id"], "task.created", {"spec": spec, "actor": actor})
             return Task.model_validate(dict(row)), True
+
+    async def acquire_slot(self, task_id: str, maximum: int, saturated: bool = False) -> dict:
+        """Worker-only global scheduling; never call using the RLS API role."""
+        from collections import Counter
+
+        from sca.admission.order import grant_order
+
+        if self.tenant_id is not None:
+            raise ValueError("Admission requires the worker store")
+        async with self._transaction() as session:
+            await session.execute(text("SELECT pg_advisory_xact_lock(73421045)"))
+            task = await self._task(session, task_id, True)
+            if task["state"] in TERMINAL_STATES:
+                return {"granted": False, "terminal": True}
+            if task["slot_held"]:
+                return {"granted": True}
+            if task["slot_requested_at"] is None:
+                task = (await session.execute(update(tasks).where(tasks.c.id == task["id"])
+                    .values(slot_requested_at=func.now(), slot_generation=tasks.c.slot_generation + 1)
+                    .returning(tasks))).mappings().one()
+            held = Counter((await session.execute(select(tasks.c.tenant_id).where(
+                tasks.c.slot_held))).scalars().all())
+            quotas = (await session.execute(select(tenants))).mappings().all()
+            weights = {r["id"]: r["weight"] for r in quotas}
+            limits = {r["id"]: r["max_active_tasks"] for r in quotas}
+            candidates = (await session.execute(select(tasks).where(
+                tasks.c.slot_requested_at.is_not(None), ~tasks.c.slot_held,
+                tasks.c.state.not_in(TERMINAL_STATES)))).mappings().all()
+            ordered = sorted(candidates, key=lambda r: grant_order(dict(r), held, weights))
+            eligible = [r for r in ordered if held[r["tenant_id"]] < limits[r["tenant_id"]]]
+            position = next(i + 1 for i, r in enumerate(ordered) if r["id"] == task["id"])
+            reason = ("gateway_pressure" if saturated else "global_limit"
+                      if sum(held.values()) >= maximum else "tenant_limit"
+                      if held[task["tenant_id"]] >= limits[task["tenant_id"]] else "fair_order")
+            key = f"admission.{task['slot_generation']}"
+            if not saturated and sum(held.values()) < maximum and eligible and eligible[0]["id"] == task["id"]:
+                waited = (datetime.now(UTC) - task["slot_requested_at"]).total_seconds()
+                await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+                    slot_held=True, state_reason=None,
+                    result={**task["result"], "admission": {"granted": True}}))
+                await self._event(session, task["id"], "admission.granted",
+                                  {"wait_seconds": waited}, key + ".granted")
+                return {"granted": True, "wait_seconds": waited}
+            await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+                result={**task["result"], "admission": {"position": position, "reason": reason}}))
+            await self._event(session, task["id"], "admission.waiting",
+                              {"position": position, "reason": reason}, key + ".waiting")
+            return {"granted": False, "position": position, "reason": reason}
+
+    async def release_slot(self, task_id: str) -> None:
+        async with self._transaction() as session:
+            row = await self._task(session, task_id, True)
+            await session.execute(update(tasks).where(tasks.c.id == row["id"]).values(
+                slot_held=False, slot_requested_at=None,
+                result={**row["result"], "admission": {}}))
 
     async def get_task(self, task_id: str | UUID, tenant_id: str | None = None) -> Task:
         async with self._transaction() as session:
@@ -255,7 +314,11 @@ class Store:
                     await session.execute(
                         update(tasks)
                         .where(tasks.c.id == row["id"])
-                        .values(state=new_state, state_reason=reason, updated_at=func.now())
+                        .values(state=new_state, state_reason=reason, updated_at=func.now(),
+                                **({"slot_held": False, "slot_requested_at": None,
+                                    "result": {**row["result"], "admission": {}}}
+                                   if new_state in TERMINAL_STATES | {TaskState.AWAITING_REVIEW, TaskState.PAUSED}
+                                   else {}))
                         .returning(tasks)
                     )
                 )
@@ -840,6 +903,15 @@ class Store:
 
         async with self._transaction() as session:
             await session.execute(pg_insert(eval_runs).values(**run).on_conflict_do_nothing())
+
+    async def start_eval_run(self, run_id: str) -> None:
+        from sca.db.schema import eval_runs
+
+        async with self._transaction() as session:
+            await session.execute(update(eval_runs).where(
+                eval_runs.c.id == task_uuid(run_id), eval_runs.c.tenant_id == 'eval',
+                eval_runs.c.status == 'queued',
+            ).values(status='running'))
 
     async def finish_eval_run(self, run_id: str, status: str) -> None:
         from sca.db.schema import eval_runs

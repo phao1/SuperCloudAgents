@@ -1,0 +1,14 @@
+"""Synthetic success trace from pi 1.5.2 package docs/json.md; not a live model run."""
+
+TRANSCRIPT = '''{"type":"session","id":"fixture","version":3}
+{"type":"tool_execution_start","toolCallId":"a","toolName":"bash","args":{"command":"pwd"}}
+{"type":"tool_execution_end","toolCallId":"a","toolName":"bash","result":{"content":[{"type":"text","text":"/workspace"}]},"isError":false,"durationMs":3}
+{"type":"tool_execution_start","toolCallId":"b","toolName":"edit","args":{"path":"app.py","edits":[{"oldText":"a-b","newText":"a+b"}]}}
+{"type":"tool_execution_end","toolCallId":"b","toolName":"edit","result":{"content":[{"type":"text","text":"Edited"}]},"isError":false}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"Fixed"}],"stopReason":"stop","usage":{"input":10,"output":2,"cacheRead":3,"cacheWrite":1,"cost":{"total":0.001}}}}
+{"type":"agent_end","messages":[],"willRetry":false}
+{"type":"agent_settled","aborted":false}'''
+
+# Recorded pi 1.5.2 host run against http://127.0.0.1:1/v1, no real credential.
+# Selected records retain the real error, usage, session and settled event shapes.
+REAL_FAILURE_TRANSCRIPT = '{"type":"session","version":3,"id":"fixture","timestamp":"2026-11-18T05:12:07.623Z","cwd":"/tmp/sca-pi-record-3qe9ea1t/work"}\n{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"sca","model":"fixture","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794978727754,"errorMessage":"Connection error.: bad port","durationMs":23,"thinkingLevel":"off"}}\n{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"sca","model":"fixture","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794978729788,"errorMessage":"Connection error.: bad port","durationMs":7,"thinkingLevel":"off"}}\n{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"sca","model":"fixture","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794978733801,"errorMessage":"Connection error.: bad port","durationMs":2,"thinkingLevel":"off"}}\n{"type":"message_end","message":{"role":"assistant","content":[],"api":"openai-completions","provider":"sca","model":"fixture","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"error","timestamp":1794978741812,"errorMessage":"Connection error.: bad port","durationMs":1,"thinkingLevel":"off"}}\n{"type":"agent_settled","aborted":false}'

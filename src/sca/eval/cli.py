@@ -3,7 +3,7 @@
 import asyncio
 import json
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import typer
 from temporalio.client import Client
@@ -12,6 +12,7 @@ from sca.config import get_settings
 from sca.db.engine import make_engine, make_sessionmaker
 from sca.db.repo import Store
 from sca.eval.compare import compare, markdown
+from sca.eval.suites import load_suite
 from sca.eval.workflow import EvalRunWorkflow
 
 app = typer.Typer(no_args_is_help=True)
@@ -39,6 +40,16 @@ async def start(suite: Path, model: str | None, prompt_version: str | None, repe
     request = {"id": run_id, "suite": str(suite.resolve()), "variant": variant,
                "repeat": repeat, "concurrency": concurrency, "budget": budget,
                "case_budget": case_budget}
+    loaded = await asyncio.to_thread(load_suite, suite)
+    engine = make_engine(settings.database_url)
+    try:
+        await Store(make_sessionmaker(engine)).for_tenant("eval").create_eval_run({
+            "id": UUID(run_id), "tenant_id": "eval", "suite": loaded["name"],
+            "suite_hash": loaded["hash"], "variant": request,
+            "created_by": "cli", "status": "queued",
+        })
+    finally:
+        await engine.dispose()
     client = await Client.connect(settings.temporal_address, namespace=settings.temporal_namespace)
     handle = await client.start_workflow(EvalRunWorkflow.run, request, id=f"eval-{run_id}",
                                          task_queue=settings.task_queue)

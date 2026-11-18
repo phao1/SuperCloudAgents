@@ -47,6 +47,7 @@ html{min-height:100%}body{position:relative;min-height:100vh}body:before{content
 </label>
 <label>后端<select id="backend">
 <option value="opencode">OpenCode</option>
+<option value="pi">pi</option>
 <option value="codex">Codex</option>
 </select>
 </label>
@@ -243,7 +244,7 @@ async function loadConfig(){
   $('health').textContent='✓ API 已连接 · 配置已读取 · '+(c.default_model||'模型由运行指定');
   if(!$('model').value)$('model').value=c.default_model;
   options('models',c.models,x=>x,x=>x);
-  options('backend',c.agent_backends,x=>x,x=>({opencode:'OpenCode',codex:'Codex',fake:'脚本后端'})[x]||x)
+  options('backend',[...new Set([...c.agent_backends,'pi'])],x=>x,x=>({opencode:'OpenCode',codex:'Codex',fake:'脚本后端'})[x]||x)
 }
 async function loadSuites(){
   const first=!suites.length;
@@ -266,7 +267,7 @@ function runBody(){
   const variant={
     agent_backend:$('backend').value
   };
-  for(const [key,id] of [['agent_version','version'],['model','model'],['prompt_version','prompt-version']])if($(id).value)variant[key]=$(id).value;
+  for(const [key,id] of [['agent_version','version'],['model','model'],['prompt_version','prompt-version']])if($(id).value&&(key!=='agent_version'||variant.agent_backend!=='pi'))variant[key]=$(id).value;
   return {
     suite:$('suite').value,variant,repeat:Number($('repeat').value),concurrency:Number($('concurrency').value),budget:Number($('budget').value),case_budget:Number($('case-budget').value)
   }
@@ -451,7 +452,7 @@ async function updateTask(){
       if(batch.length<500)break
     }
     if(selectedTask!==id)return;
-    $('task-title').textContent=t.id+' · '+t.state;
+    $('task-title').textContent=t.id+' · '+(t.result?.admission?.position?'排队中（第 '+t.result.admission.position+' 位）':t.state);
     $('task-summary').textContent=json({
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
     });
@@ -517,7 +518,7 @@ async function updateFlow(){
     step=4;
     // The comparison route owns its selected pair.
   }
-  $('flow-status').textContent=build?'构建 '+build.version+' · '+statusText(build.status):t?'修复任务：'+t.id+' · '+statusText(t.state):'从失败用例打开轨迹，填写诊断后发起修复。';
+  $('flow-status').textContent=build?'构建 '+build.version+' · '+statusText(build.status):t?'修复任务：'+t.id+' · '+(t.result?.admission?.position?'排队中（第 '+t.result.admission.position+' 位）':statusText(t.state)):'从失败用例打开轨迹，填写诊断后发起修复。';
   $('stepper').replaceChildren(...['评测','定位','修复','构建','回归'].map((s,i)=>{
     const n=el('a',(i+1)+' '+s,'step'+(i===step?' active':i<step?' done':''));
     n.href=[flow.oldRun?'#/runs/'+enc(flow.oldRun):'#/evals',flow.failedTask?'#/tasks/'+enc(flow.failedTask):'#/evals',flow.fixTask?'#/tasks/'+enc(flow.fixTask):'#/loop','#/loop/build',flow.newRun?'#/compare/'+flow.oldRun+'/'+flow.newRun:'#/evals'][i];
@@ -635,7 +636,7 @@ function buildSpans(events){
   return {measured,spans:selected.map((e,i)=>{const p=e.payload||{},timed=Number.isFinite(p.started_at_ms)&&Number.isFinite(p.ended_at_ms),observed=Date.parse(e.created_at);const start=measured?(timed?p.started_at_ms:Number.isFinite(observed)?observed:0):i;const end=measured?(timed?(e.type==='agent.usage'&&Number.isFinite(p.model_call_duration_ms)?start+p.model_call_duration_ms:p.ended_at_ms):start):i+0.7;return {event:e,lane:lanes[e.type],start,end:Math.max(start,end),timed}})};
 }
 function renderTaskObservability(t){
-  $('task-title').textContent=t.id+' · '+statusText(t.state);
+  $('task-title').textContent=t.id+' · '+(t.result?.admission?.position?'排队中（第 '+t.result.admission.position+' 位）':statusText(t.state));
   const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(Date.parse(t.updated_at)-Date.parse(t.created_at))/1000;
   $('task-metrics').replaceChildren(metric('准 · 总通过率',acceptance?(acceptance.payload.passed?'✓ 通过':'✕ 失败'):'待验收','验证 '+(verify?(verify.payload.passed?'✓ 通过':'✕ 失败'):'待执行')),metric('快 · 任务时长',Number.isFinite(elapsed)?elapsed.toFixed(1)+' 秒':'—','从任务创建至最近更新'),metric('稳 · 事件异常',diagnostics(taskEvents).filter(x=>x.title.includes('退出')).length,'单任务无法证明重复一致性'),metric('省 · 事件费用',usage.cost===undefined?'—':money(usage.cost),'输入 '+(usage.input_tokens??'—')+' / 输出 '+(usage.output_tokens??'—')+' / 缓存 '+(usage.cached_input_tokens??'—')));
   renderSwimlane(taskEvents);

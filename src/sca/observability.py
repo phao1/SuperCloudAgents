@@ -122,6 +122,10 @@ class BusinessMetrics:
         from prometheus_client import REGISTRY
 
         registry = registry if registry is not None else REGISTRY
+        self.admission_wait = Histogram(
+            "sca_admission_wait_seconds", "Run slot wait time",
+            buckets=(1, 5, 10, 30, 60, 300, 900, 3600), registry=registry,
+        )
         self.duration = Histogram(
             "sca_task_duration_seconds",
             "Task lifetime",
@@ -145,6 +149,10 @@ class BusinessMetrics:
             "Verification outcomes",
             ["kind", "passed"],
             registry=registry,
+        )
+        self.sandbox_activity = Histogram(
+            "sca_sandbox_activity_ratio", "Unfrozen sandbox time / lifetime", ["kind"],
+            buckets=(0, .1, .25, .5, .75, .9, 1), registry=registry,
         )
         self.sandbox_create = Histogram(
             "sca_sandbox_create_seconds", "Sandbox creation time", ["driver"], registry=registry

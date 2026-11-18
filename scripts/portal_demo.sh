@@ -181,6 +181,7 @@ SQL
     compose up -d --wait
     run .venv/bin/alembic upgrade head
     run "$SCA_DOCKER_BIN" build -t sca-sandbox:latest deploy/sandbox
+    run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
     # TLS-inspecting egress proxy for restricted sandboxes (see docs/design-phase4.md).
     run "$SCA_DOCKER_BIN" build -t sca-egress:tls-v1 deploy/egress
     mkdir -p .data/tools/bun-linux-x64

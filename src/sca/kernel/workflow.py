@@ -46,6 +46,7 @@ class TaskWorkflow:
         self._reviews: list[tuple[str, str | None]] = []
         self._pause_requested = False
         self._sandbox_up = False
+        self._admission = False
         self._extension_signals: dict[tuple[str, str], tuple[str, list[Any]]] = {}
 
     async def _extension_signal(self, name: str, key: str, args: list[Any]) -> None:
@@ -91,6 +92,21 @@ class TaskWorkflow:
             raise
         finally:
             await self._destroy_sandbox(task_id)
+            if self._admission:
+                await workflow.execute_activity("release_slot", task_id, **_QUICK)
+
+    async def _acquire_slot(self, task_id: str) -> None:
+        if not self._admission:
+            return
+        delay = 1.0
+        while True:
+            result = await workflow.execute_activity("acquire_slot", task_id, **_QUICK)
+            if result.get("granted"):
+                return
+            if result.get("terminal"):
+                raise ApplicationError("Task is terminal", non_retryable=True)
+            await workflow.sleep(delay * workflow.random().uniform(0.8, 1.0))
+            delay = min(10.0, delay * 2)
 
     async def _finish(self, task_id: str, state: str, reason: str) -> None:
         try:
@@ -120,6 +136,7 @@ class TaskWorkflow:
             self._sandbox_up = False
 
     async def _restore_sandbox(self, task_id: str, turn: int) -> None:
+        await self._acquire_slot(task_id)
         if not self._sandbox_up:
             await workflow.execute_activity(
                 "restore_sandbox",
@@ -142,6 +159,8 @@ class TaskWorkflow:
         max_fixes: int = spec["max_fix_attempts"]
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
 
+        self._admission = spec.get("_admission", False)
+        await self._acquire_slot(task_id)
         await self._set_state(task_id, "PROVISIONING")
         hooks = spec["hooks"]
         extension = {}
@@ -291,6 +310,8 @@ class TaskWorkflow:
                     start_to_close_timeout=turn_timeout + timedelta(minutes=10),
                     heartbeat_timeout=timedelta(minutes=5), retry_policy=_retry(3),
                 )
+            # The slot follows the sandbox: a prompt review keeps both, the idle timer below
+            # releases both (release_sandbox frees the slot).
             await self._set_state(task_id, "AWAITING_REVIEW")
             if spec.get("auto_finish"):
                 state = "SUCCEEDED" if passed and not unresolved else "FAILED"

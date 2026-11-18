@@ -28,6 +28,7 @@ from sca.core.interfaces import (
     ObjectStore,
     SandboxProvider,
     SecretProvider,
+    unpause_sandbox,
 )
 from sca.core.models import (
     TERMINAL_STATES,
@@ -162,6 +163,8 @@ class KernelActivities:
         """The kernel's activities. Registered once per worker, whatever kinds exist."""
         return [
             self.load_task,
+            self.acquire_slot,
+            self.release_slot,
             self.run_acceptance,
             self.render_initial_prompt,
             self.render_fix_prompt,
@@ -243,7 +246,8 @@ class KernelActivities:
             from sca.workspace.overlay import OverlayWorkspace
 
             return OverlayWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache,
-                                    image=self.settings.sandbox_image)
+                                    image=self.settings.sandbox_image,
+                                    docker_bin=self.settings.docker_bin)
         return GitWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache)
 
     def _agent_ctx(self, task_id: str, spec: ExecutionSpec) -> AgentContext:
@@ -259,12 +263,14 @@ class KernelActivities:
         sandbox_id = task.result.get("sandbox_id")
         if not sandbox_id:
             raise ApplicationError("task has no sandbox", non_retryable=True)
+        await unpause_sandbox(self.sandbox, sandbox_id)
         return sandbox_id
 
     async def _run(
         self, sandbox_id: str, argv: list[str], timeout_s: float
     ) -> tuple[ExecExit, str]:
         """Run a command in the sandbox and capture its combined output."""
+        await unpause_sandbox(self.sandbox, sandbox_id)
         chunks: list[str] = []
         size = 0
         exit_event = ExecExit(exit_code=-1)
@@ -296,6 +302,7 @@ class KernelActivities:
                 **spec,
                 "_kind": (await self.store.get_task(task_id)).kind,
                 "_versioned_prompts": True,
+                "_admission": True,
                 "memory_enabled": spec.get("memory_enabled") is not False,
                 "prompt_version": selected_version,
                 "hooks": asdict(get((await self.store.get_task(task_id)).kind).hooks),
@@ -502,6 +509,21 @@ class KernelActivities:
         )
 
     @activity.defn
+    async def acquire_slot(self, task_id: str) -> dict:
+        from sca.admission.pressure import gateway_pressure
+
+        result = await self.store.acquire_slot(
+            task_id, self.settings.max_running_tasks, await gateway_pressure())
+        if "wait_seconds" in result:
+            with metric_guard():
+                business_metrics.admission_wait.observe(result["wait_seconds"])
+        return result
+
+    @activity.defn
+    async def release_slot(self, task_id: str) -> None:
+        await self.store.release_slot(task_id)
+
+    @activity.defn
     async def set_state(self, inp: SetStateInput) -> None:
         try:
             previous_state = None
@@ -537,7 +559,9 @@ class KernelActivities:
     async def release_sandbox(self, inp: StepInput) -> None:
         """Free the sandbox of an idle task. Workspace and session history stay on disk."""
         sandbox_id = await self._sandbox_id(inp.task_id)
+        await self._record_sandbox_activity(inp.task_id)
         await self.sandbox.destroy(sandbox_id)
+        await self.store.release_slot(inp.task_id)
         await self.store.append_event(
             inp.task_id,
             EventType.SANDBOX_RELEASED,
@@ -603,7 +627,7 @@ class KernelActivities:
             cache_root = self.settings.data_dir.resolve() / "cache"
             cache_mounts, cache_env = [pip_cache_mount(cache_root, tenant)], PIP_CACHE_ENV
         sandbox_spec = SandboxSpec(
-            image=spec.image or self.settings.sandbox_image,
+            image=spec.image or getattr(backend, "sandbox_image", None) or self.settings.sandbox_image,
             mounts=[
                 *self.transport.mounts(self._task_dir(task_id)),
                 *additions.mounts,
@@ -624,8 +648,12 @@ class KernelActivities:
                 business_metrics.sandbox_create.labels(self.settings.sandbox_driver).observe(
                     time.monotonic() - started
                 )
+        await unpause_sandbox(self.sandbox, sandbox_id)
         await self.transport.push(sandbox_id, self._task_dir(task_id))
-        await self.store.update_result(task_id, {"sandbox_id": sandbox_id})
+        task = await self.store.get_task(task_id)
+        opened = task.result.get("sandbox_opened_at") or time.time()
+        await self.store.update_result(task_id, {"sandbox_id": sandbox_id,
+                                                 "sandbox_opened_at": opened})
         return sandbox_id, sandbox_spec.image
 
     async def _setup_command(self, task_id: str, spec: ExecutionSpec) -> str:
@@ -636,10 +664,22 @@ class KernelActivities:
     @activity.defn
     async def run_setup(self, task_id: str) -> None:
         if await self._ensure_state(task_id):
+            await self.store.update_result(task_id, {"workspace_forked": False})
             await self.sandbox.destroy(await self._sandbox_id(task_id))
             await self._create_sandbox(task_id)
         spec = await self._spec(task_id)
         sandbox_id = await self._sandbox_id(task_id)
+        task = await self.store.get_task(task_id)
+        owner = self.scenarios.get(task.kind, self)
+        skip = getattr(owner, "_forked_setup", None)
+        if skip is not None and await skip(task_id, sandbox_id):
+            await self.store.append_event(
+                task_id, EventType.SETUP_COMPLETED,
+                {"skipped": True, "exit_code": 0, "snapshot_id": task.result.get("snapshot_id")},
+                dedup_key="setup.completed",
+            )
+            return
+        setup_started = time.monotonic()
         exit_event, output = await self._run(
             sandbox_id, ["bash", "-lc", await self._setup_command(task_id, spec)], timeout_s=14 * 60
         )
@@ -651,7 +691,9 @@ class KernelActivities:
                 "exit_code": exit_event.exit_code,
                 "timed_out": exit_event.timed_out,
                 "output_tail": tail(output),
+                "skipped": False,
             },
+            dedup_key="setup.completed",
         )
         if exit_event.exit_code != 0:
             raise ApplicationError(
@@ -660,6 +702,9 @@ class KernelActivities:
                 non_retryable=True,
             )
 
+        after_setup = getattr(owner, "_snapshot_after_setup", None)
+        if after_setup is not None:
+            await after_setup(task_id, sandbox_id, time.monotonic() - setup_started)
         ws = self._workspace(task_id)
         if hasattr(ws, "volume"):
             from sca.workspace.layers import disk_bytes
@@ -763,6 +808,10 @@ class KernelActivities:
                 if ev.type == AgentEventType.TURN_COMPLETED:
                     final_message = ev.data.get("final_message", "")
                     continue
+                if ev.type == AgentEventType.USAGE and ev.data.get("summary") == "sandbox_transition":
+                    await self.store.append_event(task_id, "sandbox.transition", ev.data,
+                                                  dedup_key=f"{key}.{n}.suspend")
+                    continue
                 if ev.type == AgentEventType.USAGE:
                     await self.store.add_usage(
                         task_id, {k: v for k, v in ev.data.items() if isinstance(v, int)}
@@ -791,6 +840,9 @@ class KernelActivities:
             )
             turn_error = e
         finally:
+            if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
+                await self.store.append_event(task_id, "sandbox.transition",
+                    {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
             if self.gateway:
                 finalize = getattr(self.gateway, "finalize_key", None)
                 if finalize is not None:
@@ -837,11 +889,55 @@ class KernelActivities:
             )
         return reason
 
+    async def _record_sandbox_activity(self, task_id: str) -> None:
+        task = await self.store.get_task(task_id)
+        opened = task.result.get("sandbox_opened_at")
+        if opened is None:
+            return
+        events = await self.store.list_events(task_id, limit=1000000)
+        key = str(opened)
+        previous = {e.payload["segment"]: e.payload for e in events
+                    if e.type == "sandbox.activity" and "segment" in e.payload}
+        if key not in previous:
+            alive = max(0.0, time.time() - opened)
+            transitions = [e.payload for e in events if e.type == "sandbox.transition"
+                           and opened <= e.payload.get("at", 0) <= opened + alive]
+            suspended = 0.0
+            paused_at = None
+            for transition in sorted(transitions, key=lambda p: p["at"]):
+                if transition["paused"] and paused_at is None:
+                    paused_at = transition["at"]
+                elif not transition["paused"] and paused_at is not None:
+                    suspended += transition["at"] - paused_at
+                    paused_at = None
+            if paused_at is not None:
+                suspended += opened + alive - paused_at
+            if not transitions:
+                suspended = sum(e.payload.get("sandbox_suspended_s", 0) for e in events
+                                if e.type == EventType.AGENT_USAGE
+                                and e.created_at.timestamp() >= opened)
+            payload = {"segment": key, "sandbox_alive_s": alive,
+                       "sandbox_active_s": max(0.0, alive - suspended),
+                       "sandbox_activity_ratio": max(0.0, alive - suspended) / alive if alive else 0.0}
+            await self.store.append_event(task_id, "sandbox.activity", payload,
+                                          dedup_key=f"sandbox.activity.{key}")
+            previous[key] = payload
+        alive = sum(p["sandbox_alive_s"] for p in previous.values())
+        active = sum(p["sandbox_active_s"] for p in previous.values())
+        ratio = active / alive if alive else 0.0
+        await self.store.update_result(task_id, {"sandbox_alive_s": alive,
+            "sandbox_active_s": active, "sandbox_activity_ratio": ratio,
+            "sandbox_opened_at": None})
+        with metric_guard():
+            business_metrics.sandbox_activity.labels(task.kind).observe(ratio)
+
     @activity.defn
     async def destroy_sandbox(self, task_id: str) -> None:
         sandbox_id = f"sca-{sandbox_name(task_id)}"
         with contextlib.suppress(NotFoundError):
             sandbox_id = (await self.store.get_task(task_id)).result.get("sandbox_id", sandbox_id)
+        with contextlib.suppress(NotFoundError):
+            await self._record_sandbox_activity(task_id)
         await self.sandbox.destroy(sandbox_id)
         ws = self._workspace(task_id)
         if hasattr(ws, "remove_volume") and (ws.task_dir / "workspace.overlay").exists():

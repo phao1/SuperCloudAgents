@@ -74,12 +74,18 @@ class Settings(BaseSettings):
     openbao_prefix: str = "sca/tenants"
 
     workspace_overlay: bool = False
+    workspace_snapshots: bool = False
+    snapshot_retention_hours: float = Field(default=24, ge=0)
+    snapshot_max_bytes: int = Field(default=8 * 1024**3, ge=1)
     workspace_layers: bool = False
     layer_retention_hours: float = Field(default=24, ge=0)
     repo_cache: bool = True
     pip_cache: bool = True
 
     # How long a task may wait for review before its sandbox is released.
+    tenant_max_queued: int = Field(default=1000, ge=1)
+    max_running_tasks: int = Field(default=4, ge=1)
+
     review_idle_release_s: int = 600
     # A turn whose worker stops heartbeating for this long is retried on another worker.
     turn_heartbeat_timeout_s: int = 120
@@ -98,6 +104,9 @@ class Settings(BaseSettings):
     k8s_blocked_cidrs: list[str] = []
 
     docker_bin: str = "docker"
+    sandbox_handd: bool = False
+    sandbox_suspend_idle: bool = False
+    sandbox_suspend_idle_min_s: float = Field(default=2, gt=0)
     sandbox_image: str = "sca-sandbox:latest"
     sandbox_cpus: float = 1.5
     sandbox_memory_mb: int = 1536
@@ -120,6 +129,40 @@ class Settings(BaseSettings):
     model_gateway_port: int = 4000
     model_gateway_master_key: str = ""
     model_gateway_turn_budget_usd: float = 1.0
+    gateway_limiter: bool = False
+    gateway_limiter_port: int = Field(default=4100, ge=1, le=65535)
+    gateway_limiter_container: str = "sca-gateway-limiter"
+    gateway_limiter_url: str | None = None
+    gateway_queue_timeout_s: float = Field(default=120, gt=0)
+    gateway_pressure_file: Path | None = None
+    gateway_pressure_depth: int = Field(default=50, ge=1)
+    gateway_pressure_wait_s: float = Field(default=5, gt=0)
+    gateway_rpm: float = Field(default=600, gt=0)
+    gateway_tpm: float = Field(default=1000000, gt=0)
+    gateway_tenant_rpm: float = Field(default=600, gt=0)
+    gateway_tenant_tpm: float = Field(default=1000000, gt=0)
+    gateway_key_rpm: float = Field(default=60, gt=0)
+    gateway_key_tpm: float = Field(default=100000, gt=0)
+    gateway_model_limits: dict[str, dict[str, float]] = {}
+    # Only for isolated fake-model tests: explicit virtual key -> tenant mapping.
+    gateway_test_keys: dict[str, str] = {}
+
+    @model_validator(mode="after")
+    def limiter_defaults(self) -> Settings:
+        self.gateway_pressure_file = (self.gateway_pressure_file or
+                                      self.data_dir / "run" / "gateway-pressure.json")
+        for limits in self.gateway_model_limits.values():
+            if any(k not in {"rpm", "tpm"} or v <= 0 for k, v in limits.items()):
+                raise ValueError("model limits require positive rpm/tpm")
+        self.gateway_limiter_url = (self.gateway_limiter_url or
+                                    f"http://127.0.0.1:{self.gateway_limiter_port}")
+        if self.gateway_limiter:
+            self.model_gateway_container = self.gateway_limiter_container
+            self.model_gateway_port = self.gateway_limiter_port
+            self.opencode_brain_gateway_url = (self.opencode_brain_gateway_url or
+                                              self.gateway_limiter_url.rstrip("/") + "/v1")
+        return self
+
     codex_bin_dir: Path | None = None
     codex_auth_file: Path = Path("~/.codex/auth.json")
 
@@ -138,6 +181,8 @@ class Settings(BaseSettings):
     opencode_src_cache: Path | None = None
     opencode_build_image: str = "oven/bun:1.4.4"
     opencode_build_memory: str = "2500m"
+    pi_sandbox_image: str = "sca-sandbox-pi:latest"
+    pi_version: str = "1.5.2"
     opencode_sandbox_image: str = "sca-sandbox-opencode:latest"
     eval_suites_dir: Path = Path("evals")
 

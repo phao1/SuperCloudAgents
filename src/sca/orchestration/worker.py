@@ -60,6 +60,10 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
 
         return OpenCodeBackend(settings.opencode_versions_dir,
                                settings.opencode_default_version, settings.default_model)
+    if settings.agent_backend == "pi":
+        from sca.agents.pi import PiBackend
+
+        return PiBackend(settings.default_model, settings.pi_version, settings.pi_sandbox_image)
     if settings.agent_backend == "codex":
         from sca.agents.codex import CodexBackend
 
@@ -135,7 +139,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         await maintenance.replenish_sandbox_pool()  # do not wait an hour for a warm pool
     kernel = KernelActivities(**{f: getattr(deps, f) for f in deps.__dataclass_fields__})
     backends = {settings.agent_backend: deps.agent}
-    for name in ("fake", "codex", "opencode", "opencode-brain"):
+    for name in ("fake", "codex", "opencode", "opencode-brain", "pi"):
         if name not in backends:
             try:
                 backends[name] = make_agent_backend(settings.model_copy(update={"agent_backend": name}))

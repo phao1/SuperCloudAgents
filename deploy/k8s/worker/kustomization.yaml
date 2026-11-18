@@ -5,3 +5,4 @@ resources:
   - configmap.yaml
   - pdb.yaml
   - hpa.yaml
+  - egress-rbac.yaml

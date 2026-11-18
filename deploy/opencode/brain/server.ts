@@ -6,7 +6,7 @@ import { createServer } from "node:net"
 import { createInterface } from "node:readline"
 import { pathToFileURL } from "node:url"
 import { chmodSync, mkdirSync } from "node:fs"
-import { dockerCommand } from "./driver"
+import { suspension, spawnWithSuspension, IdleSuspension } from "./driver"
 import { turns } from "./turn-provider"
 import type { Context as PluginContext } from "@opencode/plugin/effect/plugin"
 import type { Session } from "@opencode/schema/session"
@@ -14,6 +14,7 @@ import type { Session } from "@opencode/schema/session"
 interface Turn {
   op: "turn"; id: string; prompt: string; model: string; gateway_url: string
   container: string; workdir: string; task_id: string; session_id?: string
+  suspend_idle?: boolean; suspend_idle_min_s?: number
   turn_marker: string; docker_prefix: string[]; model_key: string
 }
 const directory = process.argv[2]!
@@ -36,6 +37,7 @@ const validTurn = (value: unknown): value is Turn => {
     (input.session_id == null || typeof input.session_id === "string")
 }
 const active = new Map<string, Turn>()
+const suspensions = new Map<string, IdleSuspension>()
 const running = new Map<string, AbortController>()
 const output = new AsyncLocalStorage<(line: string) => void>()
 // The upstream renderer writes JSON to stdout. Route only its async context to its socket.
@@ -54,10 +56,11 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     connect: ({ workspaceID }: { workspaceID: string }) => Effect.succeed({
       spawner: Spawner.make((command) => {
         const turn = active.get(workspaceID)
-        return turn && !running.get(turn.id)?.signal.aborted ? local.spawn(dockerCommand(command, turn)) : Effect.die("Inactive brain workspace")
+        const idle = suspensions.get(workspaceID)
+        return turn && idle && !running.get(turn.id)?.signal.aborted ? spawnWithSuspension(local, command, turn, idle) : Effect.die("Inactive brain workspace")
       }),
     }),
-    suspendForIdle: () => Effect.void, destroy: () => Effect.void,
+    suspendForIdle: ({ workspaceID }: { workspaceID: string }) => Effect.sync(() => suspensions.get(workspaceID)?.idle()), destroy: () => Effect.void,
   }
   const host = yield* Effect.acquireRelease(EmbeddedHost.create({
     database: { path: `${directory}/brain.sqlite` }, workspaceProviders: { sca: driver },
@@ -93,6 +96,11 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
     const controller = new AbortController()
     running.set(input.id, controller); active.set(workspaceID, input); turns.set(workspaceID, input)
     controller.signal.addEventListener("abort", () => turns.delete(workspaceID), { once: true })
+    const idle = suspension(input, (paused) => emit({
+      id: input.id, sca_suspend_transition: true, paused, at: Date.now() / 1000,
+    }))
+    suspensions.set(workspaceID, idle); idle.idle()
+    controller.signal.addEventListener("abort", () => { void idle.close().catch(() => {}) }, { once: true })
     let failed = false
     try {
       const args = ["inspect", "--format", "{{.HostConfig.NetworkMode}}", input.container]
@@ -141,6 +149,9 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       failed = true
       emit({ id: input.id, type: "error", error: { message: "Brain turn failed" } })
     } finally {
+      try { emit({ id: input.id, sca_suspend: true, suspended_s: await idle.close() }) }
+      catch { failed = true }
+      suspensions.delete(workspaceID)
       running.delete(input.id); active.delete(workspaceID); turns.delete(workspaceID)
       emit({ id: input.id, done: true, exit_code: failed || controller.signal.aborted ? 1 : 0 })
       process.exitCode = 0

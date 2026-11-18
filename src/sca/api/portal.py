@@ -63,6 +63,7 @@ async def config(request: Request,
         pass
     else:
         backends.extend(["opencode", "opencode-brain"])
+    backends.append("pi")
     return {"agent_backends": backends, "default_model": settings.default_model,
             "models": models, "sandbox_driver": settings.sandbox_driver,
             "state_transport": settings.state_transport, "secret_provider": settings.secret_provider,

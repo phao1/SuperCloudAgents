@@ -22,7 +22,7 @@ from typing import ClassVar
 from sca.agents.opencode import parse_opencode_line, validate_version
 from sca.config import Settings, get_settings
 from sca.core.errors import AgentTurnError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, unpause_sandbox
 from sca.core.models import AgentContext, AgentEvent, SandboxAdditions
 
 
@@ -205,8 +205,18 @@ class BrainPool:
                         writer.write((json.dumps({"op": "cancel", "id": request_id}) + "\n").encode())
                         try:
                             await asyncio.wait_for(writer.drain(), 1)
-                        except (OSError, TimeoutError):
-                            pass
+                            if request.get("suspend_idle") is True:
+                                # Do not let a late brain timer freeze kernel cleanup.
+                                async with asyncio.timeout(25):
+                                    while line := await reader.readline():
+                                        reply = json.loads(line)
+                                        if reply.get("id") == request_id and reply.get("done") is True:
+                                            break
+                                    else:
+                                        await self._stop(server)
+                        except (OSError, TimeoutError, ValueError):
+                            if request.get("suspend_idle") is True:
+                                await self._stop(server)
                     writer.close()
                     try:
                         await writer.wait_closed()
@@ -263,6 +273,8 @@ class OpenCodeBrainBackend:
             "task_id": ctx.task_id, "session_id": session_id,
             "docker_prefix": self.docker_prefix,
             "turn_marker": marker,
+            "suspend_idle": self.settings.sandbox_suspend_idle,
+            "suspend_idle_min_s": self.settings.sandbox_suspend_idle_min_s,
         }
 
     def materialize(self, version: str | None) -> Path:
@@ -305,10 +317,16 @@ class OpenCodeBrainBackend:
         return destination
 
     def cleanup_command(self, container: str, marker: str) -> list[str]:
-        script = ('for p in /proc/[0-9]*; do '
-                  'if tr "\\0" "\\n" < "$p/environ" 2>/dev/null | '
-                  'grep -qx "SCA_BRAIN_TURN=$1"; then kill -9 "${p##*/}" 2>/dev/null; fi; done')
-        args = ["exec", container, "sh", "-c", script, "sca-cleanup", marker]
+        script = (
+            "import glob,os,signal,sys\n"
+            "open('/tmp/sca-brain-' + sys.argv[1] + '.cancelled', 'w').close()\n"
+            "for path in glob.glob('/tmp/sca-brain-' + sys.argv[1] + '-*'):\n"
+            " try: os.killpg(int(open(path).read()), signal.SIGKILL)\n"
+            " except (FileNotFoundError,ProcessLookupError): pass\n"
+            " try: os.unlink(path)\n"
+            " except FileNotFoundError: pass\n"
+        )
+        args = ["exec", container, "python3", "-c", script, marker]
         if self.docker_prefix[0] == "sg":
             import shlex
             return [*self.docker_prefix, shlex.join(["docker", *args])]
@@ -383,6 +401,18 @@ class OpenCodeBrainBackend:
                 stream = records()
                 try:
                     async for raw in stream:
+                        if raw.get("sca_suspend_transition") is True:
+                            at = raw.get("at")
+                            if isinstance(raw.get("paused"), bool) and isinstance(at, (int, float)):
+                                yield AgentEvent(type="usage", data={"summary": "sandbox_transition",
+                                    "paused": raw["paused"], "at": at})
+                            continue
+                        if raw.get("sca_suspend") is True:
+                            value = raw.get("suspended_s", 0)
+                            if isinstance(value, (int, float)) and 0 <= value <= timeout_s:
+                                yield AgentEvent(type="usage", data={
+                                    "summary": "sandbox_suspend", "sandbox_suspended_s": value})
+                            continue
                         text = json.dumps(raw).replace(json.dumps(ctx.model_api_key)[1:-1], "[redacted]")
                         raw = json.loads(text)
                         if not seen and isinstance(raw.get("sessionID"), str):
@@ -412,6 +442,8 @@ class OpenCodeBrainBackend:
                 except ProcessLookupError:
                     pass
                 await process.wait()
+            if sandbox is not None:
+                await unpause_sandbox(sandbox, sandbox_id)
             cleanup = await asyncio.create_subprocess_exec(
                 *self.cleanup_command(sandbox_id, marker),
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)

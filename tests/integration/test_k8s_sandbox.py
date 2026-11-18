@@ -32,12 +32,13 @@ pytestmark = [pytest.mark.integration, pytest.mark.k8s]
 
 
 @pytest_asyncio.fixture
-async def provider():
+async def provider(tmp_path):
     provider = K8sSandboxProvider(
         str(Path.home() / ".local/bin/kubectl"),
         context="kind-sca",
         namespace=f"sca-test-{uuid4().hex[:12]}",
-        egress_allowlist=["pypi.org", "172.17.0.1"],
+        egress_allowlist=["pypi.org"],
+        egress_ca_dir=tmp_path / "ca",
     )
     try:
         code, _, err = await provider._cli("get", "nodes", "--request-timeout=5s", check=False)
@@ -294,3 +295,20 @@ async def test_pool_concurrent_claims(provider):
     )
     assert first != second
     assert {first, second} == idle
+
+
+async def test_tls_inspection_and_public_bundle(restricted):
+    from sandbox_contract import collect
+    from test_egress_tls import PROBE
+
+    from sca.sandbox.egress import CA_ENV, CA_TARGET
+
+    provider, sid = restricted
+    _, raw, _ = await provider._cli("get", "pod", sid, "-o", "json")
+    pod = json.loads(raw)
+    assert all("secret" not in v for v in pod["spec"]["volumes"])
+    env = {e["name"]: e["value"] for e in pod["spec"]["containers"][0]["env"]}
+    assert all(env[key] == CA_TARGET for key in CA_ENV)
+    address = env["HTTPS_PROXY"].removeprefix("http://").split(":")[0]
+    result = await collect(provider, sid, ["python3", "-c", PROBE, address], timeout_s=150)
+    assert result[-1].exit_code == 0

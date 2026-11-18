@@ -102,6 +102,9 @@ class TaskStateStore:
                 elif dest.exists():
                     shutil.rmtree(dest)
                 (staging / name).replace(dest)
+        if not overlay:
+            # Rebuilding from Git does not restore ignored setup output from a prepared fork.
+            (ws.task_dir / "workspace.snapshot").unlink(missing_ok=True)
         if overlay:
             if "overlay.json" in data:
                 await ws.restore_snapshot(data["overlay.json"])

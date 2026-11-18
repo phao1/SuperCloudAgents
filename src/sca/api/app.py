@@ -3,7 +3,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import APIRouter, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from starlette.exceptions import HTTPException
@@ -16,6 +16,7 @@ from sca.api.auth import (
 )
 from sca.api.authz import ForbiddenError
 from sca.api.routes import router
+from sca.api.tasks_admission import router as admission_router
 from sca.config import get_settings
 from sca.core.errors import AuthError, ConflictError, InvalidTaskError, NotFoundError
 from sca.core.interfaces import Authenticator, ObjectStore, Orchestrator
@@ -160,5 +161,12 @@ def create_app(
     app.include_router(portal_router)
     app.include_router(memories_router)
     app.include_router(files_router)
-    app.include_router(router)
+    app.include_router(admission_router)
+    task_routes = APIRouter()
+    task_routes.routes.extend(
+        route for route in router.routes
+        if not (getattr(route, "path", None) == "/v1/tasks"
+                and "POST" in getattr(route, "methods", set()))
+    )
+    app.include_router(task_routes)
     return app

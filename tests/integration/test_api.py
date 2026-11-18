@@ -270,3 +270,18 @@ async def test_ci_result_is_forwarded_and_refused_for_finished_tasks(api, store)
     assert (await client.post(f"/v1/tasks/{task_id}/ci-result", json={})).status_code == 422
     await store.set_state(task_id, TaskState.CANCELLED)
     assert (await client.post(f"/v1/tasks/{task_id}/ci-result", json=body)).status_code == 409
+
+
+async def test_admission_priority_contract(api):
+    client, _, _ = api
+    body = {"kind": "coding", "spec": {"repo_url": "/tmp/repo", "instruction": "fix it"},
+            "priority": "eval"}
+    response = await client.post("/v1/tasks", json=body)
+    assert response.status_code == 201
+    assert response.json()["spec"]["priority"] == "eval"
+    assert response.json()["state"] == "QUEUED"
+    body["priority"] = "unknown"
+    assert (await client.post("/v1/tasks", json=body)).status_code == 422
+    schema = (await client.get("/openapi.json")).json()
+    submission = schema["components"]["schemas"]["Submission"]
+    assert submission["properties"]["priority"]["default"] == "interactive"

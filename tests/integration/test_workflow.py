@@ -14,6 +14,8 @@ from temporalio.exceptions import ApplicationError
 from temporalio.worker import Worker
 
 from sca.config import get_settings
+from sca.core.models import TaskState
+from sca.db.repo import Store
 from sca.kinds.coding.activities import (
     CheckpointResult,
     CiOutcome,
@@ -45,6 +47,10 @@ pytestmark = pytest.mark.integration
 class Fakes:
     """Scripted activities that record what the workflow asked for."""
 
+    admission_store: Store | None = None
+    admission_blocked: bool = False
+    admission_attempts: int = 0
+    admission_held: bool = False
     plan: str = "none"
     plan_review: bool = False
     plans: list = field(default_factory=list)
@@ -84,6 +90,22 @@ class Fakes:
     def all(self) -> list:
         fakes = self
 
+        @activity.defn(name="acquire_slot")
+        async def acquire_slot(task_id: str) -> dict:
+            fakes.admission_attempts += 1
+            if fakes.admission_store is not None:
+                return await fakes.admission_store.acquire_slot(task_id, 4)
+            if fakes.admission_blocked:
+                return {"granted": False}
+            fakes.admission_held = True
+            return {"granted": True}
+
+        @activity.defn(name="release_slot")
+        async def release_slot(task_id: str) -> None:
+            fakes.admission_held = False
+            if fakes.admission_store is not None:
+                await fakes.admission_store.release_slot(task_id)
+
         @activity.defn(name="load_task")
         async def load_task(task_id: str) -> dict:
             spec = CodingSpec(
@@ -96,11 +118,15 @@ class Fakes:
                 max_fix_attempts=fakes.max_fix_attempts,
             ).model_dump()
             return workflow_spec(
-                {**spec, "ci": fakes.ci, "review_idle_release_s": fakes.review_idle_release_s}
+                {**spec, "_admission": True, "ci": fakes.ci, "review_idle_release_s": fakes.review_idle_release_s}
             )
 
         @activity.defn(name="set_state")
         async def set_state(inp: SetStateInput) -> None:
+            if inp.state in {"AWAITING_REVIEW", "PAUSED", "SUCCEEDED", "FAILED", "CANCELLED"}:
+                fakes.admission_held = False
+            if fakes.admission_store is not None:
+                await fakes.admission_store.set_state(inp.task_id, TaskState(inp.state))
             fakes.states.append(inp.state)
             fakes.reasons.append(inp.reason)
 
@@ -230,6 +256,8 @@ class Fakes:
             fakes.plan_rejections.append(inp.feedback)
 
         return [
+            acquire_slot,
+            release_slot,
             plan_task,
             reject_plan,
             prepare_mirror,
@@ -273,6 +301,11 @@ class Harness:
         )
         self._task = asyncio.create_task(self.worker.run())
         task_id = str(uuid.uuid4())
+        if self.fakes.admission_store is not None:
+            task, _ = await self.fakes.admission_store.create_task(
+                tenant_id="workflow", kind="coding", spec={}, idempotency_key=None)
+            task_id = str(task.id)
+        self.task_id = task_id
         self.handle = await self.client.start_workflow(
             CodingTaskWorkflow.run, task_id, id=f"test-{task_id}", task_queue=self.queue
         )
@@ -405,6 +438,22 @@ async def test_prompt_review_keeps_the_sandbox(client):
         await h.review("approve")
         await h.handle.result()
     assert fakes.released == 0 and fakes.restored == 0
+
+
+async def test_idle_review_releases_slot_and_feedback_reacquires(client):
+    fakes = Fakes(review_idle_release_s=1)
+    async with Harness(client, fakes) as h:
+        await h.wait_state("AWAITING_REVIEW")
+        async with asyncio.timeout(20):
+            while not fakes.released:
+                await asyncio.sleep(0.05)
+        await h.review("request_changes", "more")
+        await h.wait_state("AWAITING_REVIEW", count=2)
+        await h.review("approve")
+        await h.handle.result()
+    assert fakes.released == 1 and fakes.restored == 1
+    assert fakes.admission_attempts >= 3
+    assert not fakes.admission_held
 
 
 async def test_pause_takes_effect_between_turns_and_resume_continues(client):
@@ -618,3 +667,56 @@ async def test_automatic_plan_review(client, decision):
         assert sorted(fakes.child_started) == ["one", "two"]
         await h.review("approve")
         assert await h.handle.result() == "SUCCEEDED"
+
+
+async def test_cancel_during_admission_wait(client):
+    fakes = Fakes(admission_blocked=True)
+    async with Harness(client, fakes) as h:
+        async with asyncio.timeout(20):
+            while not fakes.admission_attempts:
+                await asyncio.sleep(0.05)
+        assert not fakes.states and not fakes.prompts
+        await h.handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await h.handle.result()
+    assert fakes.states == ["CANCELLED"]
+    assert not fakes.admission_held
+
+
+async def test_postgres_review_releases_and_feedback_waits_for_slot(client, store):
+    await store.set_tenant_quota("workflow", 1)
+    fakes = Fakes(admission_store=store, review_idle_release_s=1)
+    async with Harness(client, fakes) as h:
+        await h.wait_state("AWAITING_REVIEW")
+        async with asyncio.timeout(20):
+            while not fakes.released:
+                await asyncio.sleep(0.05)
+        competitor, _ = await store.create_task(
+            tenant_id="workflow", kind="coding", spec={}, idempotency_key=None)
+        assert (await store.acquire_slot(str(competitor.id), 4))["granted"]
+        attempts = fakes.admission_attempts
+        await h.review("request_changes", "more")
+        async with asyncio.timeout(20):
+            while fakes.admission_attempts == attempts:
+                await asyncio.sleep(0.05)
+        assert fakes.restored == 0
+        await store.set_state(competitor.id, TaskState.CANCELLED)
+        await h.wait_state("AWAITING_REVIEW", count=2)
+        assert fakes.restored == 1
+        await h.review("approve")
+        assert await h.handle.result() == "SUCCEEDED"
+    assert (await store.get_task(h.task_id)).state == TaskState.SUCCEEDED
+
+
+async def test_postgres_cancel_while_waiting(client, store):
+    await store.set_tenant_quota("workflow", 0)
+    fakes = Fakes(admission_store=store)
+    async with Harness(client, fakes) as h:
+        async with asyncio.timeout(20):
+            while not fakes.admission_attempts:
+                await asyncio.sleep(0.05)
+        await h.handle.cancel()
+        with pytest.raises(WorkflowFailureError):
+            await h.handle.result()
+    assert (await store.get_task(h.task_id)).state == TaskState.CANCELLED
+    assert not fakes.prompts

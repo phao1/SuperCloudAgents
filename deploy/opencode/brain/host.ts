@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { dockerCommand } from "./driver"
+import { suspension, spawnWithSuspension } from "./driver"
 import * as Spawner from "effect/process/ChildProcessSpawner"
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import { pathToFileURL } from "node:url"
@@ -14,6 +14,8 @@ interface Input {
   task_id: string
   session_id?: string
   turn_marker?: string
+  suspend_idle?: boolean
+  suspend_idle_min_s?: number
   docker_prefix: string[]
 }
 const checking = process.argv[2] === "--check-imports"
@@ -40,11 +42,19 @@ const { runNonInteractivePrompt } = await load("cli/src/run/noninteractive.ts")
 if (checking) { console.log("brain imports ready"); process.exit(0) }
 await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
   const local = yield* Spawner.ChildProcessSpawner
-  const spawner = Spawner.make((command) => local.spawn(dockerCommand(command, input)))
+  const idle = suspension(input, (paused) => console.log(JSON.stringify({
+    sca_suspend_transition: true, paused, at: Date.now() / 1000,
+  })))
+  idle.idle()
+  yield* Effect.addFinalizer(() => Effect.promise(async () => {
+    const suspended_s = await idle.close()
+    console.log(JSON.stringify({ sca_suspend: true, suspended_s }))
+  }))
+  const spawner = Spawner.make((command) => spawnWithSuspension(local, command, input, idle))
   const driver = {
     create: () => Effect.succeed({ binding: { container: input.container } }),
     connect: () => Effect.succeed({ spawner }),
-    suspendForIdle: () => Effect.void,
+    suspendForIdle: () => Effect.sync(() => idle.idle()),
     destroy: () => Effect.void,
   }
   const host = yield* Effect.acquireRelease(EmbeddedHost.create({

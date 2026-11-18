@@ -1,6 +1,6 @@
 """Common fields for every scenario's specification."""
 
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -25,6 +25,8 @@ class CommonSpec(BaseModel):
     prompt_version: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]+$")
     memory_enabled: bool | None = None
     eval_run_id: str | None = None
+    # Admission class (src/sca/admission); set by the API or the eval runner.
+    priority: Literal["interactive", "eval", "batch"] = "interactive"
 
     @model_validator(mode="after")
     def acceptance_pair(self) -> "CommonSpec":
