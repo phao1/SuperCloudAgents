@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from sca.agents.opencode_build import perform_build, reserve_build
-from sca.config import Settings
+from sca.config import HOST_ARCH, Settings
 from sca.workspace.layers import command
 
 
@@ -30,7 +30,7 @@ async def test_shared_build_objects_and_readonly_mount(tmp_path: Path):
         checkout = cfg.data_dir / "opencode/build-work/build/src"
         assert (checkout / ".git/objects/info/alternates").read_text().strip() == str(bare / "objects")
         assert not list((checkout / ".git/objects/pack").iterdir())
-        binary = checkout / "packages/cli/dist/cli-linux-x64/bin/opencode"
+        binary = checkout / f"packages/cli/dist/cli-linux-{HOST_ARCH}/bin/opencode"
         binary.parent.mkdir(parents=True)
         binary.write_bytes(b"fake build output")
         return ""

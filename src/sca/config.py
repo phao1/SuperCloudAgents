@@ -3,12 +3,18 @@
 from __future__ import annotations
 
 import os
+import platform
 from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Containers run natively on the host's architecture (Apple silicon gets arm64 images).
+HOST_ARCH: Literal["x64", "arm64"] = (
+    "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
+)
 
 
 class Settings(BaseSettings):
@@ -166,7 +172,9 @@ class Settings(BaseSettings):
     codex_bin_dir: Path | None = None
     codex_auth_file: Path = Path("~/.codex/auth.json")
 
-    opencode_brain_bun: Path = Path(".data/tools/bun-linux-x64/bun")
+    # Bun/OpenCode target of the sandbox images: "x64" or "arm64" (SCA_CONTAINER_ARCH).
+    container_arch: Literal["x64", "arm64"] = HOST_ARCH
+    opencode_brain_bun: Path = Path(f".data/tools/bun-linux-{HOST_ARCH}/bun")
     opencode_brain_host: Path = Path("deploy/opencode/brain/launch.py")
     opencode_brain_gateway_url: str | None = None
     opencode_brain_pool: bool = True

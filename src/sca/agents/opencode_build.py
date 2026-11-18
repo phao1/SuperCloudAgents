@@ -187,7 +187,7 @@ async def _perform_build(settings: Settings, record: dict, runner: Runner) -> di
             raise RuntimeError("OpenCode dependency cache missing; run setup before building")
         await runner(build_command(settings, source, version), log)
         destination = settings.opencode_versions_dir / version
-        binary = source / "packages/cli/dist/cli-linux-x64/bin/opencode"
+        binary = source / f"packages/cli/dist/cli-linux-{settings.container_arch}/bin/opencode"
         if (
             not binary.is_file()
             or binary.is_symlink()

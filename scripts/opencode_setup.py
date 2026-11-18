@@ -101,7 +101,7 @@ async def setup(execute_docker: bool) -> None:
     if not (source / "node_modules").is_dir():
         await run_command(install, log)
     context.mkdir(exist_ok=True)
-    shutil.copyfile(Path(".data/tools/bun-linux-x64/bun"), context / "bun")
+    shutil.copyfile(Path(f".data/tools/bun-linux-{settings.container_arch}/bun"), context / "bun")
     legacy_cache = context / "cache"
     if legacy_cache.exists():
         shutil.rmtree(legacy_cache)

@@ -98,7 +98,7 @@ make portal-down
 
 这次验证暴露并修掉了三个问题：生成的配置没给 brain 模式设置 docker 命令前缀（需要 `sg docker` 的机器上会失败）；Portal 只按版本号认“复测运行”，版本号与旧记录重名时“重跑”按钮被误禁用（改为只认构建之后创建的运行）；setup 要求 15 GB 空闲磁盘，本机当时只有 13 GB，清掉一个过时的 5 GB 镜像后通过。
 
-仍未覆盖：与本机共用了 Docker 和数据库服务（不是一台真正的新机器）；macOS 未测。Apple Silicon 的 Mac 依赖 Docker Desktop 的 amd64 模拟，编译可能很慢甚至失败，建议用 x86_64 的 Linux 机器。
+仍未覆盖：与本机共用了 Docker 和数据库服务（不是一台真正的新机器）；macOS 和 Windows 未在真机上测。2026-11-18 起 setup 按宿主芯片选择架构，Apple 芯片使用 arm64 原生镜像和 OpenCode 编译，不再依赖 amd64 模拟。macOS/Windows 的分步说明见 [verified-scenarios.md](verified-scenarios.md)。
 
 ## 6 顺带完成：四期第一步“脑手分离”
 

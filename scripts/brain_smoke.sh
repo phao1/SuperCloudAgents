@@ -10,7 +10,7 @@ session="$(timeout 5 mktemp -d)"
 trap 'timeout 20 docker rm -f "$name" >/dev/null 2>&1 || true; timeout 5 rm -rf "$session"' EXIT
 timeout 30 docker run -d --network=none --name "$name" --entrypoint sh "${SCA_BRAIN_IMAGE:-sca-sandbox:latest}" -c 'mkdir -p /workspace; sleep 900' >/dev/null
 export SCA_BRAIN_CONTAINER="$name" SCA_BRAIN_SESSION="$session"
-timeout 880 "$root/.venv/bin/python" - <<'PY' | timeout 890 "$root/.venv/bin/python" "$root/deploy/opencode/brain/launch.py" "$root/.data/opencode/src" "$root/.data/tools/bun-linux-x64/bun"
+timeout 880 "$root/.venv/bin/python" - <<'PY' | timeout 890 "$root/.venv/bin/python" "$root/deploy/opencode/brain/launch.py" "$root/.data/opencode/src" "$root/.data/tools/bun-linux-$(case $(uname -m) in arm64|aarch64) echo arm64;; *) echo x64;; esac)/bun"
 import json
 import os
 print(json.dumps({"prompt": "Use the shell tool to write brain-ok to /workspace/brain-proof.txt, then reply done.",

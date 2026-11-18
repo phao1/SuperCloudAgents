@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from sca.agents.opencode_brain import OpenCodeBrainBackend
-from sca.config import Settings
+from sca.config import HOST_ARCH, Settings
 from sca.core.errors import AgentTurnError
 from sca.core.models import AgentContext
 
@@ -20,7 +20,7 @@ pytestmark = pytest.mark.skipif(os.environ.get("SCA_TEST_BRAIN_HOST") != "1",
 @pytest.mark.asyncio
 async def test_parallel_credentials_and_durable_resume(tmp_path):
     root = Path(__file__).resolve().parents[2]
-    source, bun = root / ".data/opencode/src", root / ".data/tools/bun-linux-x64/bun"
+    source, bun = root / ".data/opencode/src", root / f".data/tools/bun-linux-{HOST_ARCH}/bun"
     if not source.is_dir() or not bun.is_file():
         pytest.skip("installed OpenCode and Bun required")
     credentials = {f"fake-host-credential-{i}" for i in range(4)}

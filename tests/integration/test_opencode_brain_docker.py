@@ -12,7 +12,7 @@ from pathlib import Path
 import pytest
 
 from sca.agents.opencode_brain import OpenCodeBrainBackend
-from sca.config import Settings
+from sca.config import HOST_ARCH, Settings
 from sca.core.models import AgentContext
 
 pytestmark = [pytest.mark.docker, pytest.mark.skipif(
@@ -25,7 +25,7 @@ async def test_networkless_hands_share_pool(tmp_path):
     if not shutil.which("docker"):
         pytest.skip("docker CLI unavailable")
     source = root / ".data/opencode/src"
-    bun = root / ".data/tools/bun-linux-x64/bun"
+    bun = root / f".data/tools/bun-linux-{HOST_ARCH}/bun"
     if not source.is_dir() or not bun.is_file():
         pytest.skip("installed OpenCode workspace and Bun required")
 

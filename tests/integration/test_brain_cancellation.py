@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from sca.agents.opencode_brain import OpenCodeBrainBackend
-from sca.config import Settings
+from sca.config import HOST_ARCH, Settings
 from sca.core.models import AgentContext
 
 pytestmark = [pytest.mark.docker, pytest.mark.integration, pytest.mark.skipif(
@@ -18,7 +18,7 @@ pytestmark = [pytest.mark.docker, pytest.mark.integration, pytest.mark.skipif(
 async def test_cancel_kills_remote_process_tree(tmp_path):
     root = Path(__file__).resolve().parents[2]
     source = root / '.data/opencode/src'
-    bun = root / '.data/tools/bun-linux-x64/bun'
+    bun = root / f'.data/tools/bun-linux-{HOST_ARCH}/bun'
     effect = source / 'packages/cli/node_modules/effect'
     if not bun.is_file() or not effect.is_dir():
         pytest.skip('installed Bun and Effect dependencies required')
@@ -41,6 +41,7 @@ async def test_cancel_kills_remote_process_tree(tmp_path):
     tool = tmp_path / 'fake-brain.ts'
     tool.write_text('''import { ChildProcess } from "effect/process"
 import { dockerCommand } from "./driver"
+from sca.config import HOST_ARCH
 const input = JSON.parse(await Bun.stdin.text())
 const command = dockerCommand(ChildProcess.make("sh", ["-c", "env -i sleep 300 & wait"]), input)
 if (command._tag !== "StandardCommand") throw new Error("Expected standard command")

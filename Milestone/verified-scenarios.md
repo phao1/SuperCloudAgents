@@ -111,8 +111,9 @@ uname -m          # x86_64 = Intel 芯片；arm64 = Apple 芯片（M1–M4）
 sw_vers -productVersion   # 建议 macOS 14 或更新
 ```
 
-平台的镜像和 OpenCode 构建都是 amd64（x86_64）。Intel Mac 原生运行；**Apple 芯片的 Mac 要靠 Docker Desktop
-的 Rosetta 模拟运行 amd64**，能跑，但构建和评测会更慢。这是目前风险最大的环境，见本节最后的排错表。
+setup 会按芯片自动选择架构：Intel Mac 用 amd64，**Apple 芯片（M1–M4）用 arm64 原生镜像**，
+包括沙箱镜像、OpenCode 编译和 bun，不经过模拟。arm64 这条路径是 2026-11-18 新加的，
+**还没有在真实 Apple 芯片上跑通过**，遇到问题按本节最后的排错表处理。
 
 ### 2. 安装并设置 Docker Desktop
 
@@ -121,7 +122,6 @@ sw_vers -productVersion   # 建议 macOS 14 或更新
 | 设置项 | 要求 |
 |---|---|
 | General → Use Virtualization framework | 打开 |
-| General → Use Rosetta for x86_64/amd64 emulation on Apple Silicon | **Apple 芯片必须打开**（Intel Mac 没有这一项） |
 | Resources → Memory | 至少 8 GB |
 | Resources → Disk usage limit | 至少 64 GB |
 | Resources → File sharing | 包含 `/Users`（默认就有） |
@@ -131,7 +131,7 @@ sw_vers -productVersion   # 建议 macOS 14 或更新
 ```bash
 docker info --format '{{.ServerVersion}} {{.Architecture}}'   # 能打印版本号
 docker compose version
-docker run --rm --platform linux/amd64 alpine uname -m        # 必须打印 x86_64
+docker run --rm alpine uname -m        # Apple 芯片打印 aarch64，Intel 打印 x86_64
 ```
 
 ### 3. 安装依赖（Homebrew）
@@ -168,7 +168,7 @@ make portal-setup
 第一次会生成 `.env` 后停下，提示填写 `DEEPSEEK_API_KEY`。**这一步由用户本人完成**：
 `open -e .env`（或 `nano .env`）把 `DEEPSEEK_API_KEY=REPLACE_ME` 改成自己的密钥后保存。agent 不要代填，也不要读取这个文件。
 
-第二次（Intel 约 10–20 分钟，Apple 芯片可能要 30 分钟以上）：
+第二次（约 10–20 分钟，主要花在下载 OpenCode 依赖上）：
 
 ```bash
 PORTAL_TOKEN=my-portal-token make portal-setup
@@ -189,8 +189,8 @@ PORTAL_TOKEN=my-portal-token make portal-setup
 | setup 提示“请安装 GNU timeout” | `brew install coreutils` |
 | 提示缺少 `python3.12` | `brew install python@3.12`，然后新开一个终端 |
 | “Docker 不可用” | 先打开 Docker Desktop，等左下角状态变成 running |
-| OpenCode 构建报 `Illegal instruction`、`SIGILL` 或 bun 崩溃（Apple 芯片） | 确认第 2 步的 Rosetta 选项已打开，并把 macOS 和 Docker Desktop 升到最新；仍失败就把 `bash scripts/portal_demo.sh logs` 和构建日志发回来，这是 amd64 模拟的问题，需要改成 arm64 原生镜像 |
-| 构建或评测特别慢、超时（Apple 芯片） | 模拟运行的正常现象；评测并发设为 1，必要时把 Docker 内存调到 10–12 GB |
+| OpenCode 镜像构建报 `sha256sum: WARNING ... did NOT match` | `oven/bun:1.4.4` 的 arm64 镜像内容变了；把 `.data/opencode/setup.log` 发回来 |
+| OpenCode 编译失败（`Invalid build artifact`，或 setup.log 里 `bun run script/build.ts` 报错） | 把 `.data/opencode/setup.log`（基线编译）或 Portal 里的“构建日志”（修复后编译）发回来；arm64 编译路径还没实测过 |
 | 构建被杀（exit 137） | Docker Desktop 内存调大到 8 GB 以上 |
 | 评测全部失败 | 看 `bash scripts/portal_demo.sh logs`；多半是 `.env` 密钥不对或网关不通 |
 
@@ -204,7 +204,7 @@ PORTAL_TOKEN=my-portal-token make portal-setup
 
 | 要求 | 说明 |
 |---|---|
-| Windows 10 22H2+ 或 Windows 11，x86_64 | ARM 版 Windows 不支持（镜像和 OpenCode 构建都是 amd64） |
+| Windows 10 22H2+ 或 Windows 11，x86_64 | ARM 版 Windows 理论上会走 arm64 路径，但未验证 |
 | WSL2 + Ubuntu 24.04 | PowerShell（管理员）：`wsl --install -d Ubuntu-24.04`，装完重启并设置 Linux 用户名密码 |
 | Docker Desktop | 设置里勾选 “Use the WSL 2 based engine”，并在 Resources → WSL integration 里打开 Ubuntu-24.04 |
 | 内存 | 建议给 WSL 至少 8 GB：在 `%UserProfile%\.wslconfig` 写入下面内容，然后在 PowerShell 执行 `wsl --shutdown` 再重开 Ubuntu |
@@ -366,5 +366,7 @@ export SCA_SANDBOX_HANDD=true         # 沙箱内常驻执行守护进程
 ### 已知未验证
 
 本指引的 macOS 和 Windows 部分按 setup 脚本的要求编写，**都还没有在真实的 Mac 或 Windows 电脑上跑过**；
-已验证的是 x86_64 Linux 上的全新拷贝一键 setup。风险从高到低：Apple 芯片 Mac（amd64 模拟）> Windows（WSL2）> Intel Mac。如果遇到问题，把出错命令和 `bash scripts/portal_demo.sh logs`
+已验证的是 x86_64 Linux 上的全新拷贝一键 setup。风险从高到低：Apple 芯片 Mac（arm64 原生路径首次实测）> Windows（WSL2）> Intel Mac。
+另外，`opencode-brain`（脑手分离）模式在宿主机上直接运行 Linux 版 bun，所以只支持 Linux 宿主机；
+Mac 和 Windows 上用默认的 OpenCode 后端即可，第四部分的流程不受影响。如果遇到问题，把出错命令和 `bash scripts/portal_demo.sh logs`
 的输出发给我。

@@ -29,7 +29,12 @@ run() { "$TIMEOUT" 900 "$@"; }
 fail() { echo "$1" >&2; exit 1; }
 mkdir -p .data/run
 PY="$ROOT/.venv/bin/python"
-export DOCKER_DEFAULT_PLATFORM=linux/amd64
+# Build and run images natively: arm64 on Apple silicon and ARM Linux, amd64 elsewhere.
+case "$(uname -m)" in
+    arm64|aarch64) export DOCKER_DEFAULT_PLATFORM=linux/arm64 SCA_CONTAINER_ARCH=arm64;;
+    *) export DOCKER_DEFAULT_PLATFORM=linux/amd64 SCA_CONTAINER_ARCH=x64;;
+esac
+BUN_DIR=.data/tools/bun-linux-$SCA_CONTAINER_ARCH
 
 docker_access() {
     command -v docker >/dev/null || fail '请安装并启动 Docker。'
@@ -39,10 +44,12 @@ docker_access() {
         :
     else fail 'Docker 不可用；请启动 Docker 或授予当前用户 docker 组权限。'; fi
     # A wrapper also gives Python subprocesses Docker access through sg.
-    cat > .data/run/docker <<'WRAPPER'
+    cat > .data/run/docker <<WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
-export DOCKER_DEFAULT_PLATFORM=linux/amd64
+export DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM
+WRAPPER
+    cat >> .data/run/docker <<'WRAPPER'
 if docker info >/dev/null 2>&1; then exec docker "$@"; fi
 printf -v arguments '%q ' "$@"
 command="docker $arguments"
@@ -184,10 +191,10 @@ SQL
     run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
     # TLS-inspecting egress proxy for restricted sandboxes (see docs/design-phase4.md).
     run "$SCA_DOCKER_BIN" build -t sca-egress:tls-v1 deploy/egress
-    mkdir -p .data/tools/bun-linux-x64
-    run "$SCA_DOCKER_BIN" run --rm --memory=2500m --memory-swap=2500m --entrypoint cat oven/bun:1.4.4 /usr/local/bin/bun > .data/tools/bun-linux-x64/bun.tmp
-    mv .data/tools/bun-linux-x64/bun.tmp .data/tools/bun-linux-x64/bun
-    chmod 700 .data/tools/bun-linux-x64/bun
+    mkdir -p "$BUN_DIR"
+    run "$SCA_DOCKER_BIN" run --rm --memory=2500m --memory-swap=2500m --entrypoint cat oven/bun:1.4.4 /usr/local/bin/bun > "$BUN_DIR/bun.tmp"
+    mv "$BUN_DIR/bun.tmp" "$BUN_DIR/bun"
+    chmod 700 "$BUN_DIR/bun"
     "$TIMEOUT" 3600 "$PY" scripts/opencode_setup.py --execute-docker
     up
 }

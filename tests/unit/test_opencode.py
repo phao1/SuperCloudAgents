@@ -9,7 +9,7 @@ from test_opencode_fixture import TRANSCRIPT
 from sca.agents.opencode import OpenCodeBackend, parse_opencode_line, validate_version
 from sca.agents.opencode_build import build_command, perform_build, reserve_build
 from sca.api.agents import FixRequest, fix_spec
-from sca.config import Settings
+from sca.config import HOST_ARCH, Settings
 from sca.core.errors import AgentTurnError
 from sca.core.models import AgentContext, Event, ExecExit, ExecOutput, Task
 from sca.kinds.coding.spec import CodingSpec
@@ -117,7 +117,7 @@ async def test_build(tmp_path):
             source = Path(argv[argv.index("-v") + 1].removesuffix(":/src"))
             assert not (source / "node_modules/marker").exists()
             assert f"{cache}:/src/node_modules:ro" in argv
-            binary = source / "packages/cli/dist/cli-linux-x64/bin/opencode"
+            binary = source / f"packages/cli/dist/cli-linux-{HOST_ARCH}/bin/opencode"
             binary.parent.mkdir(parents=True)
             binary.write_bytes(b"fake executable")
         return ""
