@@ -109,7 +109,7 @@ class PlanningActivities:
                     "branch": child_ws.branch,
                 },
             )
-            sandbox_id, _ = await child._create_sandbox(inp.task_id)
+            sandbox_id = await child.create_sandbox(inp.task_id)
             spec = await acts._spec(inp.task_id)
             await child.run_agent_turn(
                 TurnInput(

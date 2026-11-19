@@ -1,0 +1,6 @@
+instruction: >
+  Update retry_delays in app.py. For each retry, double the previous delay starting at
+  base, cap each value at limit, and stop at attempts values. Zero attempts returns an empty
+  list. Raise ValueError for negative attempts or non-positive base or limit. Keep
+  total_delay and the public verification script unchanged.
+verify_command: python verify.py

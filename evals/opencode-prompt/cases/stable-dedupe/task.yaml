@@ -1,0 +1,6 @@
+instruction: >
+  Fix unique_records in app.py. Return the first record for each id, preserving
+  input order and accepting a single-pass iterable. IDs are exact strings, and
+  records may contain nested values. Do not mutate the input. Leave summarize and
+  the public verification script unchanged.
+verify_command: python verify.py

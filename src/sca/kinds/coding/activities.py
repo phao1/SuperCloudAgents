@@ -193,6 +193,9 @@ class CodingActivities(KernelActivities):
         child = ChildActivities(self, inp.name)
         await self._ensure_state(inp.task_id)
         if inp.action == "prepare":
+            await child.store.append_event(
+                inp.task_id, EventType.SUBTASK_STARTED, {}, dedup_key="started"
+            )
             await child._ensure_state(inp.task_id)
             parent = await self.store.get_task(inp.task_id)
             ws = child._workspace(inp.task_id)
@@ -439,6 +442,10 @@ class CodingActivities(KernelActivities):
             return result
 
         sandbox_id = await self._sandbox_id(task_id)
+        await self.store.append_event(
+            task_id, EventType.VERIFICATION_STARTED, {"turn": turn, "checks": len(commands)},
+            dedup_key=f"turn{turn}.verify_started",
+        )
         # All checks run at the same time; the turn is judged on all of them.
         runs = await asyncio.gather(
             *(

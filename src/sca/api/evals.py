@@ -13,6 +13,7 @@ from sqlalchemy.exc import NoResultFound
 from temporalio.client import Client
 from temporalio.service import RPCError
 
+from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_SUITE, version_commit
 from sca.api.authz import ForbiddenError, authorize, principal
 from sca.config import get_settings
 from sca.core.models import Principal
@@ -22,6 +23,7 @@ from sca.eval.rescore import rescore_run
 from sca.eval.suites import load_suite
 from sca.eval.trajectory import overall_passed
 from sca.eval.workflow import EvalRunWorkflow
+from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
 
 router = APIRouter(prefix="/v1/evals")
 
@@ -100,15 +102,37 @@ async def suites(user: Annotated[Principal, Depends(authorize("read"))]) -> list
 async def start_run(body: RunRequest, request: Request,
                     user: Annotated[Principal, Depends(authorize("submit"))]) -> dict:
     require_eval(user)
+    return await enqueue_run(body, request, user)
+
+
+async def enqueue_run(
+    body: RunRequest, request: Request, user: Principal, *,
+    expected_suite_hash: str | None = None, source_build_id: UUID | None = None,
+) -> dict:
     path = suite_path(body.suite)
     try:
         suite = await asyncio.to_thread(load_suite, path)
     except (ValueError, OSError):
         raise HTTPException(422, "Invalid suite") from None
     settings = get_settings()
+    if expected_suite_hash is not None and suite["hash"] != expected_suite_hash:
+        raise HTTPException(409, "套件内容已变化，请用当前套件重新运行基线")
+    variant = body.variant.model_dump(exclude_none=True)
+    if body.suite == PROMPT_SUITE:
+        if body.variant.agent_backend != "opencode" or body.variant.model not in PROMPT_MODELS:
+            raise HTTPException(422, "系统提示词评测需要 OpenCode 和受支持的 DeepSeek 模型")
+        try:
+            version_commit(settings, body.variant.agent_version or "")
+            prompt_version = body.variant.prompt_version or EvaluationSettings().default_prompt_version
+            validate_prompt_version("coding", prompt_version)
+        except (OSError, ValueError):
+            raise HTTPException(422, "请选择已安装的 OpenCode 版本和有效的任务提示词版本") from None
+        variant["prompt_version"] = prompt_version
     run_id = str(uuid4())
     payload = {**body.model_dump(), "id": run_id, "suite": str(path.resolve()),
-               "variant": body.variant.model_dump(exclude_none=True)}
+               "suite_hash": suite["hash"], "variant": variant}
+    if source_build_id is not None:
+        payload["source_build_id"] = str(source_build_id)
     await request.app.state.store.for_tenant("eval").create_eval_run({
         "id": UUID(run_id), "tenant_id": "eval", "suite": suite["name"],
         "suite_hash": suite["hash"], "variant": payload,

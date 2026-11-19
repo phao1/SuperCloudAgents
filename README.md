@@ -70,18 +70,21 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 
 在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Python 3.12、Git、Docker Compose、
 至少 15 GB 可用磁盘和足够内存（OpenCode 单次构建上限 2.5 GB，其他服务另需内存）。
-macOS 先安装 GNU timeout：`brew install coreutils`。容器使用 Linux x86_64；Apple Silicon
-依赖 Docker Desktop 的 amd64 模拟支持。
+macOS 先安装 GNU timeout：`brew install coreutils`。Apple Silicon 使用 Linux arm64
+镜像和该架构的 OpenCode 构建。
 
 ```bash
 make portal-setup
 ```
 
-首次运行自动创建 `.env` 和随机网关密钥，随后提示填写 `DEEPSEEK_API_KEY` 并停止。
-填写后重跑同一命令，即可准备数据库、镜像、OpenCode 2.3.0 缺陷基线并启动 Portal。
+首次运行自动创建 `.env` 和随机网关密钥，并准备数据库、镜像、OpenCode 2.3.0
+缺陷基线后启动 Portal。连接管理员令牌后，可在概览页填写 DeepSeek API Key；
+密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
 脚本打印 `http://127.0.0.1:8000/portal` 和随机登录令牌；可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
-在 Portal 中运行评测、查看失败轨迹、启动修复、构建新版本并比较复测结果。
+在 Portal 中可用 `opencode-demo` 验证文件工具修复，也可用 `opencode-prompt` 让 OpenCode
+根据评测证据迭代系统提示词。macOS 的逐步操作见 [验证流程](Milestone/verification-flow.md#v4b-现场opencode-系统提示词自演进)。
+本次真实任务、回放说明和逐事件归档见 [Portal 运行记录](Milestone/portal-run-2026-11-19.md)。
 
 ```bash
 make portal-up                       # 启动 API 与 worker

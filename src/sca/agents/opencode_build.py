@@ -15,6 +15,7 @@ from temporalio.common import RetryPolicy
 
 with workflow.unsafe.imports_passed_through():
     from sca.agents.opencode import validate_version
+    from sca.agents.opencode_prompt import PROMPT_PATH, PROMPT_TARGET, prompt_digest, version_commit
     from sca.config import Settings
 
 
@@ -182,6 +183,31 @@ async def _perform_build(settings: Settings, record: dict, runner: Runner) -> di
         await runner(["git", "-C", str(source), "fetch", "--quiet", "origin", record["ref"]], log)
         await runner(["git", "-C", str(source), "checkout", "--quiet", "--detach", "FETCH_HEAD"], log)
         commit = await runner(["git", "-C", str(source), "rev-parse", "HEAD"], log)
+        prompt_metadata = {}
+        if record.get("labels", {}).get("target") == PROMPT_TARGET:
+            try:
+                base = version_commit(settings, record["base_version"])
+                if commit != record["ref"]:
+                    raise ValueError("The checkout does not match the approved commit")
+                git = ["git", "-C", str(source)]
+                await runner([*git, "merge-base", "--is-ancestor", base, commit], log)
+                changes = await runner(
+                    [*git, "diff", "--name-status", "--no-renames", base, commit, "--"], log
+                )
+                if changes != f"M\t{PROMPT_PATH}":
+                    raise ValueError(f"Expected changes only to {PROMPT_PATH}")
+                summary = await runner([*git, "diff", "--summary", base, commit, "--"], log)
+                stats = await runner([*git, "diff", "--numstat", base, commit, "--"], log)
+                if summary or stats.startswith(("0\t0\t", "-\t-\t")):
+                    raise ValueError("Expected a content-only text change to the system prompt")
+                prompt_metadata = {
+                    "system_prompt_path": PROMPT_PATH,
+                    "system_prompt_sha256": prompt_digest(source / PROMPT_PATH),
+                }
+            except (KeyError, OSError, ValueError, RuntimeError) as exc:
+                with log.open("a", encoding="utf-8") as stream:
+                    stream.write(f"System prompt scope check failed: {exc}\n")
+                raise RuntimeError("System prompt scope check failed") from exc
         cache = settings.opencode_src_cache
         if not (cache / "node_modules").is_dir():
             raise RuntimeError("OpenCode dependency cache missing; run setup before building")
@@ -208,6 +234,7 @@ async def _perform_build(settings: Settings, record: dict, runner: Runner) -> di
             "notes": record.get("notes"),
             "task_id": record.get("task_id"),
             "labels": record.get("labels", {}),
+            **prompt_metadata,
         }
         write_record(destination / "meta.json", meta)
         record.update(status="succeeded", commit=commit)

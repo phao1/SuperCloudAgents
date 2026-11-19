@@ -427,7 +427,7 @@ flowchart TB
 > `make portal-setup`，Portal 能打开。**不要读取或打印 `.env`。** 每一级做完把最后一行结果记下来；
 > 失败时**不要修改代码**，把失败用例名和报错的 `E ` 行原样汇报。
 
-所有命令在仓库根目录执行。pytest 的临时目录放在仓库内，保证 Docker Desktop 能挂载：
+所有命令在仓库根目录执行。V2、V3 的临时目录放在仓库内，保证 Docker Desktop 能挂载：
 
 ```bash
 cd ~/code/SuperCloudAgents
@@ -448,7 +448,21 @@ python3 Milestone/validate.py                    # 期望：Validated 64 modules
 .venv/bin/pytest -q -p no:cacheprovider --basetemp=.data/pytest/v1 tests/unit
 ```
 
-期望：约 449 passed、1 skipped。
+Linux 快照约 449 passed、1 skipped。macOS 的 V1 可使用短临时路径和 GNU `cp`，
+并把 Linux 宿主专用的 brain 和 overlay 属性用例留到 Linux 上验证：
+
+```bash
+sca_v1_tmp=$(mktemp -d /tmp/sv1.XXXXXX)
+sca_gnubin=${SCA_GNUBIN:-"$(brew --prefix coreutils)/libexec/gnubin"}
+PATH="$sca_gnubin:$PATH" \
+  .venv/bin/pytest -q -p no:cacheprovider --basetemp="$sca_v1_tmp" \
+  --ignore=tests/unit/test_opencode_brain.py --ignore=tests/unit/test_opencode_brain_pool.py \
+  --deselect=tests/unit/test_overlay.py::test_snapshot_keeps_ignored_files_and_opaque_value \
+  --deselect=tests/unit/test_overlay.py::test_snapshot_restore_round_trip_with_fake_lifecycle \
+  tests/unit
+```
+
+如果使用了解压版 GNU coreutils，把 `SCA_GNUBIN` 设为对应的 `libexec/gnubin` 目录。
 
 ### V2 集成测试（5–10 分钟，需要 setup 拉起的 Postgres 和 Docker）
 
@@ -479,6 +493,28 @@ python3 Milestone/validate.py                    # 期望：Validated 64 modules
 | 新版本号 | `2.3.0-sca.2`（新机器） |
 | 重跑运行 ID 和对比结论 | 6/6，“建议采纳”，回归 0 |
 
+### V4b 现场：OpenCode 系统提示词自演进
+
+1. 在 Portal 概览连接 eval 管理员令牌并配置 DeepSeek API Key，点击「运行提示词基线」。
+2. 选择 `opencode-prompt`、OpenCode、`2.3.0-sca.1` 和 `deepseek-flash`。重复 2 次，并发 1。
+   使用表单里的预算开始评测。这个套件有 3 个用例，共应记录 6 个结果。
+3. 在用例结果中点对应的通过或失败状态，进入「任务进度」。在「架构进度」查看工作流接入、沙箱、Agent 和验证事件。
+   有任务拆分时可切换到各个子任务。有重试时可按「运行轮次」筛选。
+   「播放回放」按事件顺序点亮原图，所有经过的节点使用同一种高亮色。「定位当前模块」将视图移到最近一步。点击节点可查看相关事件。
+   回放时，图旁会显示当前步骤所做的动作和结果。拆分步骤列出子任务、文件范围与并行关系，沙箱步骤列出运行环境，记忆步骤说明匹配范围与本次注入情况。
+   点「优化系统提示词」使用一个代表性用例，也可以从矩阵指定用例。通过的用例也可用来优化用量。
+4. 在「自演进闭环」填写优化目标，例如「保持功能正确性，减少无关改动和重复命令」。点击「生成候选提示词」。
+   待审核后，点击「查看提示词改动」，可展开两版完整内容。需要调整时，在「提示词修改意见」写明具体改动，
+   点击「要求修改并进入下一执行轮」。等同一个任务重新进入待审核，检查候选只改动了 OpenCode 的
+   `packages/core/src/session/runner/prompt/system.txt`，再点「批准候选」。
+5. 点击「构建新版本」。构建日志应通过改动范围检查；「版本谱系」应显示基线、候选版本和提示词 SHA-256。
+6. 点击「用新版本重跑评测」。候选复用基线的套件内容、模型、平台任务模板、重复次数、并发和预算。
+   在「版本对比」记录基线与候选的通过率、Token、费用、耗时和逐题变化。
+7. 点「用本轮回归继续第 2 轮」，以第 1 轮构建出来的 B 为新基线。根据上一轮的逐题对比，
+   选一个有证据的改进点，再生成、审阅、构建并复测。可从「迭代记录」查看每一轮。
+
+记录基线运行 ID、证据用例任务 ID、候选任务 ID、构建 ID、版本号和回归运行 ID。工作流跑通的标志是候选可追溯且能按原条件复测。提示词是否改善，以对比结果为准。初次验证可将重复次数设为 1，评估用量波动时至少跑 2 次。这里的「执行轮」是同一个任务内的重试或审核修改，「自演进迭代」每轮会构建一个新候选并单独做回归。
+
 ### V5 可选：pi 后端
 
 评测中心后端选 pi，其余不变。期望 6/6。
@@ -498,5 +534,6 @@ python3 Milestone/validate.py                    # 期望：Validated 64 modules
 提交：<git log --oneline -1>
 V0：<结果>   V1：<结果>   V2：<结果>   V3：<结果>
 V4：基线 <ID> <x/6> → 修复 <ID> → 版本 <sca.N> → 重跑 <ID> <x/6>，结论 <...>
+V4b：基线 <ID> → 证据 <任务 ID> → 候选 <任务 ID> → 构建 <ID / 版本> → 重跑 <ID>，指标 <...>
 失败用例：<名称 + E 行>
 ```

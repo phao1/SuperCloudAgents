@@ -124,6 +124,10 @@ class AnalysisActivities(KernelActivities):
             ["python", "-c", SCRIPT, task.result["base_sha"]],
             *[["bash", "-lc", check] for check in spec.checks],
         ]
+        await self.store.append_event(
+            inp.task_id, EventType.VERIFICATION_STARTED, {"turn": inp.turn, "checks": len(commands)},
+            dedup_key=f"turn{inp.turn}.verify_started",
+        )
         runs = await asyncio.gather(*(self._run(sandbox_id, cmd, 1500) for cmd in commands))
         failures = [(ev, output) for ev, output in runs if ev.exit_code]
         log = "\n".join(output for _, output in runs)

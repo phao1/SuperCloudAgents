@@ -66,6 +66,8 @@ def test_portal_diff_and_metrics_runtime(tmp_path):
     script = script[:script.index("$('start-fix').onclick")]
     harness = r'''
 const assert = require('node:assert/strict');
+const flowModel = require(process.argv[2]);
+const {buildRecords, activeTiming} = require(process.argv[3]);
 class Element {
  constructor(){this.children=[];this.dataset={};this.textContent='';this.className='';this.value='';
  this.classList={add: name=>{this.className+=' '+name}}}
@@ -82,17 +84,20 @@ const target=new Element();
 assert.equal(terminalLines('clone\r\nprogress 1%\rprogress 100%\r\nend'), 'clone\nprogress 100%\nend');
 assert.equal(terminalLines('long progress\rdone\r'), 'done');
 assert.equal(uniqueDiagnostics([{title:'rule',note:'case · 第 1 次'},{title:'rule',note:'case · 第 1 次 · evidence'},{title:'rule',note:'case · 第 2 次'},{title:'other',note:'case · 第 1 次'}]).length,3);
-const timing=activeTiming([
- {timed:true,start:0,end:40,lane:'模型调用',event:{type:'agent.usage'}},
- {timed:true,start:20,end:60,lane:'工具',event:{type:'agent.tool'}},
- {timed:true,start:80,end:100,lane:'命令',event:{type:'agent.command'}},
- {timed:false,start:10000,end:10000,lane:'验证',event:{type:'acceptance.completed'}}]);
+const timing=activeTiming(buildRecords([
+ {type:'agent.usage',payload:{started_at_ms:0,ended_at_ms:40}},
+ {type:'agent.tool',payload:{started_at_ms:20,ended_at_ms:60}},
+ {type:'agent.command',payload:{started_at_ms:80,ended_at_ms:100}},
+ {type:'acceptance.completed',created_at:'2026-01-01T00:00:00Z'},
+]));
 assert.equal(timing.extent,100);
 assert.equal(timing.model,40);
 assert.equal(timing.tools,40);
 assert.equal(timing.other,20);
 assert.equal(activeTiming([]),null);
-assert.equal(activeTiming([{timed:true,start:100,end:150,lane:'模型调用',event:{type:'agent.usage',payload:{ended_at_ms:500}}}]).extent,400);
+assert.equal(activeTiming(buildRecords([
+ {type:'agent.usage',payload:{started_at_ms:100,ended_at_ms:500,model_call_duration_ms:50}},
+])).extent,400);
 
 assert(nonAsciiLost('@@\n-café\n+cafe'));
 assert(!nonAsciiLost('@@\n-你好\n+你好！'));
@@ -105,8 +110,8 @@ assert.equal(dimensions(repeated).flaky,1);
 assert.equal(dimensions(repeated).spread,'100.0 pp');
 assert.equal(dimensions(repeated).p50,3);
 assert.equal(dimensions([]).tokens,'—');
-const oldRun={suite:'x',suite_hash:'hash',status:'completed',variant:{repeat:1},results:[{case_id:'a',repeat:1,acceptance_passed:false,verification_passed:true}]};
-const processFailure={case_id:'a',repeat:1,acceptance_passed:true,trajectory_passed:false,verification_passed:true};
+const oldRun={suite:'x',suite_hash:'hash',status:'completed',variant:{repeat:1},results:[{case_id:'a',repeat:0,acceptance_passed:false,verification_passed:true}]};
+const processFailure={case_id:'a',repeat:0,acceptance_passed:true,trajectory_passed:false,verification_passed:true};
 assert.equal(overallPassed(processFailure),false);
 assert.equal(resultLabel(processFailure),'⚠ 验收通过 · 过程未通过');
 assert.equal(dimensions([processFailure]).rate,'0%');
@@ -119,7 +124,7 @@ assert.equal(findingRows[0].href,'#/tasks/task/events/7');
 assert(findingRows[0].note.includes('<script>'));
 assert.equal(trajectoryItems({}).length,0);
 assert.equal(trajectoryItems({trajectory_findings:[{rule_id:'future',event_seq:1}]})[0].title,'⚠ 过程检查 · 过程规则未通过');
-const fixedRun={...oldRun,results:[{case_id:'a',repeat:1,acceptance_passed:true,verification_passed:true}]};
+const fixedRun={...oldRun,results:[{case_id:'a',repeat:0,acceptance_passed:true,verification_passed:true}]};
 assert(verdictFor(oldRun,fixedRun).adopt);
 assert(!verdictFor(fixedRun,{...fixedRun,results:[processFailure]}).adopt);
 assert(verdictFor(fixedRun,{...fixedRun,results:[processFailure]}).reason.includes('过程回归信号'));
@@ -137,11 +142,89 @@ assert(!verdictFor(oldRun,{...fixedRun,status:'running'}).adopt);
 assert(!verdictFor(oldRun,{...fixedRun,suite_hash:'other'}).adopt);
 assert(!verdictFor(oldRun,{...fixedRun,variant:{repeat:2}}).adopt);
 assert(!verdictFor(oldRun,{...fixedRun,results:[]}).adopt);
-const spans=buildSpans([{seq:1,type:'agent.command',created_at:'2026-01-01T00:00:00Z',payload:{started_at_ms:100,ended_at_ms:200}},{seq:2,type:'agent.usage',payload:{started_at_ms:100,ended_at_ms:500,model_call_duration_ms:50}},{seq:3,type:'verification.completed',created_at:'2026-01-01T00:00:00Z',payload:{}}]);
-assert(spans.measured);
-assert.equal(spans.spans[1].end,150);
-assert.equal(spans.spans[2].start,spans.spans[2].end);
-assert(!buildSpans([{type:'agent.command',payload:{}}]).measured);
+const {steps,tracks}=flowModel.trace({spec:{plan:'auto'}},[
+ {seq:1,type:'task.created'},
+ {seq:2,type:'plan.started',payload:{attempt:1}},
+ {seq:3,type:'plan.completed',payload:{split:true,subtasks:[{name:'api'},{name:'ui'}]}},
+ {seq:4,type:'subtask.started',payload:{subtask:'api'}},
+ {seq:5,type:'sandbox.created',payload:{subtask:'api'}},
+ {seq:6,type:'agent.turn_started',payload:{subtask:'api',turn:1}},
+ {seq:7,type:'agent.command',payload:{subtask:'api',turn:1}},
+ {seq:8,type:'intents.checked',payload:{subtask:'api',turn:1,checks:[{passed:false}]}},
+ {seq:9,type:'verification.completed',payload:{subtask:'api',turn:1,passed:true}},
+ {seq:10,type:'sandbox.restored',payload:{subtask:'api'}},
+ {seq:11,type:'agent.turn_started',payload:{subtask:'api',turn:2}},
+ {seq:12,type:'verification.completed',payload:{subtask:'api',turn:2,passed:true}},
+ {seq:13,type:'subtasks.merged',payload:{subtasks:[{name:'api',status:'merged'}]}},
+]);
+assert.equal(tracks.get('child:api'),'子任务 · api');
+assert(steps.find(step=>step.seq===3).edges.includes('planner>decouple'));
+assert(steps.find(step=>step.seq===5).edges.includes('subtask_q>sandbox_sched'));
+const retry=steps.find(step=>step.seq===11);
+assert.equal(retry.turn,2);
+assert(retry.edges.includes('verify_gw>optim_entry'));
+assert(retry.edges.includes('recover_gate>runtime'));
+const projection=flowModel.project(steps,steps.indexOf(retry));
+assert.equal(projection.nodes.find(n=>n.id==='runtime').state,'current');
+assert.equal(projection.nodes.find(n=>n.id==='executor').state,'seen');
+assert([...projection.nodes,...projection.edges].every(entry=>!('color' in entry)));
+assert.equal(projection.edges.find(e=>e.id==='optim_entry>runtime').state,'current');
+assert(!projection.edges.some(e=>e.id==='executor>dag'));
+const single=flowModel.trace({spec:{plan:'none'}},[{seq:1,type:'task.created'},{seq:2,type:'sandbox.created'}]);
+assert(!flowModel.project(single.steps,1).nodes.some(node=>node.id==='planner'||node.id==='decouple'));
+const planEvent={seq:33,type:'plan.completed',payload:{split:true,reason:'Separate files',subtasks:[
+ {name:'validation',paths:['orders/validation.py'],instruction:'Check bounds'},
+ {name:'totals',paths:['orders/totals.py'],instruction:'Sum by currency'},
+ {name:'report',paths:['orders/report.py'],instruction:'Export CSV'},
+]}};
+const planDetails=flowModel.describeStep({spec:{plan_review:true}},planEvent);
+assert.equal(planDetails.items.map(item=>item.title).join(','),'validation,totals,report');
+assert.equal(planDetails.items[2].detail,'orders/report.py');
+assert(planDetails.facts.some(fact=>fact.value.includes('并行执行')));
+assert(planDetails.facts.some(fact=>fact.value.includes('获批')));
+const childDetails=flowModel.describeStep({},{seq:40,type:'subtask.started',payload:{subtask:'report'}},[planEvent]);
+assert(childDetails.facts.some(fact=>fact.value==='validation、totals'));
+const sandboxEvent={seq:43,type:'sandbox.created',payload:{driver:'docker',sandbox_id:'sca-task-one',
+ state_transport:'mount',image:'sca-sandbox:latest',cpus:1.5,memory_mb:1536}};
+const sandboxDetails=flowModel.describeStep({},sandboxEvent,[],{sandbox_driver:'k8s'});
+assert(sandboxDetails.facts.some(fact=>fact.label==='运行方式'&&fact.value==='Docker 容器'));
+assert(sandboxDetails.facts.some(fact=>fact.value==='挂载工作目录'));
+const restoredDetails=flowModel.describeStep({},{seq:80,type:'sandbox.restored',payload:{sandbox_id:'sca-task-one'}},[sandboxEvent]);
+assert(restoredDetails.facts.some(fact=>fact.value==='sca-sandbox:latest'));
+const oldSandbox=flowModel.describeStep({},{seq:43,type:'sandbox.created',payload:{sandbox_id:'old'}},[],{sandbox_driver:'docker'});
+assert(oldSandbox.facts.some(fact=>fact.label==='当前环境'&&fact.value==='Docker 容器'));
+const emptyMemory=flowModel.describeStep({result:{memory_context:'later context'}},{type:'memory.injected',payload:{ids:[],method:'all'}});
+assert(emptyMemory.facts.some(fact=>fact.value==='0 条')&&!emptyMemory.note);
+const selectedMemory=flowModel.describeStep({result:{memory_context:'run the full suite'}},{type:'memory.injected',payload:{ids:['one'],method:'vector'}});
+assert(selectedMemory.facts.some(fact=>fact.value==='.sca/context/MEMORY.md'));
+assert.equal(selectedMemory.note,'run the full suite');
+const before={
+ ...fixedRun,suite:'opencode-prompt',
+ variant:{repeat:2,variant:{agent_version:'2.3.0-sca.1',agent_backend:'opencode'}},
+ results:[0,1].map(repeat=>({...fixedRun.results[0],repeat,tokens:100,cost_usd:.01})),
+};
+const after={...before,variant:{repeat:2,variant:{agent_version:'2.3.0-sca.2',agent_backend:'opencode'}},
+ results:before.results.map(row=>({...row,tokens:80,cost_usd:.009}))};
+portalConfig={prompt_evolution:{suite:'opencode-prompt'}};
+assert(!verdictFor(before,after).adopt);
+versions=[{version:'2.3.0-sca.2',base_version:'2.3.0-sca.1',system_prompt_sha256:'candidate'}];
+assert(verdictFor(before,after).adopt);
+assert(!verdictFor(before,{...after,results:after.results.slice(0,1)}).adopt);
+portalConfig=null;
+const records=buildRecords([
+ {seq:1,type:'task.created'},
+ {seq:2,type:'agent.usage',payload:{started_at_ms:100,ended_at_ms:500,model_call_duration_ms:50}},
+ {seq:3,type:'verification.completed',created_at:'2026-01-01T00:00:00Z',payload:{passed:false}},
+ {seq:4,type:'agent.command',payload:{is_error:true,duration_ms:42,ended_at_ms:300}},
+ {seq:5,type:'agent.message',created_at:'2026-01-01T00:00:00Z',payload:{duration_ms:30}},
+]);
+assert.deepEqual(records.map(record=>record.kind),['input','model','tool','tool','model']);
+assert.equal(records[0].interval,null);
+assert.deepEqual(records[1].interval,[100,150]);
+assert.equal(records[2].interval[0],records[2].interval[1]);
+assert(records[2].failed && records[3].failed);
+assert.deepEqual(records[3].interval,[258,300]);
+assert.equal(records[4].interval[0],records[4].interval[1]);
 
 diff(target,'@@\n-你好，世界\n+hello world\n context');
 assert(target.children.some(n=>n.className.includes('warning')));
@@ -212,7 +295,10 @@ assert(nodes.get('timeline').children[1].children.at(-1).open);
 '''
     path = tmp_path / 'portal.cjs'
     path.write_text(harness + script + checks)
-    result = subprocess.run(['timeout', '10', node, str(path)], capture_output=True, text=True, check=False)
+    flow_model = Path('src/sca/api/static/task-flow.js').resolve()
+    timeline = Path('src/sca/api/static/task-timeline.js').resolve()
+    result = subprocess.run([node, str(path), str(flow_model), str(timeline)],
+                            capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
 
 
@@ -221,7 +307,7 @@ def test_portal_routes_evidence_and_themes():
     for route in ('overview', 'evals', 'runs', 'compare', 'tasks', 'loop', 'versions'):
         assert route in source
     for feature in ('swimlane', 'evidence', 'run-diagnostics', 'task-diagnostics',
-                    'run-metrics', 'task-metrics', 'theme'):
+                    'run-metrics', 'task-metrics', 'theme', 'architecture-progress'):
         assert f'id="{feature}"' in source
     assert 'model_call_duration_ms' in source
     assert 'r.repeat===i' in source

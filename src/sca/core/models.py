@@ -81,6 +81,7 @@ class Task(BaseModel):
 
 
 class EventType(StrEnum):
+    SUBTASK_STARTED = "subtask.started"
     SUBTASKS_MERGED = "subtasks.merged"
     TASK_CANCEL_REQUESTED = "task.cancel_requested"
     TASK_PAUSE_REQUESTED = "task.pause_requested"
@@ -94,6 +95,7 @@ class EventType(StrEnum):
     SANDBOX_RESTORED = "sandbox.restored"
     SETUP_COMPLETED = "setup.completed"
     AGENT_TURN_STARTED = "agent.turn_started"
+    MODEL_KEY_ISSUED = "model.key_issued"
     AGENT_MESSAGE = "agent.message"
     AGENT_COMMAND = "agent.command"
     AGENT_FILE_CHANGE = "agent.file_change"
@@ -102,6 +104,7 @@ class EventType(StrEnum):
     AGENT_ERROR = "agent.error"
     AGENT_TURN_COMPLETED = "agent.turn_completed"
     WORKSPACE_CHECKPOINTED = "workspace.checkpointed"
+    VERIFICATION_STARTED = "verification.started"
     VERIFICATION_COMPLETED = "verification.completed"
     ARTIFACT_PUBLISHED = "artifact.published"
     CI_REQUESTED = "ci.requested"

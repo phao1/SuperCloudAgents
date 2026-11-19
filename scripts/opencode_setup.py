@@ -28,6 +28,8 @@ async def setup(execute_docker: bool) -> None:
                 "--branch",
                 "v2.3.0",
                 "--single-branch",
+                "--depth",
+                "1",
                 "https://github.com/anomalyco/opencode.git",
                 str(source),
             ],
@@ -42,6 +44,8 @@ async def setup(execute_docker: bool) -> None:
             work = Path(temporary) / "src"
             work.mkdir()
             await run_command(["git", "-C", str(work), "init", "-q", "-b", "main"], log)
+            # A detached auto-gc can outlive the temporary checkout and race its cleanup.
+            await run_command(["git", "-C", str(work), "config", "gc.auto", "0"], log)
             archive = Path(temporary) / "v2.3.0.tar"
             await run_command(
                 ["git", "-C", str(source), "archive", "-o", str(archive), "v2.3.0"], log

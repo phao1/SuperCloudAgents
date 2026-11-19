@@ -10,6 +10,9 @@
     planned: ["尚未实现", "未找到对应的独立能力；详情可包含邻近实现与后续方向。"],
   };
   const svg = $("architecture-svg");
+  const taskView = window.parent !== window && new URLSearchParams(location.search).get("mode") === "task";
+  const taskNodes = new Map();
+  let taskTrace = null;
   const nodes = new Map([...svg.querySelectorAll("g[data-node-id]")].map((node) => [node.dataset.nodeId, node]));
   const byId = new Map(modules.map((module) => [module.id, module]));
   const original = modules.filter((module) => nodes.has(module.id));
@@ -82,7 +85,8 @@
     const remote = external(nodeEl("a", "path-remote", "GitHub ↗"),
       meta.repository + "/" + (isDir ? "tree" : "blob") + "/" + meta.commit + "/" + encoded);
     remote.setAttribute("aria-label", "在固定快照中查看 " + path);
-    pair.append(local, remote);
+    if (!taskView) pair.append(local);
+    pair.append(remote);
     return pair;
   };
   const badge = (status) => {
@@ -149,6 +153,11 @@
       detailSection("已覆盖", detailList(module.done, "暂无该模块的独立实现。")),
       detailSection("剩余缺口", detailList(module.gaps, "按当前审计口径，未发现明确缺口。")),
     );
+    if (taskView) {
+      const evidence = nodeEl("section", "task-node-evidence");
+      detail.prepend(evidence);
+      showTaskEvidence(module.id);
+    }
     if (module.reviewNote) detail.append(detailSection("验证边界", nodeEl("p", "", module.reviewNote)));
     if (evidence.childElementCount) detail.append(detailSection("实现依据", evidence));
     detail.scrollTop = 0;
@@ -547,7 +556,7 @@
   }
 
   function showView(requested) {
-    const next = views.includes(requested) ? requested : "architecture";
+    const next = !taskView && views.includes(requested) ? requested : "architecture";
     if (currentView === next) return;
     currentView = next;
     for (const view of views) $(view).hidden = view !== next;
@@ -558,7 +567,8 @@
     if (next === "architecture") {
       if (hasInitializedWork) drawCamera();
       else {
-        resetWork();
+        if (taskView) showOverview();
+        else resetWork();
         hasInitializedWork = true;
       }
     } else {
@@ -566,6 +576,107 @@
       toggleDirectory(false);
       hideTooltip();
     }
+  }
+
+  function showTaskEvidence(id) {
+    const pane = detail.querySelector(".task-node-evidence");
+    if (!pane) return;
+    const entry = taskNodes.get(id);
+    pane.replaceChildren(nodeEl("h4", "", "本次任务"));
+    if (!entry) {
+      pane.append(nodeEl("p", "", "当前视图没有这个模块的执行事件。"));
+      return;
+    }
+    for (const item of entry.events.slice(-8).reverse()) {
+      pane.append(button("task-event", item.context + " · " + item.label + " #" + item.seq, () => {
+        window.parent.postMessage({ type: "sca-architecture:event", task: taskTrace.task, seq: item.seq },
+          location.origin);
+      }));
+    }
+  }
+
+  function connectTaskTrace() {
+    document.body.dataset.taskView = "";
+    const namespace = "http://www.w3.org/2000/svg";
+    const svgElement = (tag, attrs) => {
+      const element = document.createElementNS(namespace, tag);
+      for (const [name, value] of Object.entries(attrs)) element.setAttribute(name, value);
+      return element;
+    };
+    const originalEdges = new Map([...svg.querySelectorAll("path[data-edge-from][marker-end]")]
+      .map(path => [path.dataset.edgeFrom + ">" + path.dataset.edgeTo, path]));
+    // V2 transitions missing from the original wiring. Coordinates use the original viewBox.
+    const runtimeRoutes = {
+      "ui_goal>ui_dispatch": "M260 127H300",
+      "ui_dispatch>task_entry": "M385 158V228H334V300",
+      "task_entry>dag": "M382 362V384H485V392",
+      "dag>sandbox_sched": "M592 416H612V331H633",
+      "sandbox_pool>runtime": "M846 362V376H740V392",
+      "sandbox_pool>recover_gate": "M934 362V372H803V515H785",
+      "recover_gate>runtime": "M709 484V454",
+      "runtime>executor": "M785 423H815",
+      "executor>hand_brain": "M891 454V484",
+      "executor>checkpoint": "M891 454V472H334V484",
+      "executor>dag": "M839 454V462H526V454",
+      "checkpoint>sandbox_pool": "M368 546V558H983V351H967",
+      "executor>repos": "M967 424H990V844H938V858",
+      "ui_quality>ui_confirm": "M780 127H820",
+      "planner>ui_approve": "M516 300V237H1190V158",
+      "optim_entry>runtime": "M410 607H613V423H633",
+      "optim_entry>planner": "M382 576V555H606V330H592",
+      "verify_gw>optim_entry": "M1384 351H1361V671H335V638",
+      "ui_confirm>ui_history": "M932 158V174H1450V158",
+      "evo_goal>evo_eval": "M212 1079H236",
+      "evo_eval>evo_improve": "M406 1079H430",
+      "evo_improve>evo_release": "M600 1079H624",
+      "evo_release>evo_eval": "M710 1110V1121H323V1110",
+    };
+    const layers = svgElement("g", { class: "task-route-layer", "aria-hidden": "true" });
+    svg.insertBefore(layers, nodes.values().next().value);
+    const marker = svgElement("marker", {
+      id: "task-arrow", markerWidth: 10, markerHeight: 9, refX: 9, refY: 4.5,
+      orient: "auto", markerUnits: "userSpaceOnUse",
+    });
+    marker.append(svgElement("path", { d: "M0 0L10 4.5 0 9Z", class: "task-arrow-head" }));
+    svg.querySelector("defs").append(marker);
+    let painted = new Set();
+    function paint(trace) {
+      taskTrace = trace;
+      for (const id of painted) nodes.get(id)?.removeAttribute("data-task-state");
+      painted = new Set();
+      taskNodes.clear();
+      for (const entry of trace.nodes) {
+        const node = nodes.get(entry.id);
+        if (!node) continue;
+        painted.add(entry.id);
+        taskNodes.set(entry.id, entry);
+        node.dataset.taskState = entry.state;
+      }
+      layers.replaceChildren();
+      for (const edge of trace.edges) {
+        const original = originalEdges.get(edge.id);
+        const d = original?.getAttribute("d") || runtimeRoutes[edge.id];
+        if (!d) continue;
+        layers.append(svgElement("path", {
+          d, "marker-end": "url(#task-arrow)",
+          class: "task-route" + (original ? "" : " task-extension"),
+          "data-task-state": edge.state, "data-task-edge": edge.id,
+        }));
+      }
+      if (activeId) showTaskEvidence(activeId);
+    }
+    window.addEventListener("message", (event) => {
+      if (event.source !== window.parent || event.origin !== location.origin) return;
+      const message = event.data;
+      if (message?.type === "sca-architecture:trace" && Array.isArray(message.nodes)
+          && Array.isArray(message.edges)) paint(message);
+      if (message?.type === "sca-architecture:locate") {
+        const node = nodes.get(message.id);
+        if (node) locateModule(node);
+      }
+    });
+    const names = Object.fromEntries(original.map(({ id, name }) => [id, name]));
+    window.parent.postMessage({ type: "sca-architecture:ready", modules: names }, location.origin);
   }
 
   function toggleDirectory(on, focus = false) {
@@ -952,6 +1063,7 @@
     $("roadmap-list").append(card);
   }
 
+  if (taskView) connectTaskTrace();
   showView(location.hash.slice(1));
   updateProgress(false);
   statusSelect.value = "all";

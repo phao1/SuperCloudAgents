@@ -28,7 +28,13 @@ async def test_portal_and_config(api_store, tmp_path, monkeypatch):
                      authenticator=StaticTokenAuthenticator({'token': 'eval'}))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as c:
         page = await c.get('/portal')
-        assert page.status_code == 200 and '修复闭环' in page.text
+        assert page.status_code == 200 and '自演进闭环' in page.text
+        architecture = await c.get('/portal/architecture')
+        assert architecture.status_code == 200 and 'data-node-id="task_entry"' in architecture.text
+        task_flow = await c.get('/portal/task-flow.js')
+        assert task_flow.status_code == 200 and 'SCAJobFlow' in task_flow.text
+        timeline = await c.get('/portal/task-timeline.js')
+        assert timeline.status_code == 200 and 'SCATaskTimeline' in timeline.text
         assert (await c.get('/v1/portal/config')).status_code == 401
         r = await c.get('/v1/portal/config', headers={'Authorization': 'Bearer token'})
         assert r.status_code == 200

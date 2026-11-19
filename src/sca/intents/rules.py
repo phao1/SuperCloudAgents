@@ -27,7 +27,7 @@ class RulesAdapter:
         name = source.name + suffix
         path = ".sca/context/" + name
         argv = {
-            "ruff": ["ruff", "check", "--config", path, "."],
+            "ruff": ["python", "-m", "ruff", "check", "--config", path, "."],
             "eslint": ["eslint", "--config", path, "."],
             "semgrep": ["semgrep", "scan", "--config", path, "."],
         }[params.tool]

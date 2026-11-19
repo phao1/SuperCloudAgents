@@ -550,10 +550,20 @@ class KernelActivities:
         await self.store.append_event(
             task_id,
             EventType.SANDBOX_CREATED,
-            {"sandbox_id": sandbox_id, "image": image},
+            self._sandbox_event_payload(sandbox_id, image),
             dedup_key="sandbox.created",
         )
         return sandbox_id
+
+    def _sandbox_event_payload(self, sandbox_id: str, image: str) -> dict:
+        return {
+            "sandbox_id": sandbox_id,
+            "image": image,
+            "driver": self.settings.sandbox_driver,
+            "state_transport": self.settings.state_transport,
+            "cpus": self.settings.sandbox_cpus,
+            "memory_mb": self.settings.sandbox_memory_mb,
+        }
 
     @activity.defn
     async def release_sandbox(self, inp: StepInput) -> None:
@@ -573,7 +583,7 @@ class KernelActivities:
     async def restore_sandbox(self, inp: StepInput) -> None:
         """Bring back a released sandbox on the same workspace and session history."""
         spec = await self._spec(inp.task_id)
-        sandbox_id, _ = await self._create_sandbox(inp.task_id)
+        sandbox_id, image = await self._create_sandbox(inp.task_id)
         setup = await self._setup_command(inp.task_id, spec)
         if setup:
             # Whatever setup installed outside the mounted directories went with the old sandbox.
@@ -589,7 +599,7 @@ class KernelActivities:
         await self.store.append_event(
             inp.task_id,
             EventType.SANDBOX_RESTORED,
-            {"sandbox_id": sandbox_id, "after_turn": inp.turn},
+            {**self._sandbox_event_payload(sandbox_id, image), "after_turn": inp.turn},
             dedup_key=f"turn{inp.turn}.sandbox_restored",
         )
 
@@ -790,6 +800,11 @@ class KernelActivities:
         turn_error: AgentTurnError | None = None
         n = 0
         try:
+            if self.gateway:
+                await self.store.append_event(
+                    task_id, EventType.MODEL_KEY_ISSUED, {"turn": turn, "model": ctx.model},
+                    dedup_key=f"{key}.model_key_issued",
+                )
             async for ev in agent.run_turn(
                 self.sandbox,
                 sandbox_id,

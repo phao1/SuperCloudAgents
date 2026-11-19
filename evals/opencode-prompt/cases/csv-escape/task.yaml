@@ -1,0 +1,7 @@
+instruction: >
+  Fix render_row in app.py to serialize a single CSV record with CRLF at the end.
+  Preserve the order of the input strings, quote fields containing comma, double
+  quote, carriage return or line feed, and escape embedded double quotes by doubling
+  them. A record of one empty field must round-trip as one empty field. Do not change
+  export_name or the public verification script.
+verify_command: python verify.py

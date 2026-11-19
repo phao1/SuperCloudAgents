@@ -55,6 +55,13 @@ async def test_automatic_split_or_fallback(stack, source_repo, overlap):
     assert task["result"]["verification_passed"] is True
     events = await stack.events(task_id)
     assert any(e["type"] == "plan.started" for e in events)
+    planner = next(
+        e["payload"] for e in events
+        if e["type"] == "sandbox.created" and e["payload"].get("subtask") == "plan-1"
+    )
+    assert planner["driver"] == stack.settings.sandbox_driver
+    assert planner["state_transport"] == stack.settings.state_transport
+    assert planner["image"] and planner["cpus"] > 0 and planner["memory_mb"] > 0
     patch = await stack.patch(task_id)
     assert "return a + b" in patch
     if overlap:

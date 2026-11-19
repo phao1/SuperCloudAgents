@@ -150,6 +150,22 @@ def create_app(
     async def portal() -> FileResponse:
         return FileResponse(Path(__file__).parent / "static" / "portal.html")
 
+    @app.get("/portal/architecture", include_in_schema=False)
+    async def portal_architecture() -> FileResponse:
+        bundled = Path(__file__).parent / "static" / "architecture.html"
+        source = Path(__file__).resolve().parents[3] / "Milestone" / "index.html"
+        return FileResponse(bundled if bundled.is_file() else source)
+
+    @app.get("/portal/task-flow.js", include_in_schema=False)
+    async def portal_task_flow() -> FileResponse:
+        return FileResponse(Path(__file__).parent / "static" / "task-flow.js",
+                            media_type="text/javascript")
+
+    @app.get("/portal/task-timeline.js", include_in_schema=False)
+    async def portal_task_timeline() -> FileResponse:
+        return FileResponse(Path(__file__).parent / "static" / "task-timeline.js",
+                            media_type="text/javascript")
+
     try:
         from sca.api.agents import router as agents_router
     except ImportError:

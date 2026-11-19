@@ -8,6 +8,7 @@ from uuid import UUID
 import httpx
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from temporalio import activity
+from temporalio.exceptions import ApplicationError
 
 from sca.config import Settings
 from sca.core.models import TERMINAL_STATES
@@ -39,6 +40,9 @@ class EvalActivities:
     @activity.defn(name="eval_prepare")
     async def prepare(self, request: dict) -> dict:
         suite = await asyncio.to_thread(load_suite, Path(request["suite"]))
+        if request.get("suite_hash") not in (None, suite["hash"]):
+            await self.store.finish_eval_run(request["id"], "failed")
+            raise ApplicationError("Suite changed after evaluation was queued", non_retryable=True)
         await self.store.create_eval_run({
             "id": UUID(request["id"]), "tenant_id": "eval", "suite": suite["name"],
             "suite_hash": suite["hash"], "variant": request, "created_by": "cli", "status": "running",

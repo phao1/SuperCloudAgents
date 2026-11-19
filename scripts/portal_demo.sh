@@ -49,6 +49,10 @@ docker_access() {
 set -euo pipefail
 export DOCKER_DEFAULT_PLATFORM=$DOCKER_DEFAULT_PLATFORM
 WRAPPER
+    # Build subprocesses use HOME=/tmp, so retain Docker Desktop's user socket explicitly.
+    if [[ $(uname -s) == Darwin && -S "$HOME/.docker/run/docker.sock" ]]; then
+        printf 'export DOCKER_HOST=%q\n' "unix://$HOME/.docker/run/docker.sock" >> .data/run/docker
+    fi
     cat >> .data/run/docker <<'WRAPPER'
 if docker info >/dev/null 2>&1; then exec docker "$@"; fi
 printf -v arguments '%q ' "$@"
@@ -159,8 +163,8 @@ if values.get("SCA_MODEL_GATEWAY_MASTER_KEY") in (None, "", "GENERATED_BY_SETUP"
     set_key(path, "SCA_MODEL_GATEWAY_MASTER_KEY", master)
 elif values["SCA_MODEL_GATEWAY_MASTER_KEY"] != master:
     raise SystemExit(".env 中两个网关 master key 必须相同；请人工修正后重试。")
-if fresh or not values.get("DEEPSEEK_API_KEY") or values["DEEPSEEK_API_KEY"] == "REPLACE_ME":
-    raise SystemExit("请在 .env 中填写 DEEPSEEK_API_KEY，然后重新运行 setup。密钥不会显示。")
+if not values.get("DEEPSEEK_API_KEY") or values["DEEPSEEK_API_KEY"] == "REPLACE_ME":
+    print("尚未配置 DeepSeek API Key；启动后可在 Portal 中填写。")
 portal = Path(".data/portal.env")
 previous = dotenv_values(portal) if portal.exists() else {}
 token = os.environ.get("PORTAL_TOKEN") or previous.get("SCA_EVAL_API_TOKEN") or secrets.token_hex(32)
@@ -172,6 +176,7 @@ settings = dict(
     SCA_EGRESS_ALLOW="pypi.org,files.pythonhosted.org",
     SCA_API_TOKENS=f"dev-token:default,{token}:eval:admin",
     SCA_EVAL_API_TOKEN=token, SCA_API_URL="http://127.0.0.1:8000",
+    SCA_PORTAL_LOCAL_CONFIG=str(Path('.env').resolve()),
     SCA_WORKER_METRICS_PORT="9464", SCA_OPENCODE_BUILD_MEMORY="2500m",
     # The brain backend runs `docker exec` itself; reuse the wrapper that falls back to `sg docker`.
     SCA_OPENCODE_BRAIN_DOCKER_PREFIX=json.dumps([str(Path(".data/run/docker").resolve())]),

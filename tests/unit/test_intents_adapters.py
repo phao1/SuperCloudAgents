@@ -24,6 +24,9 @@ def test_rules(tmp_path, tool):
     )
     bundle = RulesAdapter().compile(source, tmp_path)
     command = shlex.split(bundle.checks[0].command)
+    if tool == "ruff":
+        assert command[:2] == ["python", "-m"]
+        command = command[2:]
     assert command[0] == tool
     assert command[-1] == "."
     assert len(command) == (4 if tool == "eslint" else 5)

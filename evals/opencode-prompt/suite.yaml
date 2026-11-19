@@ -1,0 +1,7 @@
+name: opencode-prompt
+kind: coding
+description: 比较 OpenCode 系统提示词对改动范围、边界正确性和执行成本的影响。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 180
+  memory_enabled: false
