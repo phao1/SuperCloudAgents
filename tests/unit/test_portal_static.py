@@ -198,6 +198,24 @@ assert(emptyMemory.facts.some(fact=>fact.value==='0 条')&&!emptyMemory.note);
 const selectedMemory=flowModel.describeStep({result:{memory_context:'run the full suite'}},{type:'memory.injected',payload:{ids:['one'],method:'vector'}});
 assert(selectedMemory.facts.some(fact=>fact.value==='.sca/context/MEMORY.md'));
 assert.equal(selectedMemory.note,'run the full suite');
+const annotatedPlan=flowModel.describeStep({spec:{instruction:'Deliver order validation and CSV.\n```sca-fake\nprivate script\n```'}},{seq:5,type:'plan.started',payload:{attempt:1}},[planEvent]);
+assert(annotatedPlan.facts.some(fact=>fact.value==='Deliver order validation and CSV.'));
+assert(annotatedPlan.facts.some(fact=>fact.value.includes('report（orders/report.py）')));
+const read=flowModel.describeStep({},{seq:10,type:'agent.tool',payload:{name:'read',input:{path:'/workspace/README.md'},output_tail:'Read file /workspace/README.md, lines 1-9\n1: orders'}});
+assert(read.facts.some(fact=>fact.label==='读取对象'&&fact.value==='README.md'));
+assert(read.facts.some(fact=>fact.value==='行 1–9'));
+const glob=flowModel.describeStep({},{seq:11,type:'agent.tool',payload:{name:'glob',input:{pattern:'**/*.py'},output_tail:'/workspace/orders/report.py\n/workspace/tests/test_report.py'}});
+assert(glob.facts.some(fact=>fact.value==='orders/report.py、tests/test_report.py'));
+const picked=flowModel.describeStep({},{type:'memory.injected',payload:{ids:['one'],entries:[{text:'Keep prices in cents',category:'convention',scope:'repo'}]}});
+assert.equal(picked.items[0].text,'Keep prices in cents');
+const qualityFixture=[{seq:1,type:'verification.completed',payload:{subtask:'report',passed:true}},
+ {seq:2,type:'ci.completed',payload:{turn:1,passed:false}},
+ {seq:3,type:'ci.completed',payload:{turn:2,passed:true}},
+ {seq:4,type:'acceptance.completed',payload:{passed:true}}];
+const quality=flowModel.qualityReport({result:{verification_passed:true}},qualityFixture);
+assert.deepEqual(quality.rows.filter(row=>row.type==='ci.completed').map(row=>row.passed),[false,true]);
+assert(quality.rows.some(row=>row.scope==='report'&&row.seq===1));
+assert(flowModel.describeStep({},qualityFixture[3]).quality);
 const before={
  ...fixedRun,suite:'opencode-prompt',
  variant:{repeat:2,variant:{agent_version:'2.3.0-sca.1',agent_backend:'opencode'}},

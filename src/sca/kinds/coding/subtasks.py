@@ -87,6 +87,8 @@ class ChildActivities(CodingActivities):
             objects=ChildObjects(parent.objects, name),
             gateway=parent.gateway,
             secrets=parent.secrets,
+            backends=parent.backends,
+            worker_identity=parent.worker_identity,
         )
         self.name = name
 

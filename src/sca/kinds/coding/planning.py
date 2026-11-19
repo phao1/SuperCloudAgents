@@ -82,7 +82,7 @@ class PlanningActivities:
         await acts.store.append_event(
             inp.task_id,
             EventType.PLAN_STARTED,
-            {"attempt": inp.attempt},
+            {"attempt": inp.attempt, **acts._activity_route()},
             dedup_key=f"plan{inp.attempt}.started",
         )
         child = ChildActivities(acts, f"plan-{inp.attempt}")

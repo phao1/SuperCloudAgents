@@ -222,11 +222,55 @@ const SCAJobFlow = (() => {
     return text.length > limit ? text.slice(0, limit) + '…' : text;
   }
 
+  function workspacePath(value) {
+    const path = excerpt(value);
+    if (path === '/workspace' || path === '/workspace/') return '仓库根目录';
+    return path.replace(/^\/workspace\//, '');
+  }
+
+  function instructionExcerpt(value, limit) {
+    return excerpt(typeof value === 'string' ? value.split(/^[ \t]*(?:`{3,}|~{3,})/m, 1)[0] : '', limit);
+  }
+
+  function readTarget(event) {
+    const p = event.payload || {};
+    return workspacePath(p.input?.filePath || p.input?.path || p.filePath || p.path);
+  }
+
+  function workflowPlan(history, event, future = false) {
+    return history.findLast(item => item.type === 'plan.completed' &&
+      (future ? item.seq > event.seq && (item.payload?.attempt || 1) === (event.payload?.attempt || 1)
+        : item.seq <= event.seq));
+  }
+
+  function qualityReport(task, events) {
+    const latest = new Map(), ci = [];
+    const kinds = {
+      'verification.completed': '工作区验证', 'intents.checked': '设计规则检查',
+      'acceptance.completed': '独立验收', 'ci.completed': 'CI',
+    };
+    for (const event of events) {
+      const label = kinds[event.type];
+      if (!label) continue;
+      const p = event.payload || {};
+      const checks = Array.isArray(p.checks) ? p.checks : [];
+      const passed = event.type === 'intents.checked' && checks.length
+        ? checks.every(check => check.passed === true) : p.passed;
+      const row = { seq: event.seq, type: event.type, label, scope: p.subtask || '主任务',
+        turn: p.turn, passed, skipped: p.skipped, commit: p.commit, checks };
+      if (event.type === 'ci.completed') ci.push(row);
+      else latest.set(event.type + ':' + row.scope, row);
+    }
+    return { rows: [...latest.values(), ...ci].sort((a, b) => a.seq - b.seq),
+      verification: task.result?.verification_passed, acceptance: task.result?.acceptance_passed,
+      evaluation: task.spec?.eval_run_id };
+  }
+
   function describeStep(task, event, history = [], config = {}) {
     const p = event?.payload || {};
     const spec = task.spec || {};
     const facts = [], items = [];
-    let summary = '', note = '', delay = 1300;
+    let summary = '', note = '', delay = 1300, quality = false;
     const fact = (label, value) => {
       if (value != null && value !== '') facts.push({ label, value: String(value) });
     };
@@ -237,12 +281,21 @@ const SCAJobFlow = (() => {
       fact('分支', p.branch);
       fact('提交', excerpt(p.commit || p.base_sha, 12));
     };
+    const routing = () => {
+      fact('Temporal 队列', p.task_queue);
+      fact('工作流 ID', p.workflow_id);
+      fact('执行 Worker', p.worker);
+    };
+    const parts = workflowPlan(history, event || { seq: 0 })?.payload?.subtasks || spec.subtasks || [];
+    const scopedPart = parts.find(child => child.name === p.subtask);
+    const taskGoal = () => fact('实际需求', instructionExcerpt(spec.instruction || spec.question, 270));
 
     switch (event?.type) {
       case 'task.created':
         summary = 'API 接收任务、核验调用权限，并创建一条可追踪的工作流记录。';
         fact('任务类型', { coding: '代码任务', analysis: '分析任务' }[task.kind] || task.kind);
         fact('规划方式', spec.plan === 'auto' ? '自动规划' : spec.subtasks?.length ? '已提供子任务' : '单任务执行');
+        taskGoal();
         break;
       case 'admission.waiting':
       case 'admission.granted':
@@ -251,10 +304,22 @@ const SCAJobFlow = (() => {
         fact('队列位置', p.position);
         if (typeof p.wait_seconds === 'number') fact('等待', p.wait_seconds.toFixed(2) + ' 秒');
         break;
-      case 'plan.started':
-        summary = '规划 Agent 读取需求和仓库文件，判断哪些工作可以分开做，并将方案写入 plan.json。';
+      case 'plan.started': {
+        summary = '规划 Agent 对照需求与仓库内的实现和测试，先划定修改边界，再把方案写入 plan.json。';
         fact('规划尝试', p.attempt);
+        taskGoal();
+        const completed = workflowPlan(history, event, true);
+        if (completed) {
+          const planned = completed.payload.subtasks || [];
+          fact('本次后续方案', planned.length
+            ? planned.map(child => child.name + (child.paths?.length ? '（' + child.paths.join('、') + '）' : '')).join('，')
+            : '主任务直接执行');
+          fact('方案证据', '事件 #' + completed.seq);
+        }
+        routing();
+        delay = 4600;
         break;
+      }
       case 'plan.completed': {
         const children = p.subtasks || [];
         summary = p.split ? '规划器划分了各子任务的工作范围，并检查当前仓库中的文件匹配范围互不重叠。'
@@ -262,8 +327,12 @@ const SCAJobFlow = (() => {
         if (p.split) {
           fact('执行关系', '并行执行，各自使用独立工作区和沙箱。全部返回后由主任务装配并验证。');
           if (spec.plan_review) fact('开始条件', '拆分方案获批后下发');
-          for (const child of children) item(child.name, excerpt(child.instruction, 220), child.paths?.join('、'));
+          for (const child of children) item(child.name, instructionExcerpt(child.instruction, 220), child.paths?.join('、'));
         }
+        const inspected = [...new Set(history.filter(entry => entry.seq < event.seq && entry.type === 'agent.tool'
+          && entry.payload?.subtask === 'plan-' + (p.attempt || 1) && entry.payload?.name === 'read')
+          .map(readTarget).filter(Boolean))];
+        if (inspected.length) fact('规划读取过', inspected.slice(0, 8).join('、'));
         note = excerpt(p.reason);
         delay = p.split ? 4000 + Math.min(children.length, 5) * 900 : 3300;
         break;
@@ -273,14 +342,14 @@ const SCAJobFlow = (() => {
         note = excerpt(p.reason);
         break;
       case 'subtask.started': {
-        const plan = prior(e => e.type === 'plan.completed');
-        const children = plan?.payload?.split ? plan.payload.subtasks || [] : spec.subtasks || [];
-        const child = children.find(candidate => candidate.name === p.subtask);
-        summary = 'Temporal 子工作流开始运行。Worker 为该分支建立自己的工作区，然后为它分配执行沙箱。';
-        fact('子任务', p.subtask);
-        fact('并行支路', children.filter(candidate => candidate.name !== p.subtask).map(candidate => candidate.name).join('、'));
-        if (child) item(child.name, excerpt(child.instruction, 220), child.paths?.join('、'));
-        delay = 3000;
+        summary = 'Temporal 将子工作流加入任务队列。空闲 Worker 领取准备活动，从同一基准提交检出子分支，然后申请独立沙箱。';
+        const index = parts.indexOf(scopedPart);
+        fact('业务分工', index >= 0 ? '第 ' + (index + 1) + '/' + parts.length + ' 个分支 · ' + p.subtask : p.subtask);
+        fact('同批并行', parts.filter(candidate => candidate.name !== p.subtask).map(candidate => candidate.name).join('、'));
+        if (scopedPart) item(scopedPart.name, instructionExcerpt(scopedPart.instruction, 260), scopedPart.paths?.join('、'));
+        routing();
+        if (!p.worker) note = '这条历史事件保留了业务分支。执行它的 Worker 标识从新版事件开始记录。';
+        delay = 4150;
         break;
       }
       case 'subtasks.merged': {
@@ -288,7 +357,13 @@ const SCAJobFlow = (() => {
         summary = '并行分支都返回后，装配器尝试把各自的提交合并到主工作区，再进行全量验证。';
         for (const child of statuses) {
           const status = { merged: '已合并', unchanged: '无改动', conflict: '有合并冲突' }[child.status];
-          item(child.name, status || child.status, excerpt(child.reason));
+          const worker = prior(e => e.type === 'agent.turn_started' && e.payload?.subtask === child.name)?.payload?.worker;
+          const change = prior(e => e.type === 'workspace.checkpointed' && e.payload?.subtask === child.name);
+          const purpose = parts.find(part => part.name === child.name);
+          const files = (Array.isArray(change?.payload?.changed) ? change.payload.changed : purpose?.paths || [])
+            .map(workspacePath).filter(Boolean);
+          item(child.name, [status || child.status, result(child.passed), worker && 'Worker ' + worker].filter(Boolean).join(' · '),
+            [files.join('、'), excerpt(child.reason), child.branch].filter(Boolean).join(' · '));
         }
         delay = 4000;
         break;
@@ -309,25 +384,33 @@ const SCAJobFlow = (() => {
         const driver = p.driver || earlier?.driver;
         const drivers = { docker: 'Docker 容器', k8s: 'Kubernetes Pod' };
         const provision = { docker: '通过 Docker 启动或复用容器', k8s: '创建或领取 Kubernetes Pod，并等待就绪' };
-        summary = restored ? '为恢复执行重新准备沙箱，接回保存的工作区，并重新运行需要的环境准备。'
-          : driver ? 'Worker ' + (provision[driver] || '准备隔离的沙箱') + '，准备工作区后交给 Agent 或验证命令。'
+        summary = restored ? '恢复执行时，Worker 重新分配沙箱、接回保存的工作区，并重跑初始化命令。任务和已保存的会话仍可续接。'
+          : driver ? 'Worker ' + (provision[driver] || '准备隔离的沙箱') + '，按资源限额和镜像配置环境，再交给 Agent 或验证命令。'
           : '调度器为该执行分支分配独立沙箱，并给 Agent 或验证命令准备工作区。';
         fact(restored ? '恢复对象' : '调度对象', p.subtask || '主任务');
         fact(driver ? '运行方式' : '当前环境', drivers[driver || config.sandbox_driver]);
         fact('镜像', p.image || earlier?.image);
         fact('沙箱名称', p.sandbox_id);
+        const released = restored && prior(e => e.type === 'sandbox.released' && e.payload?.sandbox_id === p.sandbox_id)?.payload;
+        if (released?.container_id) fact('已释放实例', excerpt(released.container_id, 12));
+        fact('当前容器实例', excerpt(p.container_id, 12));
+        if (released?.container_id && p.container_id && released.container_id !== p.container_id)
+          fact('恢复结果', '新容器接回原任务工作区');
         const transport = p.state_transport || earlier?.state_transport;
         fact(transport ? '工作区交付' : '当前工作区交付',
           { mount: '挂载工作目录', sync: '同步工作目录' }[transport || config.state_transport]);
         if (p.cpus || p.memory_mb) fact('资源限额', [p.cpus && p.cpus + ' vCPU', p.memory_mb && p.memory_mb + ' MiB 内存'].filter(Boolean).join(' · '));
+        routing();
         if (!driver && provision[config.sandbox_driver]) note = '当前 Worker ' + provision[config.sandbox_driver] + '。这条历史事件记录了沙箱名称，运行方式以当前配置为参考。';
         delay = 4100;
         break;
       }
       case 'sandbox.released':
-        summary = '释放沙箱占用的执行资源，保留工作区和已有会话，等待下一次恢复。';
+        summary = 'Worker 已回收执行沙箱并释放执行槽位。工作区和已保存的会话继续留存，供下一次恢复。';
         fact('沙箱名称', p.sandbox_id);
+        fact('已释放容器', excerpt(p.container_id, 12));
         fact('释放时的轮次', p.after_turn);
+        routing();
         break;
       case 'setup.completed':
         summary = p.skipped ? '工作区已从准备快照恢复，跳过重复的环境初始化。'
@@ -339,10 +422,16 @@ const SCAJobFlow = (() => {
         const count = p.ids?.length;
         summary = 'Worker 在当前租户查找已启用的记忆，按租户、任务类型和仓库范围匹配。命中的项目约定、常用命令和踩坑经验会写入工作区，作为 Agent 的参考。';
         fact('本次注入', count == null ? '' : count + ' 条');
+        fact('查询范围', ['当前租户', task.kind && '类型 ' + task.kind, spec.repo_url && '同一代码仓'].filter(Boolean).join(' · '));
         fact('挑选方式', { all: '范围内全部匹配项', recent: '优先最近使用或创建的条目', vector: '按语义相关性筛选' }[p.method]);
         if (count) {
           fact('写入位置', '.sca/context/MEMORY.md');
-          note = excerpt(task.result?.memory_context, 420);
+          for (const entry of p.entries || []) {
+            const category = { command: '常用命令', pitfall: '踩坑经验', convention: '项目约定', preference: '偏好' }[entry.category];
+            const scope = { repo: '仓库', kind: '任务类型', tenant: '租户' }[entry.scope];
+            item(category || '匹配记忆', excerpt(entry.text, 260), scope && scope + '作用域');
+          }
+          if (!items.length) note = excerpt(task.result?.memory_context, 520);
         }
         delay = 4900;
         break;
@@ -352,10 +441,17 @@ const SCAJobFlow = (() => {
         for (const source of p.sources || []) item(source.name, source.type, source.checks?.join('、'));
         break;
       case 'agent.turn_started':
-        summary = 'Worker 把本轮指令交给 Agent。重试时会附上上次验证或审核提供的反馈。';
-        fact('后端', spec.agent_backend);
+        summary = 'Worker 把这一执行分支的需求交给 Agent。重试时会附上上次验证或审核提供的反馈。';
+        fact('后端', p.backend || spec.agent_backend);
         fact('模型', spec.model);
         fact('执行轮', p.turn === 0 ? '规划轮' : p.turn);
+        if (scopedPart) item(scopedPart.name, instructionExcerpt(scopedPart.instruction, 240), scopedPart.paths?.join('、'));
+        else if (p.turn > 1) {
+          const feedback = prior(e => !e.payload?.subtask && (e.type === 'ci.completed' && e.payload?.passed === false
+            || e.type === 'review.submitted' && e.payload?.decision === 'request_changes'));
+          if (feedback) fact('本轮反馈', excerpt(feedback.payload.summary || feedback.payload.feedback, 360));
+        }
+        routing();
         break;
       case 'model.key_issued':
         summary = '模型网关为本轮签发短期访问凭据，Agent 通过网关请求所选模型。';
@@ -370,7 +466,25 @@ const SCAJobFlow = (() => {
         fact('工具', p.name);
         fact('命令', excerpt(p.command, 160));
         fact('退出码', p.exit_code);
-        fact('文件', excerpt(p.path || p.file || p.filePath || p.input?.filePath));
+        if (p.name === 'read') {
+          summary = 'Agent 打开文件或目录，核对实现、测试或项目说明。';
+          fact('读取对象', readTarget(event));
+          const span = /\b(lines|entries)\s+(\d+)-(\d+)/i.exec(p.output_tail || '');
+          if (span) fact('实际读取范围', (span[1].toLowerCase() === 'lines' ? '行' : '条目') + ' ' + span[2] + '–' + span[3]);
+        } else if (p.name === 'glob') {
+          summary = 'Agent 按文件名模式查找候选文件，结果为后续读取、规划或修改提供范围。';
+          fact('匹配模式', excerpt(p.input?.pattern));
+          fact('搜索目录', readTarget(event));
+          const matches = (p.output_tail || '').split('\n').map(line => line.trim())
+            .filter(line => line.startsWith('/workspace/')).slice(0, 8).map(workspacePath);
+          if (matches.length) fact('结果节选', matches.join('、'));
+          else if (/no files found/i.test(p.output_tail || '')) fact('结果', '未找到匹配文件');
+        } else {
+          const files = (p.changes || []).map(change => workspacePath(typeof change === 'string'
+            ? change : change.file || change.path || change.filePath));
+          fact('文件', files.filter(Boolean).join('、') || readTarget(event) || workspacePath(p.file));
+        }
+        if (scopedPart) fact('业务分支', scopedPart.name);
         delay = 1000;
         break;
       case 'agent.usage':
@@ -391,10 +505,15 @@ const SCAJobFlow = (() => {
       case 'workspace.checkpointed':
         summary = '保存本轮工作区的提交与检查点，供后续验证、发布或恢复执行。';
         branch();
+        if (Array.isArray(p.changed)) fact('本轮改动', p.changed.map(workspacePath).filter(Boolean).join('、'));
         break;
       case 'verification.started':
         summary = '验证器开始在沙箱中运行任务配置的检查。有多个检查时会并行执行。';
         fact('检查项', p.checks);
+        fact('验证对象', p.subtask || '主任务工作区');
+        for (const command of [spec.verify_command, ...(spec.verify_commands || [])].filter(Boolean))
+          item('配置的命令', excerpt(command, 430));
+        routing();
         break;
       case 'verification.completed':
       case 'intents.checked': {
@@ -403,8 +522,13 @@ const SCAJobFlow = (() => {
           : event.type === 'intents.checked' ? '执行从设计规范或规则编译出来的检查，并记录逐项结果。'
           : '收集本轮的验证退出码和输出，将失败项交给工作流决定是否重试。';
         fact('检查结果', result(p.passed));
-        for (const check of checks) item(check.name || excerpt(check.command, 120) || '验证项',
-          check.timed_out ? '超时' : result(check.passed), check.exit_code == null ? '' : '退出码 ' + check.exit_code);
+        for (const [index, check] of checks.entries()) item((check.name || '检查 ' + (index + 1)) + ' · '
+          + (check.timed_out ? '超时' : result(check.passed)), excerpt(check.command, 430),
+          check.exit_code == null ? '' : '退出码 ' + check.exit_code);
+        const testCount = /\bRan\s+(\d+)\s+tests?/i.exec(p.output_tail || '');
+        if (testCount) fact('测试输出', '运行 ' + testCount[1] + ' 项测试');
+        note = p.passed === false ? excerpt(p.output_tail, 300) : '';
+        quality = true;
         delay = checks.length > 1 ? 2400 : 1500;
         break;
       }
@@ -415,12 +539,16 @@ const SCAJobFlow = (() => {
         branch();
         fact('CI 结果', p.timed_out ? '等待超时' : result(p.passed));
         note = excerpt(p.summary, 360);
+        quality = event.type === 'ci.completed';
         delay = 3600;
         break;
       case 'acceptance.completed':
         summary = '用本轮提交建立一份独立工作区，运行随任务登记的验收检查。';
         fact('验收结果', result(p.passed));
         fact('退出码', p.exit_code);
+        fact('验收命令', excerpt(spec.acceptance_command));
+        note = excerpt(p.output_tail, 320);
+        quality = true;
         delay = 2300;
         break;
       case 'artifact.published':
@@ -453,9 +581,9 @@ const SCAJobFlow = (() => {
         note = excerpt(p.reason);
         break;
     }
-    return { summary, facts, items, note, delay };
+    return { summary, facts, items, note, delay, quality };
   }
 
-  return { trace, project, describeStep };
+  return { trace, project, describeStep, qualityReport };
 })();
 if (typeof module === 'object') module.exports = SCAJobFlow;

@@ -62,6 +62,9 @@ async def test_automatic_split_or_fallback(stack, source_repo, overlap):
     assert planner["driver"] == stack.settings.sandbox_driver
     assert planner["state_transport"] == stack.settings.state_transport
     assert planner["image"] and planner["cpus"] > 0 and planner["memory_mb"] > 0
+    assert planner["task_queue"] == stack.settings.task_queue and planner["worker"]
+    if planner["driver"] == "docker":
+        assert len(planner["container_id"]) == 64
     patch = await stack.patch(task_id)
     assert "return a + b" in patch
     if overlap:
@@ -87,6 +90,10 @@ async def test_automatic_split_or_fallback(stack, source_repo, overlap):
             and e["payload"].get("subtask") in {"add", "extra"}
         ]
         assert len(started) == len(finished) == 2
+        assert {row["payload"]["workflow_id"] for row in started} == {
+            f"task-{task_id}-sub-add", f"task-{task_id}-sub-extra",
+        }
+        assert all(row["payload"]["worker"] for row in started)
         assert max(datetime.fromisoformat(e["created_at"]) for e in started) < min(
             datetime.fromisoformat(e["created_at"]) for e in finished
         )

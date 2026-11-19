@@ -131,6 +131,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         objects=make_object_store(settings),
         secrets=make_secret_provider(settings),
         gateway=await make_gateway(settings, sandbox),
+        worker_identity=client.identity,
     )
     maintenance = MaintenanceActivities(settings, store, deps.objects, sandbox, deps.gateway)
     if settings.maintenance_schedule:
@@ -166,6 +167,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
     evaluation = EvalActivities(settings, store)
     return Worker(
         client,
+        identity=deps.worker_identity,
         task_queue=settings.task_queue,
         workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow],
         activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + [builds.build],

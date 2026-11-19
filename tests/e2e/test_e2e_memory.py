@@ -94,10 +94,10 @@ grep -q 'Use pnpm' .sca/context/MEMORY.md && printf 'memory used' > result.txt
     )
     pending = await stack.wait_for(second, "AWAITING_REVIEW")
     assert pending["result"]["verification_passed"]
-    assert any(
-        e["type"] == "memory.injected" and distilled[0]["id"] in e["payload"]["ids"]
-        for e in await stack.events(second)
-    )
+    memory = next(e["payload"] for e in await stack.events(second) if e["type"] == "memory.injected")
+    assert distilled[0]["id"] in memory["ids"]
+    assert {"id": distilled[0]["id"], "scope": "repo", "category": "command",
+            "text": "Use pnpm for this repository"} in memory["entries"]
     await stack.review(second, "approve")
     await stack.wait_for(second, "SUCCEEDED")
     other_repo = source_repo.parent / "other.git"

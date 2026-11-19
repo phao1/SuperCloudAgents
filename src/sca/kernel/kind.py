@@ -42,6 +42,7 @@ class KindDeps:
     objects: ObjectStore
     gateway: ModelGateway | None = None
     secrets: SecretProvider | None = None
+    worker_identity: str | None = None
 
 
 class ExecutionSpec(Protocol):

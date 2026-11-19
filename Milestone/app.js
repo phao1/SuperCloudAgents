@@ -583,6 +583,11 @@
     if (!pane) return;
     const entry = taskNodes.get(id);
     pane.replaceChildren(nodeEl("h4", "", "本次任务"));
+    if (id === "ui_quality" && taskTrace?.task) {
+      pane.append(button("task-event", "打开任务质量看板", () => {
+        window.parent.postMessage({ type: "sca-architecture:quality", task: taskTrace.task }, location.origin);
+      }));
+    }
     if (!entry) {
       pane.append(nodeEl("p", "", "当前视图没有这个模块的执行事件。"));
       return;
@@ -641,6 +646,7 @@
     svg.querySelector("defs").append(marker);
     let painted = new Set();
     function paint(trace) {
+      if (taskTrace?.task && taskTrace.task !== trace.task && activeId) closeSelection({ restoreFocus: false });
       taskTrace = trace;
       for (const id of painted) nodes.get(id)?.removeAttribute("data-task-state");
       painted = new Set();
@@ -670,6 +676,7 @@
       const message = event.data;
       if (message?.type === "sca-architecture:trace" && Array.isArray(message.nodes)
           && Array.isArray(message.edges)) paint(message);
+      if (message?.type === "sca-architecture:close-selection" && activeId) closeSelection({ restoreFocus: false });
       if (message?.type === "sca-architecture:locate") {
         const node = nodes.get(message.id);
         if (node) locateModule(node);
@@ -882,7 +889,10 @@
         results.hidden = true;
       } else if (!directory.hidden) toggleDirectory(false, true);
       else if (activeId) closeSelection();
-      else hideTooltip();
+      else {
+        hideTooltip();
+        if (taskView) window.parent.postMessage({ type: "sca-architecture:escape" }, location.origin);
+      }
       return;
     }
     const editable = event.target.closest("input, select, textarea, [contenteditable]");

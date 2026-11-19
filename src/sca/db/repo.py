@@ -862,8 +862,13 @@ class Store:
                 await session.execute(update(memories).where(
                     memories.c.tenant_id == self.tenant_id, memories.c.id.in_(ids),
                 ).values(uses=memories.c.uses + 1, last_used_at=datetime.now(UTC)))
+            chosen = set(ids)
+            entries = [{"id": str(row['id']), "scope": row['scope'].partition(':')[0],
+                        "category": row['category'], "text": row['text']}
+                       for row in ordered if row['id'] in chosen]
             await self._event(session, task['id'], 'memory.injected',
-                              {'ids': [str(i) for i in ids], 'method': method}, dedup_key='memory.injected')
+                              {'ids': [str(i) for i in ids], 'method': method, 'entries': entries},
+                              dedup_key='memory.injected')
             await session.execute(update(tasks).where(tasks.c.id == task['id']).values(
                 result={**task['result'], 'memory_context': content}))
             return content

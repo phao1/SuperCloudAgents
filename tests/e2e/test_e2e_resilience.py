@@ -43,6 +43,12 @@ class TestIdleRelease:
             ):
                 await asyncio.sleep(0.5)
         events = await stack.events(task_id)
+        created = next(e["payload"] for e in events if e["type"] == "sandbox.created")
+        released = next(e["payload"] for e in events if e["type"] == "sandbox.released")
+        assert created["container_id"] == released["container_id"]
+        removed = await asyncio.to_thread(subprocess.run, ["docker", "inspect", released["container_id"]],
+                                          capture_output=True, check=False)
+        assert removed.returncode != 0
         assert (await stack.task(task_id))["state"] == "AWAITING_REVIEW"
         assert "+    return a + b" in await stack.patch(task_id)  # still reviewable
 
@@ -57,7 +63,10 @@ class TestIdleRelease:
         assert task["result"]["verification_passed"] is True
         patch = await stack.patch(task_id)
         assert "def sub" in patch and "+    return a + b" in patch
-        assert any(e["type"] == "sandbox.restored" for e in await stack.events(task_id))
+        restored = next(e["payload"] for e in await stack.events(task_id)
+                        if e["type"] == "sandbox.restored")
+        assert restored["sandbox_id"] == released["sandbox_id"]
+        assert restored["container_id"] and restored["container_id"] != released["container_id"]
 
         await stack.review(task_id, "approve")
         await stack.wait_for(task_id, "SUCCEEDED")

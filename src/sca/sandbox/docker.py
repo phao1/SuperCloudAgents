@@ -195,6 +195,10 @@ class DockerSandboxProvider:
         await self._cli(*args, spec.image, "sleep", "infinity")
         return sandbox_id
 
+    async def runtime_id(self, sandbox_id: str) -> str:
+        _, identity, _ = await self._cli("inspect", "--format", "{{.Id}}", sandbox_id)
+        return identity.strip()
+
     async def list(self, labels: dict[str, str]) -> list[str]:
         filters = [
             arg

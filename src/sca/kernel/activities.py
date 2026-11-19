@@ -141,6 +141,7 @@ class KernelActivities:
         gateway: ModelGateway | None = None,
         secrets: SecretProvider | None = None,
         backends: dict[str, AgentBackend] | None = None,
+        worker_identity: str | None = None,
     ) -> None:
         self.secrets = secrets or make_secret_provider(settings)
         self.gateway = gateway
@@ -150,6 +151,7 @@ class KernelActivities:
         self.agent = agent
         self.backends = backends or {agent.name: agent}
         self.objects = objects
+        self.worker_identity = worker_identity
         if hasattr(agent, "state_transport"):
             agent.state_transport = settings.state_transport
         self.transport = (SyncTransport if settings.state_transport == "sync" else MountTransport)(
@@ -547,35 +549,49 @@ class KernelActivities:
     @activity.defn
     async def create_sandbox(self, task_id: str) -> str:
         sandbox_id, image = await self._create_sandbox(task_id)
+        payload = await self._sandbox_event_payload(sandbox_id, image)
         await self.store.append_event(
-            task_id,
-            EventType.SANDBOX_CREATED,
-            self._sandbox_event_payload(sandbox_id, image),
+            task_id, EventType.SANDBOX_CREATED, payload,
             dedup_key="sandbox.created",
         )
         return sandbox_id
 
-    def _sandbox_event_payload(self, sandbox_id: str, image: str) -> dict:
-        return {
+    def _activity_route(self) -> dict:
+        if not activity.in_activity():
+            return {}
+        info = activity.info()
+        return {"workflow_id": info.workflow_id, "task_queue": info.task_queue,
+                **({"worker": self.worker_identity} if self.worker_identity else {})}
+
+    async def _sandbox_event_payload(self, sandbox_id: str, image: str | None = None) -> dict:
+        payload = {
             "sandbox_id": sandbox_id,
-            "image": image,
             "driver": self.settings.sandbox_driver,
-            "state_transport": self.settings.state_transport,
-            "cpus": self.settings.sandbox_cpus,
-            "memory_mb": self.settings.sandbox_memory_mb,
+            **self._activity_route(),
         }
+        if image is not None:
+            payload.update(image=image, state_transport=self.settings.state_transport,
+                           cpus=self.settings.sandbox_cpus, memory_mb=self.settings.sandbox_memory_mb)
+        instance_id = getattr(self.sandbox, "runtime_id", None)
+        if instance_id is not None:
+            with contextlib.suppress(SandboxError):
+                identity = await instance_id(sandbox_id)
+                if isinstance(identity, str) and identity:
+                    payload["container_id"] = identity
+        return payload
 
     @activity.defn
     async def release_sandbox(self, inp: StepInput) -> None:
         """Free the sandbox of an idle task. Workspace and session history stay on disk."""
         sandbox_id = await self._sandbox_id(inp.task_id)
+        payload = await self._sandbox_event_payload(sandbox_id)
         await self._record_sandbox_activity(inp.task_id)
         await self.sandbox.destroy(sandbox_id)
         await self.store.release_slot(inp.task_id)
         await self.store.append_event(
             inp.task_id,
             EventType.SANDBOX_RELEASED,
-            {"sandbox_id": sandbox_id, "after_turn": inp.turn},
+            {**payload, "after_turn": inp.turn},
             dedup_key=f"turn{inp.turn}.sandbox_released",
         )
 
@@ -596,10 +612,11 @@ class KernelActivities:
                     type="SetupFailed",
                     non_retryable=True,
                 )
+        payload = await self._sandbox_event_payload(sandbox_id, image)
         await self.store.append_event(
             inp.task_id,
             EventType.SANDBOX_RESTORED,
-            {**self._sandbox_event_payload(sandbox_id, image), "after_turn": inp.turn},
+            {**payload, "after_turn": inp.turn},
             dedup_key=f"turn{inp.turn}.sandbox_restored",
         )
 
@@ -772,7 +789,9 @@ class KernelActivities:
         await self.store.append_event(
             task_id,
             EventType.AGENT_TURN_STARTED,
-            {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name, "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version},
+            {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name,
+             "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version,
+             **self._activity_route()},
             dedup_key=f"{key}.started",
         )
 

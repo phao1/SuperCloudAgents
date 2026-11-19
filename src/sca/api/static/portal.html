@@ -312,7 +312,7 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
 .trace-explanation footer { border-top: 1px solid var(--line); }
 .trace-explanation footer button { min-height: 32px; }
 #trace-detail-close { min-width: 32px; min-height: 32px; padding: 0; flex: none; font-size: 18px; }
-.trace-explanation-body { min-height: 0; overflow: auto; padding: 13px; }
+.trace-explanation-body { align-self: stretch; min-height: 0; overflow: auto; padding: 13px; }
 .step-description { display: grid; gap: 9px; line-height: 1.5; overflow-wrap: anywhere; }
 .step-description p { color: var(--ink); }
 .step-description dl {
@@ -331,6 +331,13 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
   display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
   align-items: end; gap: 10px;
 }
+.trace-toolbar { display: grid; gap: 12px; }
+.sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
+.trace-follow { display: flex; align-items: center; white-space: nowrap; }
+.trace-follow input { width: auto; min-height: 0; margin: 0 3px 0 0; accent-color: var(--accent); }
 .trace-player { display: grid; gap: 8px; }
 .trace-player input[type=range] { padding: 0; accent-color: var(--accent); }
 .trace-events {
@@ -338,9 +345,60 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
 }
 .trace-events > button { justify-content: flex-start; text-align: left; }
 .trace-events > [aria-current="step"] { border-color: var(--accent); background: var(--accent-bg); }
+.trace-workspace:is(:fullscreen, [data-expanded]) {
+  width: 100%; height: 100dvh; max-width: none; max-height: none; margin: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 9px; padding: clamp(8px, 1.2vw, 18px); border: 0; border-radius: 0;
+  background: var(--panel); color: var(--ink); overflow: hidden;
+}
+.trace-workspace[data-expanded] { position: fixed; inset: 0; z-index: 100; }
+body[data-trace-expanded] { overflow: hidden; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-toolbar {
+  display: flex; flex-wrap: wrap; align-items: end; justify-content: space-between;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-toolbar > .panel-head { align-items: center; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-controls {
+  display: flex; flex-wrap: wrap; align-items: center;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-controls label {
+  display: flex; align-items: center; white-space: nowrap;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-controls select { min-width: 126px; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-player {
+  grid-template-columns: minmax(0, 1fr) auto; column-gap: 16px; row-gap: 3px; align-items: center;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-player input[type=range] {
+  grid-column: 1; min-height: 19px;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-player > .form-actions {
+  grid-column: 2; grid-row: 1 / span 2;
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-stage { min-height: 0; --map-height: 100%; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-stage:has(.trace-explanation:not([hidden])) {
+  grid-template-columns: minmax(0, 1fr) clamp(290px, 26%, 400px);
+}
+.trace-workspace:is(:fullscreen, [data-expanded]) .task-map { height: 100%; min-height: 0; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-explanation { max-height: 100%; }
+.trace-workspace:is(:fullscreen, [data-expanded]) .trace-events { display: none; }
+.trace-quality-results { display: grid; gap: 9px; padding: 0; list-style: none; margin: 0; }
+.trace-quality-results li {
+  display: grid; gap: 4px; padding: 9px 11px; border: 1px solid var(--line);
+  border-radius: 8px; background: var(--subtle); overflow-wrap: anywhere;
+}
+.trace-quality-results li > div { display: flex; flex-wrap: wrap; gap: 5px 12px; justify-content: space-between; }
 @media (max-width: 930px) {
   .trace-stage:has(.trace-explanation:not([hidden])) { grid-template-columns: minmax(0, 1fr); }
   .trace-explanation { grid-row: 1; max-height: min(300px, 45dvh); }
+  .trace-workspace:is(:fullscreen, [data-expanded]) .trace-stage:has(.trace-explanation:not([hidden])) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(95px, 36%) minmax(0, 1fr);
+  }
+  .trace-workspace:is(:fullscreen, [data-expanded]) .trace-player {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .trace-workspace:is(:fullscreen, [data-expanded]) .trace-player > .form-actions {
+    grid-column: 1; grid-row: auto; gap: 5px;
+  }
 }
 .iteration-picker { min-width: min(100%, 250px); }
 #prompt-review .diff { min-height: 56px; }
@@ -559,12 +617,21 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
             <div class="task-time-choice-list"></div>
           </div>
         </section>
-        <div class="panel">
-          <h2>架构进度</h2>
-          <div class="trace-controls">
-            <label>执行范围<select id="trace-scope"><option value="all">全部任务</option></select></label>
-            <label>运行轮次<select id="trace-round"><option value="all">所有轮次</option></select></label>
-            <button id="trace-locate" type="button">定位当前模块</button>
+        <section id="trace-workspace" class="panel trace-workspace" aria-labelledby="trace-workspace-title">
+          <div class="trace-toolbar">
+            <div class="panel-head">
+              <h2 id="trace-workspace-title">架构进度</h2>
+              <div class="form-actions">
+                <a id="trace-quality" class="button" href="#/tasks">任务质量看板</a>
+                <button id="trace-fullscreen" type="button" aria-pressed="false">全屏架构图</button>
+              </div>
+            </div>
+            <div class="trace-controls">
+              <label>执行范围<select id="trace-scope"><option value="all">全部任务</option></select></label>
+              <label>运行轮次<select id="trace-round"><option value="all">所有轮次</option></select></label>
+              <button id="trace-locate" type="button">定位当前模块</button>
+              <label id="trace-follow-label" class="trace-follow" hidden><input id="trace-follow" type="checkbox">跟随当前模块</label>
+            </div>
           </div>
           <div class="trace-player">
             <div class="panel-head"><strong id="trace-step">正在读取执行记录</strong><span id="trace-feed-status" class="badge">等待事件</span></div>
@@ -591,6 +658,9 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
             </aside>
           </div>
           <div id="trace-events" class="trace-events" aria-label="当前进度附近的事件"></div>
+        </section>
+        <div class="panel">
+          <h2>任务指标</h2>
           <div id="task-metrics" class="metrics"></div>
           <small id="timing-note" hidden></small>
         </div>
@@ -1103,6 +1173,8 @@ let currentTask=null, taskStream=null, taskTimeline=null, renderedEventCursor=0;
 let replaySeq=null, replayTimer=null, visibleSteps=[], visibleIndex=-1;
 let mapReady=false, mapMessage=null, lastMapSignature='', traceSource=null;
 let showReplayDetails=true, replayDetails=null, mapModuleNames={};
+let evidenceView=null, qualitySignature='';
+let followedModule=null;
 
 function renderFeedStatus(){
   const label=$('trace-feed-status');
@@ -1116,7 +1188,52 @@ function sendMap(message){
   if(mapReady)map.contentWindow.postMessage(message,location.origin);
 }
 
-function stepDescriptionContent(description, headline){
+function followTraceStep(){
+  const id=traceFullscreen()&&$('trace-follow').checked?visibleSteps[visibleIndex]?.focus:null;
+  if(id&&mapReady&&id!==followedModule)sendMap({type:'sca-architecture:locate',id});
+  followedModule=mapReady?id:null;
+}
+
+function traceFullscreen(){
+  const workspace=$('trace-workspace');
+  return document.fullscreenElement===workspace||workspace.hasAttribute('data-expanded');
+}
+
+function syncTraceFullscreen(){
+  const workspace=$('trace-workspace'),control=$('trace-fullscreen');
+  const expanded=traceFullscreen();
+  control.textContent=expanded?'退出全屏':'全屏架构图';
+  control.setAttribute('aria-pressed',String(expanded));
+  $('trace-follow-label').hidden=!expanded;
+  document.body.toggleAttribute('data-trace-expanded',workspace.hasAttribute('data-expanded'));
+  const evidence=$('evidence'),host=expanded?workspace:document.body;
+  if(evidence.parentElement!==host)host.append(evidence);
+  if(currentTask)renderReplayDetails(currentTask,visibleSteps[visibleIndex]);
+  followTraceStep();
+}
+
+async function setTraceFullscreen(expand){
+  const workspace=$('trace-workspace');
+  if(expand){
+    if(workspace.requestFullscreen&&document.fullscreenEnabled){
+      try{await workspace.requestFullscreen()}catch{workspace.setAttribute('data-expanded','')}
+    }else workspace.setAttribute('data-expanded','');
+  }else{
+    workspace.removeAttribute('data-expanded');
+    if(document.fullscreenElement===workspace)await document.exitFullscreen();
+  }
+  syncTraceFullscreen();
+}
+
+function taskQualityHref(taskId){return '#/tasks/'+enc(taskId)+'/quality'}
+
+function taskQualityLink(taskId){
+  const link=evidenceLink('任务质量看板',taskQualityHref(taskId));
+  link.onclick=event=>{event.preventDefault();openTaskQuality()};
+  return link;
+}
+
+function stepDescriptionContent(description, headline, taskId){
   const content=el('div',undefined,'step-description');
   if(headline)content.append(el('strong',headline));
   if(description.summary)content.append(el('p',description.summary));
@@ -1137,15 +1254,16 @@ function stepDescriptionContent(description, headline){
     content.append(items);
   }
   if(description.note)content.append(el('p',description.note,'step-note'));
+  if(description.quality&&taskId)content.append(taskQualityLink(taskId));
   return content;
 }
 
 function renderReplayDetails(task,step){
   const pane=$('trace-detail'),control=$('trace-detail-toggle');
-  const inReplay=Boolean(step&&replaySeq!==null);
-  const visible=inReplay&&showReplayDetails;
+  const inspecting=Boolean(step&&(replaySeq!==null||traceFullscreen()));
+  const visible=inspecting&&showReplayDetails;
   pane.hidden=!visible;
-  control.hidden=!inReplay;
+  control.hidden=!inspecting;
   control.textContent=visible?'隐藏步骤说明':'显示步骤说明';
   control.setAttribute('aria-expanded',String(visible));
   if(!visible)return;
@@ -1153,18 +1271,20 @@ function renderReplayDetails(task,step){
   const module=mapModuleNames[step.focus]||step.label;
   const event=taskEvents.find(item=>item.seq===step.seq);
   const memory=event?.type==='memory.injected'?task.result?.memory_context:null;
-  const signature=JSON.stringify([task.id,step.seq,module,portalConfig?.sandbox_driver,portalConfig?.state_transport,memory]);
+  const signature=JSON.stringify([task.id,step.seq,module,portalConfig?.sandbox_driver,
+    portalConfig?.state_transport,memory,event?.type==='plan.started'?eventCursor:null]);
   if(replayDetails?.signature===signature)return;
   const description=SCAJobFlow.describeStep(task,event,taskEvents,portalConfig||{});
   replayDetails={signature,delay:description.delay};
   $('trace-detail-module').textContent=module;
   $('trace-detail-context').textContent=step.context+' · 事件 #'+step.seq;
   const body=$('trace-detail-body');
-  body.replaceChildren(stepDescriptionContent(description,module===step.label?'':step.label));
+  body.replaceChildren(stepDescriptionContent(description,module===step.label?'':step.label,task.id));
   body.scrollTop=0;
 }
 
 function renderArchitecture(task){
+  $('trace-quality').href=taskQualityHref(task.id);
   if(traceSource?.task!==task.id||traceSource.seq!==eventCursor){
     traceSource={task:task.id, seq:eventCursor, ...SCAJobFlow.trace(task,taskEvents)};
   }
@@ -1214,6 +1334,7 @@ function renderArchitecture(task){
   const map=$('architecture-progress');
   if(!map.getAttribute('src'))map.src='/portal/architecture?mode=task';
   sendMap(mapMessage);
+  followTraceStep();
 }
 
 function stopReplay(){
@@ -1230,6 +1351,7 @@ function setReplayPosition(index){
 function toggleReplay(){
   if(replayTimer){stopReplay();return}
   if(visibleSteps.length<2)return;
+  sendMap({type:'sca-architecture:close-selection'});
   if(replaySeq===null||visibleIndex>=visibleSteps.length-1)setReplayPosition(0);
   $('trace-play').textContent='暂停回放';
   scheduleReplay();
@@ -1680,13 +1802,14 @@ function diagnostics(events,patch=''){
 }
 function showEvidence(event,revealRaw=false){
   if($('evidence').hidden)evidenceTrigger=document.activeElement;
+  evidenceView='event';
   $('evidence').hidden=false;$('evidence-title').textContent=(eventLabels[event.type]||event.type)+' / #'+event.seq;
   const body=$('evidence-body');body.replaceChildren(el('small',event.created_at||'时间未提供'));
   if(currentTask?.id===event.task_id){
     const description=SCAJobFlow.describeStep(currentTask,event,taskEvents,portalConfig||{});
     if(description.summary){
       const summary=el('section',undefined,'step-evidence');
-      summary.append(el('h3','这一步做了什么'),stepDescriptionContent(description));
+      summary.append(el('h3','这一步做了什么'),stepDescriptionContent(description,undefined,currentTask.id));
       body.append(summary);
     }
   }
@@ -1694,6 +1817,51 @@ function showEvidence(event,revealRaw=false){
   if(Array.isArray(event.payload?.changes)&&event.payload.changes.length){body.append(el('h3','修改文件'));for(const change of event.payload.changes)body.append(el('p',typeof change==='string'?change:(change.file||change.path||change.filePath||'文件')+' · '+(change.status||'已修改')))}
   for(const patch of extractPatches(event.payload||{})){const view=el('div',undefined,'diff');diff(view,patch);body.append(view)}
   const raw=el('details');raw.open=revealRaw;raw.append(el('summary','原始事件'),el('pre',json(event)));body.append(raw);
+  $('evidence-close').focus();
+}
+
+function renderTaskQuality(task){
+  const signature=JSON.stringify([task.id,eventCursor,task.state,task.result?.verification_passed,task.result?.acceptance_passed]);
+  if(qualitySignature===signature)return;
+  qualitySignature=signature;
+  const report=SCAJobFlow.qualityReport(task,taskEvents);
+  const verdict=(passed,skipped=false)=>skipped?'跳过':passed===true?'通过':passed===false?'未通过':'等待记录';
+  const hasAcceptance=Boolean(task.spec?.acceptance_files)||report.rows.some(row=>row.type==='acceptance.completed');
+  const body=$('evidence-body');
+  body.replaceChildren(el('p','任务 '+task.id.slice(0,8)+' · '+statusText(task.state)),
+    el('p','工作区验证 '+verdict(report.verification)+' · 独立验收 '+
+      (hasAcceptance?verdict(report.acceptance):'未配置')));
+  if(report.evaluation)body.append(evidenceLink('查看所属评测运行 →','#/runs/'+enc(report.evaluation)));
+  if(!report.rows.length){body.append(el('p','等待验证结果。'));return}
+  const results=el('ul',undefined,'trace-quality-results');
+  for(const row of report.rows){
+    const line=el('li'),heading=el('div');
+    heading.append(el('strong',row.label+' · '+row.scope+(row.turn?' · 第 '+row.turn+' 轮':'')),
+      el('span',verdict(row.passed,row.skipped),'badge '+(row.skipped?'':row.passed===true?'good':row.passed===false?'bad':'')));
+    line.append(heading);
+    if(row.checks.length)line.append(el('small',row.checks.map((check,index)=>
+      (check.name||'检查 '+(index+1))+' '+verdict(check.passed)).join(' · ')));
+    if(row.commit)line.append(el('small','提交 '+row.commit.slice(0,12)));
+    const href='#/tasks/'+enc(task.id)+'/events/'+row.seq;
+    const proof=evidenceLink('查看事件 #'+row.seq,href);
+    proof.onclick=event=>{
+      event.preventDefault();history.replaceState(null,'',href);openEvent(row.seq);
+    };
+    line.append(proof);results.append(line);
+  }
+  body.append(results);
+}
+
+function openTaskQuality(){
+  if(!currentTask)return;
+  if(replayTimer)stopReplay();
+  if($('evidence').hidden)evidenceTrigger=document.activeElement;
+  evidenceView='quality';
+  qualitySignature='';
+  $('evidence').hidden=false;
+  $('evidence-title').textContent='任务质量看板';
+  history.replaceState(null,'',taskQualityHref(currentTask.id));
+  renderTaskQuality(currentTask);
   $('evidence-close').focus();
 }
 function diagnosticList(target,items){target.replaceChildren();if(!items.length){target.append(el('small','✓ 当前可见证据未触发规则；不等于已证明无缺陷。'));return}for(const item of items){const row=el('div',undefined,'diagnostic'),text=el('div');text.append(el('strong',item.title),el('small',item.note));const link=item.href?evidenceLink('查看事件 #'+item.seq+' ↗',item.href):button('查看证据 ↗',()=>item.open?item.open():item.event?showEvidence(item.event):$('patch').scrollIntoView({block:'center'}));row.append(text,link);target.append(row)}}
@@ -1742,6 +1910,7 @@ function renderTaskState(t){
 function renderTaskObservability(t){
   renderTaskState(t);
   renderArchitecture(t);
+  if(evidenceView==='quality'&&!$('evidence').hidden)renderTaskQuality(t);
   const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(Date.parse(t.updated_at)-Date.parse(t.created_at))/1000;
   const turns=new Set(taskEvents.filter(e=>e.type==='agent.turn_started').map(e=>e.payload.turn)).size;
   const hasAcceptance=Boolean(t.spec?.acceptance_files)||Boolean(acceptance);
@@ -1839,6 +2008,7 @@ async function route(){
   if(current!=='tasks'){
     stopTaskStream();
     stopReplay();
+    if(traceFullscreen())await setTraceFullscreen(false);
   }
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
@@ -1850,6 +2020,7 @@ async function route(){
     else link.removeAttribute('aria-current');
   });
   $('evidence').hidden=true;
+  evidenceView=null;
   const preset=current==='evals'?parts[0]:null;
   if(!preset)appliedPreset=null;
   applyEvalPreset(preset);
@@ -1866,8 +2037,9 @@ async function route(){
   if(current==='tasks'&&parts[0]){
     const id=decodeURIComponent(parts[0]);
     await selectTask(id);
-    if(selectedTask===id&&!$('task-details').hidden&&parts[1]==='events'&&$('evidence').hidden){
-      openEvent(Number(parts[2]));
+    if(selectedTask===id&&!$('task-details').hidden&&$('evidence').hidden){
+      if(parts[1]==='events')openEvent(Number(parts[2]));
+      if(parts[1]==='quality')openTaskQuality();
     }
   }else if(current==='tasks'&&selectedTask){
     await updateTask();
@@ -1880,6 +2052,7 @@ function openEvent(seq,locate=false,revealRaw=false){
   if(replayTimer)stopReplay();
   const event=taskEvents.find(e=>e.seq===seq);
   if(!event){
+    evidenceView='event';
     $('evidence').hidden=false;
     $('evidence-title').textContent='事件 #'+seq;
     $('evidence-body').replaceChildren(el('p','当前未读取到该事件。'));
@@ -1900,8 +2073,9 @@ function openEvent(seq,locate=false,revealRaw=false){
 function closeEvidence(){
   if($('evidence').hidden)return;
   $('evidence').hidden=true;
+  evidenceView=null;
   const [page,id,section]=location.hash.slice(2).split('/');
-  if(page==='tasks'&&id&&section==='events')history.replaceState(null,'','#/tasks/'+id);
+  if(page==='tasks'&&id&&['events','quality'].includes(section))history.replaceState(null,'','#/tasks/'+id);
   if(evidenceTrigger?.isConnected)evidenceTrigger.focus();
   evidenceTrigger=null;
 }
@@ -2015,6 +2189,10 @@ $('trace-next').onclick=()=>{stopReplay();setReplayPosition(visibleIndex+1)};
 $('trace-play').onclick=toggleReplay;
 $('trace-live').onclick=returnToLive;
 $('trace-locate').onclick=()=>sendMap({type:'sca-architecture:locate',id:visibleSteps[visibleIndex]?.focus});
+$('trace-follow').onchange=followTraceStep;
+$('trace-fullscreen').onclick=()=>setTraceFullscreen(!traceFullscreen()).catch(error);
+$('trace-quality').onclick=event=>{event.preventDefault();openTaskQuality()};
+document.addEventListener('fullscreenchange',syncTraceFullscreen);
 $('trace-detail-toggle').onclick=()=>{
   showReplayDetails=!showReplayDetails;
   if(currentTask)renderReplayDetails(currentTask,visibleSteps[visibleIndex]);
@@ -2032,12 +2210,17 @@ window.addEventListener('message',event=>{
   if(event.origin!==location.origin||event.source!==$('architecture-progress').contentWindow)return;
   if(event.data?.type==='sca-architecture:ready'){
     mapReady=true;
+    followedModule=null;
     mapModuleNames=event.data.modules||{};
     if(mapMessage)sendMap(mapMessage);
     if(currentTask)renderReplayDetails(currentTask,visibleSteps[visibleIndex]);
+    followTraceStep();
   }
   if(event.data?.type==='sca-architecture:event'&&event.data.task===selectedTask
     &&taskEvents.some(item=>item.seq===event.data.seq))openEvent(event.data.seq);
+  if(event.data?.type==='sca-architecture:quality'&&event.data.task===selectedTask)openTaskQuality();
+  if(event.data?.type==='sca-architecture:escape'&&$('trace-workspace').hasAttribute('data-expanded'))
+    setTraceFullscreen(false).catch(error);
 });
 $('compare-form').onsubmit=event=>{
   event.preventDefault();
@@ -2144,7 +2327,11 @@ $('theme').onchange=()=>{
   localStorage.setItem('sca-portal-theme',$('theme').value);
 };
 $('evidence-close').onclick=closeEvidence;
-document.addEventListener('keydown',event=>{if(event.key==='Escape')closeEvidence()});
+document.addEventListener('keydown',event=>{
+  if(event.key!=='Escape')return;
+  if(!$('evidence').hidden)closeEvidence();
+  else if($('trace-workspace').hasAttribute('data-expanded'))setTraceFullscreen(false).catch(error);
+});
 window.addEventListener('hashchange',()=>route().catch(error));
 route().catch(error);
 refresh().then(()=>route()).catch(error);
