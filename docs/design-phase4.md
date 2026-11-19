@@ -1290,3 +1290,5 @@ kind + Calico 集群（`sca`），用 `kind load` 加载 `sca-egress:tls-v1` 和
 3. **K8s sync Pod 的测试断言过严（V 引入后）。** restricted Pod 多了一个只读的 CA ConfigMap 卷，
    而测试要求“所有卷都是 emptyDir”。测试本意是“不能有 hostPath”，已按本意修改。
 4. 网关 e2e 和 worker 迁移 e2e：修完第 1、2 条后都通过。
+
+修复后复跑全量：**711 passed、48 skipped、0 failed**（979 秒）；ruff 全部通过。

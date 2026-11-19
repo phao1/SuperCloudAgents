@@ -8,7 +8,7 @@
     "method": "逐项对照 a5a0d63 的实现、测试断言与阶段补记；四期负责人现场验证优先于工程师早期未验证说明。证据路径由 git cat-file 核对目标提交。本次仅生成和静态校验页面，未重跑历史后端或现场实验。",
     "evidenceReport": [
       "历史基线：handoff 的 2026-11-16 单元与集成 431 通过、mount/sync e2e 各 34 通过、kind + Calico 48 通过。不是本次运行结果。",
-      "四期最新指定基线记录：491 passed、1 skipped（112.59 秒）；快照专项 19 passed、1 skipped。负责人全量回归首次为 704 passed、5 failed，已记录修复并确认网关与 Worker 迁移 e2e 通过；文档没有最终全量全绿统计，不能将 704 写成全量通过。",
+      "四期最新指定基线记录：491 passed、1 skipped（112.59 秒）；快照专项 19 passed、1 skipped。负责人全量回归首次为 704 passed、5 failed，修复沙箱命令串行化、审核即销毁沙箱和 sync Pod 断言后，复跑全量 711 passed、48 skipped、0 failed（979 秒，2026-11-18）。",
       "负责人真实 Portal + overlay 闭环：867435e6 基线 5/6（中文题验收通过、轨迹失败），修复 ae7a9c21、构建 4969d9bf 得到 sca.6，20fd5709 重跑 6/6，回归 0；评测 upper 每任务约 86 KB。缺陷人为植入，单次结果不是稳定性证明。",
       "脑手分离真实网关及无网络容器已验证；常驻池三容器、不同 key、同 PID 通过。warm p50 357 ms / p95 408 ms，逐轮进程 p50 2612 ms，冷启动 2742 ms，RSS 约 374 MiB（真实容器、假模型基准）。",
       "TLS 出口负责人实测：Docker 出口单元和集成共 21 通过；随后两节点 kind + Calico 的 test_k8s_sandbox.py 23 passed、无跳过，含 HTTPS、SNI/Host 前置、缺失 SNI 和 IP 拒绝。多副本 Worker 的 RWX CA PVC 未验证；K8s + 模型网关仍拒绝启动。",
