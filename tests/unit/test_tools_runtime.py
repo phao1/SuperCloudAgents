@@ -67,8 +67,12 @@ class TaskStore:
         return self.task
 
     def for_tenant(self, tenant_id):
-        assert tenant_id == self.tenant_id
+        # "eval" holds platform champions; this fake has none.
+        assert tenant_id in (self.tenant_id, "eval")
         return self
+
+    async def get_champion_rollout(self, agent_version, model):
+        return None
 
     async def task_submitter(self, task_id):
         assert task_id == self.task.id
@@ -84,6 +88,15 @@ class TaskStore:
     async def append_event(self, task_id, type_, payload, *, dedup_key):
         await self.get_task(task_id)
         self.events.setdefault(dedup_key, (type_, payload))
+
+    async def get_task_champion(self, task_id):
+        return None
+
+    async def pin_task_champion(self, task_id, selection):
+        return None
+
+    async def resolve_task_opencode_version(self, task_id, default):
+        return default
 
     async def get_session_id(self, task_id):
         return None
