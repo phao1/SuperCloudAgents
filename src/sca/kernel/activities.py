@@ -34,9 +34,11 @@ from sca.core.models import (
     TERMINAL_STATES,
     AgentContext,
     AgentEventType,
+    AgentOverlay,
     EventType,
     ExecExit,
     SandboxSpec,
+    Task,
     TaskState,
     tail,
 )
@@ -252,16 +254,23 @@ class KernelActivities:
                                     docker_bin=self.settings.docker_bin)
         return GitWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache)
 
-    def _agent_ctx(self, task_id: str, spec: ExecutionSpec) -> AgentContext:
+    def _agent_ctx(
+        self, task_id: str, spec: ExecutionSpec, champion: dict | None = None,
+    ) -> AgentContext:
         overlay = getattr(spec, "agent_overlay", None)
+        version = getattr(spec, "agent_version", None)
+        model = spec.model or self.settings.default_model
+        if overlay is None and champion is not None:
+            overlay = AgentOverlay.model_validate(champion["overlay"])
+            version, model = champion["agent_version"], champion["model"]
         if overlay is not None and self._backend(spec).name != "opencode":
             raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode"))
         return AgentContext(
             task_id=task_id,
             agent_home_host=str(self._task_dir(task_id) / "agent_home"),
-            agent_version=getattr(spec, "agent_version", None),
+            agent_version=version,
             agent_overlay=overlay,
-            model=spec.model or self.settings.default_model,
+            model=model,
         )
 
     async def _sandbox_id(self, task_id: str) -> str:
@@ -296,6 +305,8 @@ class KernelActivities:
     async def load_task(self, task_id: str) -> dict:
         try:
             spec = (await self._spec(task_id)).model_dump()
+            task = await self.store.get_task(task_id)
+            await self._pin_champion(task, spec)
             if spec.get("auto_finish") and "plan_review" in spec:
                 spec["plan_review"] = False
             selected_version = spec.get("prompt_version") or EvaluationSettings().default_prompt_version
@@ -306,13 +317,13 @@ class KernelActivities:
             # Platform settings the workflow needs travel with the spec.
             return {
                 **spec,
-                "_kind": (await self.store.get_task(task_id)).kind,
+                "_kind": task.kind,
                 "_versioned_prompts": True,
                 "_admission": True,
                 "memory_enabled": spec.get("memory_enabled") is not False,
                 "prompt_version": selected_version,
-                "hooks": asdict(get((await self.store.get_task(task_id)).kind).hooks),
-                **get((await self.store.get_task(task_id)).kind).workflow_options(spec),
+                "hooks": asdict(get(task.kind).hooks),
+                **get(task.kind).workflow_options(spec),
                 "review_idle_release_s": self.settings.review_idle_release_s,
                 "turn_heartbeat_timeout_s": self.settings.turn_heartbeat_timeout_s,
             }
@@ -660,7 +671,9 @@ class KernelActivities:
         # kernel instance that runs this activity must ask the kind's activities, not itself.
         owner = self.scenarios.get(task.kind, self) if self.scenarios else self
         backend = owner._backend(spec)
-        additions = backend.sandbox_additions(self._agent_ctx(task_id, spec))
+        champion = (await self.store.get_task_champion(task_id)
+                    if getattr(backend, "name", None) == "opencode" else None)
+        additions = backend.sandbox_additions(self._agent_ctx(task_id, spec, champion))
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -767,13 +780,13 @@ class KernelActivities:
 
         beater = asyncio.create_task(beat())
         try:
-            return await self._run_agent_turn(inp)
+            return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
         finally:
             beater.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await beater
 
-    async def _run_agent_turn(self, inp: TurnInput) -> TurnResult:
+    async def _run_agent_turn(self, inp: TurnInput, champion: dict | None = None) -> TurnResult:
         task_id, turn = inp.task_id, inp.turn
         restored = await self._ensure_state(task_id)
         attempt = activity.info().attempt
@@ -801,7 +814,7 @@ class KernelActivities:
                 return TurnResult(session_id=session_id, final_message="")
             turn_budget = min(turn_budget, remaining)
 
-        ctx = self._agent_ctx(task_id, spec)
+        ctx = self._agent_ctx(task_id, spec, champion)
         overlay_metadata = ({"overlay_sha256": ctx.agent_overlay.sha256()}
                             if ctx.agent_overlay is not None else {})
         if overlay_metadata:
@@ -1077,3 +1090,31 @@ class KernelActivities:
         passed = code.exit_code == 0
         await self.store.complete_acceptance(task_id, passed, code.exit_code, tail(output))
         return passed
+
+    # Evolution productization
+
+    async def _pin_champion(self, task: Task, spec: dict) -> None:
+        from sca.evolve.champions import select_champion
+
+        use_champion = spec.get("use_champion")
+        backend = spec.get("agent_backend") or self.agent.name
+        if (backend != "opencode" or spec.get("agent_overlay") is not None
+                or use_champion is False or "champion_id" in task.result):
+            return
+        # Unqualified evaluation variants measure the baseline independently of live rollout.
+        if spec.get("eval_run_id") and use_champion is None:
+            return
+        champion = await select_champion(
+            self.store, task.id, task.tenant_id,
+            spec.get("agent_version") or self.settings.opencode_default_version,
+            spec.get("model") or self.settings.default_model, use_champion,
+        )
+        selection = None
+        if champion is not None:
+            selection = {
+                "champion_id": str(champion["id"]),
+                "overlay_sha256": AgentOverlay.model_validate(champion["overlay"]).sha256(),
+                "agent_version": champion["agent_version"],
+                "model": champion["model"],
+            }
+        await self.store.pin_task_champion(str(task.id), selection)

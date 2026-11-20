@@ -180,6 +180,10 @@ def create_app(
     app.include_router(memories_router)
     app.include_router(files_router)
     app.include_router(admission_router)
+    # Evolution productization
+    from sca.api.harvest import router as harvest_router
+
+    app.include_router(harvest_router)
     task_routes = APIRouter()
     task_routes.routes.extend(
         route for route in router.routes

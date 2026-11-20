@@ -226,3 +226,68 @@ champions = Table(
 )
 Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
       unique=True, postgresql_where=champions.c.active)
+
+# Evolution productization
+champion_rollouts = Table(
+    "champion_rollouts", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("agent_version", Text, primary_key=True),
+    Column("model", Text, primary_key=True),
+    Column("champion_id", UUID(as_uuid=True), ForeignKey("champions.id"), nullable=False),
+    Column("percent", Integer, nullable=False),
+    Column("updated_by", Text, nullable=False),
+    timestamp("updated_at"),
+    CheckConstraint("percent BETWEEN 0 AND 100"),
+)
+
+evolution_events = Table(
+    "evolution_events", metadata,
+    Column("id", BigInteger, primary_key=True),
+    Column("tenant_id", Text, nullable=False),
+    Column("type", Text, nullable=False),
+    Column("actor", Text, nullable=False),
+    Column("payload", JSONB, nullable=False),
+    timestamp("created_at"),
+)
+
+evolution_schedules = Table(
+    "evolution_schedules", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, nullable=False),
+    Column("suite", Text, nullable=False),
+    Column("split", Text, nullable=False, server_default="dev"),
+    Column("agent_version", Text, nullable=False),
+    Column("model", Text, nullable=False),
+    Column("interval_hours", Float, nullable=False),
+    Column("config", JSONB, nullable=False),
+    Column("threshold", Float, nullable=False),
+    Column("always", Boolean, nullable=False, server_default="false"),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("auto_rollout_percent", Integer),
+    Column("last_run_at", DateTime(timezone=True)),
+    Column("last_eval_run_id", UUID(as_uuid=True), ForeignKey("eval_runs.id")),
+    Column("last_evolution_id", UUID(as_uuid=True), ForeignKey("evolutions.id")),
+    CheckConstraint("split = 'dev'"),
+    CheckConstraint("interval_hours > 0 AND interval_hours < 'Infinity'::float8"),
+    CheckConstraint("threshold BETWEEN 0 AND 1"),
+    CheckConstraint("auto_rollout_percent BETWEEN 0 AND 100"),
+)
+
+harvest_candidates = Table(
+    "harvest_candidates", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, nullable=False),
+    Column("task_id", UUID(as_uuid=True), ForeignKey("tasks.id"), nullable=False),
+    Column("suite", Text, nullable=False),
+    Column("split", Text, nullable=False),
+    Column("case_id", Text, nullable=False),
+    Column("base_sha", Text, nullable=False),
+    Column("notes", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default="pending"),
+    Column("created_by", Text, nullable=False),
+    timestamp("created_at"),
+    Column("reviewed_by", Text),
+    Column("reviewed_at", DateTime(timezone=True)),
+    CheckConstraint("split IN ('dev', 'holdout')"),
+    CheckConstraint("status IN ('pending', 'approved', 'rejected')"),
+)

@@ -5,10 +5,11 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.exc import NoResultFound
 from temporalio.client import Client
+from temporalio.exceptions import WorkflowAlreadyStartedError
 from temporalio.service import RPCError
 
 from sca.api.authz import authorize
@@ -17,7 +18,8 @@ from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.repo import Store
 from sca.eval.suites import load_suite
-from sca.evolve.models import EvolutionConfig
+from sca.evolve.models import ChampionRolloutSpec, EvolutionConfig, EvolutionScheduleSpec
+from sca.evolve.scheduler import EvolutionSchedulerWorkflow, schedule_workflow_id
 from sca.evolve.workflow import EvolutionWorkflow
 
 router = APIRouter(prefix='/v1')
@@ -44,12 +46,9 @@ async def detail(request: Request, user: Principal, evolution_id: UUID) -> dict:
         raise HTTPException(404, '演进记录不存在') from None
 
 
-@router.post('/evolutions', status_code=201)
-async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
-    store = scoped(request, user)
-    settings = get_settings()
-    root = settings.eval_suites_dir.resolve()
-    path = Path(body.suite)
+async def evolution_suite(name: str) -> tuple[Path, dict]:
+    root = get_settings().eval_suites_dir.resolve()
+    path = Path(name)
     path = path if path.is_absolute() else root / path
     resolved = path.resolve()
     if path.is_symlink() or resolved.parent != root or not resolved.is_dir():
@@ -61,6 +60,14 @@ async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
             raise ValueError('missing splits')
     except (ValueError, OSError):
         raise HTTPException(422, '评测套件需要开发集和留出集') from None
+    return resolved, suite
+
+
+@router.post('/evolutions', status_code=201)
+async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
+    store = scoped(request, user)
+    settings = get_settings()
+    resolved, suite = await evolution_suite(body.suite)
     config = body.model_dump()
     config['suite'] = str(resolved)
     evolution_id = uuid4()
@@ -143,3 +150,71 @@ async def activate(champion_id: UUID, request: Request, user: Admin) -> dict:
         return await scoped(request, user).activate_champion(str(champion_id))
     except NoResultFound:
         raise HTTPException(404, '冠军记录不存在') from None
+
+
+@router.get('/champions/rollouts')
+async def rollouts(request: Request, user: Admin) -> list[dict]:
+    return await request.app.state.store.for_tenant(user.tenant_id).list_champion_rollouts()
+
+
+@router.put('/champions/rollouts')
+async def put_rollout(body: ChampionRolloutSpec, request: Request, user: Admin) -> dict:
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    return await store.put_champion_rollout(
+        body.agent_version, body.model, body.champion_id, body.percent, user.subject,
+    )
+
+
+@router.post('/champions/{champion_id}/rollback')
+async def rollback(champion_id: UUID, request: Request, user: Admin) -> dict:
+    return await scoped(request, user).rollback_champion(champion_id, user.subject)
+
+
+@router.post('/evolution-schedules', status_code=201)
+async def create_schedule(body: EvolutionScheduleSpec, request: Request, user: Admin) -> dict:
+    store = scoped(request, user)
+    await evolution_suite(body.suite)
+    return await store.create_evolution_schedule(body.model_dump())
+
+
+@router.get('/evolution-schedules')
+async def schedules(request: Request, user: Admin) -> list[dict]:
+    return await scoped(request, user).list_evolution_schedules()
+
+
+@router.get('/evolution-schedules/{schedule_id}')
+async def get_schedule(schedule_id: UUID, request: Request, user: Admin) -> dict:
+    return await scoped(request, user).get_evolution_schedule(schedule_id)
+
+
+@router.put('/evolution-schedules/{schedule_id}')
+async def update_schedule(
+    schedule_id: UUID, body: EvolutionScheduleSpec, request: Request, user: Admin,
+) -> dict:
+    store = scoped(request, user)
+    await evolution_suite(body.suite)
+    return await store.update_evolution_schedule(schedule_id, body.model_dump())
+
+
+@router.delete('/evolution-schedules/{schedule_id}', status_code=204)
+async def delete_schedule(schedule_id: UUID, request: Request, user: Admin) -> Response:
+    await scoped(request, user).delete_evolution_schedule(schedule_id)
+    return Response(status_code=204)
+
+
+@router.post('/evolution-schedules/{schedule_id}/run-now', status_code=202)
+async def run_schedule_now(schedule_id: UUID, request: Request, user: Admin) -> dict:
+    await scoped(request, user).get_evolution_schedule(schedule_id)
+    workflow_id = schedule_workflow_id(schedule_id)
+    try:
+        async with asyncio.timeout(10):
+            client = await client_for(request)
+            await client.start_workflow(
+                EvolutionSchedulerWorkflow.run, {'schedule_id': str(schedule_id), 'force': True},
+                id=workflow_id, task_queue=get_settings().task_queue,
+            )
+    except WorkflowAlreadyStartedError:
+        raise HTTPException(409, '演进计划正在评测') from None
+    except (RuntimeError, OSError, TimeoutError, RPCError):
+        raise HTTPException(503, '演进服务暂不可用') from None
+    return {'workflow_id': workflow_id}

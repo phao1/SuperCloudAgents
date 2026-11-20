@@ -83,11 +83,17 @@ class EvolutionActivities:
     async def prepare_run(self, request: dict) -> dict:
         suite = await self.suite(request)
         cfg = request['config']
-        payload = {'id': request['run_id'], 'evolution_id': request['id'], 'suite': cfg['suite'], 'split': request['split'], 'suite_hash': suite['hash'],
+        payload = {'id': request['run_id'], 'suite': cfg['suite'], 'split': request['split'], 'suite_hash': suite['hash'],
                    'variant': {'agent_backend': 'opencode', 'agent_version': cfg['agent_version'],
-                               'model': cfg['model'], 'agent_overlay': request['overlay']},
+                               'model': cfg['model'], 'agent_overlay': request['overlay'],
+                               'use_champion': False},
                    'repeat': cfg['repeat'], 'concurrency': cfg['concurrency'],
                    'budget': request['remaining'], 'case_budget': cfg['case_budget']}
+        if request.get('id') is not None:
+            payload['evolution_id'] = request['id']
+        if request.get('schedule_id') is not None:
+            payload.update(evolution_schedule_id=request['schedule_id'],
+                           champion_id=request.get('champion_id'))
         await self.scoped(request).create_eval_run({
             'id': UUID(payload['id']), 'tenant_id': request['tenant_id'], 'suite': suite['name'],
             'suite_hash': suite['hash'], 'variant': payload, 'created_by': request['created_by'],
@@ -210,11 +216,13 @@ class EvolutionActivities:
     async def promote(self, request: dict) -> dict:
         c, cfg = request['candidate'], request['config']
         store = self.scoped(request)
+        percent = request.get('auto_rollout_percent')
         row = await store.activate_champion(request['champion_id'], {
             'agent_version': cfg['agent_version'], 'model': cfg['model'],
             'overlay': c['overlay'], 'overlay_sha256': c['overlay_sha256'],
             'candidate_id': UUID(c['id']), 'metrics': {'dev': c['dev_metrics'], 'holdout': c['holdout_metrics']},
-            'parent_champion_id': UUID(request['parent_champion_id']) if request['parent_champion_id'] else None})
+            'parent_champion_id': UUID(request['parent_champion_id']) if request['parent_champion_id'] else None},
+            **({'rollout': (percent, request['created_by'])} if percent is not None else {}))
         await store.update_evolution(request['id'], {'best_champion_id': row['id']})
         return json_safe(row)
 
