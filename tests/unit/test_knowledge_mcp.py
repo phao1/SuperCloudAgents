@@ -220,3 +220,10 @@ async def test_mcp_requires_task_token_and_current_grant(knowledge_api):
     store.db.grants.add("org")
     store.db.tasks["org", task_id].state = TaskState.SUCCEEDED
     assert (await _rpc(client, token, "tools/list")).status_code == 403
+
+
+def test_keyword_terms_drop_stopwords_stem_and_split_cjk():
+    from sca.db.repo import keyword_terms
+
+    assert keyword_terms("How are discounts rounded?") == ["discount", "round"]
+    assert keyword_terms("折扣规则") == ["折扣", "扣规", "规则"]

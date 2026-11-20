@@ -156,6 +156,12 @@ async def test_knowledge_http_acl_and_chunk_cascade(api, api_store):
     for token, count in (("bob", 0), ("another", 0), ("alice", 1)):
         hits = await api("POST", "/v1/knowledge/search", token, json={"query": "replace keys", "k": 1})
         assert len(hits.json()) == count
+    # Without embeddings, natural-language questions match by keywords, not the whole phrase.
+    hits = await api("POST", "/v1/knowledge/search", "alice",
+                     json={"query": "how are keys replaced during rotation?", "k": 1})
+    assert [hit["document_id"] for hit in hits.json()] == [str(doc_id)]
+    assert (await api("POST", "/v1/knowledge/search", "alice",
+                      json={"query": "unrelated billing question", "k": 1})).json() == []
     with pytest.raises(NotFoundError):
         await api_store.for_tenant("company").get_knowledge_document(doc_id, [])
     async with api_store.for_tenant("another")._transaction() as session:

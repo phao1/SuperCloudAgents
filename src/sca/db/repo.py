@@ -27,6 +27,27 @@ class QuotaExceededError(ScaError):
     pass
 
 
+_STOPWORDS = frozenset(
+    ["the", "and", "for", "are", "how", "what", "when", "where", "which", "with", "that", "this", "from", "into", "does", "should", "must", "can", "use", "used", "using", "about", "our", "your", "their"])
+
+
+def keyword_terms(query: str, limit: int = 12) -> list[str]:
+    """Keywords for embedding-free search: words of 3+ letters and CJK character pairs."""
+    import re
+
+    terms: list[str] = []
+    for word in re.findall(r"[^\W_]+", query.casefold()):
+        if re.fullmatch(r"[\u3400-\u9fff]+", word):
+            terms += [word] if len(word) <= 2 else [word[i:i + 2] for i in range(len(word) - 1)]
+        elif len(word) >= 3 and word not in _STOPWORDS:
+            for suffix in ("ing", "ed", "es", "s"):  # crude stemming: "rounded" matches "rounding"
+                if len(word) > len(suffix) + 3 and word.endswith(suffix):
+                    word = word[: -len(suffix)]
+                    break
+            terms.append(word)
+    return list(dict.fromkeys(terms))[:limit]
+
+
 class Store:
     def __init__(
         self,
@@ -2066,11 +2087,15 @@ class Store:
                 chunks.c.document_id, docs.c.title, chunks.c.ordinal, chunks.c.heading,
                 chunks.c.content, distance.label("distance"),
             ).select_from(chunks.join(docs)).where(*self._readable_knowledge(teams)).subquery()
-            matches = or_(candidates.c.distance.is_not(None), *[
-                column.icontains(query, autoescape=True)
-                for column in (candidates.c.title, candidates.c.heading, candidates.c.content)
-            ])
-            result = await session.execute(select(candidates).where(matches).order_by(
-                candidates.c.distance.asc().nulls_last(), candidates.c.document_id, candidates.c.ordinal,
-            ).limit(limit), parameters)
-            return [dict(row) for row in result.mappings()]
+            # Without embeddings, rank by how many query keywords a chunk contains.
+            fields = (candidates.c.title, candidates.c.heading, candidates.c.content)
+            terms = keyword_terms(query) or [query]
+            hits = sum((case((or_(*[f.icontains(term, autoescape=True) for f in fields]), 1), else_=0)
+                        for term in terms), start=literal_column("0"))
+            result = await session.execute(
+                select(candidates, hits.label("hits"))
+                .where(or_(candidates.c.distance.is_not(None), hits > 0))
+                .order_by(candidates.c.distance.asc().nulls_last(), hits.desc(),
+                          candidates.c.document_id, candidates.c.ordinal)
+                .limit(limit), parameters)
+            return [{k: v for k, v in row.items() if k != "hits"} for row in result.mappings()]
