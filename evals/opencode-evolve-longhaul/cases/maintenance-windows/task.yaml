@@ -20,19 +20,16 @@ instruction: |
     conversion fail with bad_store.
   - Persist version-two records and make the upgrade repeatable while retaining version-one
     service logs and portable exports.
-  - Expose both actions and a filtered list on the two interfaces, with workshop role checks,
-    audit and translations.
 
   Ship the commands as maintenance-windows schedule, maintenance-windows complete and
   maintenance-windows list, with the matching /v1/maintenance-windows/<action> routes.
   The minimum roles are operator for schedule and manager for complete.
   Readers can list by scope and optional status (scheduled, completed) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register maintenance-windows.scheduled and maintenance-windows.completed.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

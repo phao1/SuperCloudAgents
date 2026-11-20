@@ -11,27 +11,24 @@ instruction: |
     staff amended the rate or damage or closed the original intake in the meantime, reject
     settlement. Charge (damaged minus waived) times the saved rate, record the result and update
     the original intake to closed with its allowed units and settlement date.
-  - Add return-disputes to the depot report. For the date and depot return open_cents from
-    disputes pending at that date and settled_cents from rulings issued that day or earlier,
-    always in integer cents.
+  - Add return-disputes to the depot report. open_cents sums the original damage charges of
+    disputes filed by the report day that are still open. settled_cents sums the charges from
+    rulings issued by that day. Report both in integer cents.
   - Migrate historically closed damaged intakes with a ruling and settlement date to settled
     disputes, preserving even zero waivers. Use the old intake ID and date and reason paper.
     Skip undamaged intakes and those already represented.
   - Preserve the version-one charge report and original reader. Add version-two records through
     the named idempotent upgrade and preserve other tables.
-  - Make both actions and the filtered list available on the desk interfaces with the required
-    roles, translations and audit trail.
 
   Ship the commands as return-disputes file, return-disputes settle and
   return-disputes list, with the matching /v1/return-disputes/<action> routes.
   The minimum roles are operator for file and manager for settle.
   Readers can list by scope and optional status (filed, settled) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register return-disputes.filed and return-disputes.settled.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

@@ -7,8 +7,8 @@ instruction: |
   - Prepare one notice per scheduled performance with an actual date or venue change. The
     destination must have enough seats and no other scheduled or moved performance on that day.
     Prepare on or before both performance dates. Record the old venue and day in previous_scope
-    and previous_day, the new day in scheduled, the destination as scope and no audience or sent
-    date yet.
+    and previous_day, the new day in scheduled, and the destination as scope. The sent date is
+    unset and the audience field is only required on sent notices.
   - Send once between preparation and the earlier performance date, inclusive. If the original
     show moved or was cancelled while pending, reject the old notice. Recheck venue capacity and
     availability. Capture the current sorted audience groups at send time and persist them in
@@ -16,25 +16,23 @@ instruction: |
   - Sending updates the version-one performance to moved at the destination and new performance
     day, with prior_scope, prior_day, reason and sent populated. Afterward, audience edits on
     the show do not change the frozen notice.
-  - The performance-notices section of the destination desk report lists pending IDs as of that
-    date and recipient_groups, the sorted union of groups sent notices through the date.
+  - The performance_notices section of the destination desk report lists pending IDs as of that
+    date (prepared by then and sent later or still unsent) and recipient_groups, the sorted
+    union of groups sent notices through the date.
   - Import moved legacy shows with prior scope, prior day, reason and send date as sent notices
     keyed by the show ID. Use the old send date as preparation day when no draft is recorded.
-    Skip shows already represented by live notices. Keep legacy readers working and support
-    repeat runs.
-  - Expose the actions and filtered notice list on the standard desk interfaces, with access
-    checks, translated responses and auditable changes.
+    Skip shows already represented by live notices or whose IDs are already in the version-two
+    table. Keep legacy readers working and support repeat runs.
 
   Ship the commands as performance-notices prepare, performance-notices send and
   performance-notices list, with the matching /v1/performance-notices/<action> routes.
   The minimum roles are operator for prepare and manager for send.
   Readers can list by scope and optional status (prepared, sent) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register performance-notices.prepared and performance-notices.sent.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |
@@ -43,9 +41,11 @@ instruction: |
   | list | scope (desk ID), status (optional) |
 
   The write response and list entries are saved workflow records with id, scope, status and
-  version. The other workflow fields are performance, production, previous_scope, previous_day, scheduled, day, reason, audience, sent.
+  version. The other workflow fields are performance, production, previous_scope, previous_day,
+  scheduled, day, reason and sent. Sent notices also include audience.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
-  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  state transitions, capacity, stale source records or duplicate work. A send after either
+  performance date is a conflict. Rejected changes are atomic.
   Accept valid version-one workspaces even if some live workflows have already run. History
   upgrade must preserve those version-two records without importing them again.
 

@@ -5,8 +5,8 @@ instruction: |
   members can see exactly who was called and for which duties.
 
   - Draft a call for an active production that fits the venue, with one or more distinct active
-    crew members from that venue. Save the rehearsal in day, sort crew IDs and start with an
-    empty roster and no published date.
+    crew members from that venue. Save the rehearsal in day and start with an empty roster
+    and no published date. The order of IDs in crew is immaterial.
   - The manager publishes once on or before rehearsal day, with the expected crew count for the
     draft. Revalidate the crew, production and venue. Reject a crew member already on a
     published call for the same day, including announced legacy paper calls even before
@@ -17,20 +17,18 @@ instruction: |
     exact rehearsal day at the venue) and crew_count (number of distinct crew).
   - Import announced paper calls with a publication date as version-two published calls by
     source ID, translating announced to published and expanding the crew roster from the current
-    directory at import. Leave legacy records alone and make repeat import a no-op.
-  - Provide the two operator interfaces, role checks, bilingual responses, and an audit entry
-    for each draft and publication.
+    directory at import. Sort the imported roster by person ID. Skip IDs already in the
+    version-two table. Preserve saved calls and legacy records and make repeat import a no-op.
 
   Ship the commands as rehearsal-calls draft, rehearsal-calls publish and
   rehearsal-calls list, with the matching /v1/rehearsal-calls/<action> routes.
   The minimum roles are operator for draft and manager for publish.
   Readers can list by scope and optional status (draft, published) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register rehearsal-calls.drafted and rehearsal-calls.published.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

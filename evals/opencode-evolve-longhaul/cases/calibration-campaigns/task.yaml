@@ -13,25 +13,24 @@ instruction: |
     must not change the flags.
   - Persist reviewed, readings and sorted flag IDs with reviewed status. Repeated review is a
     conflict. Keep individual legacy readings and tolerances usable.
-  - The calibration-campaigns section gives pending campaign IDs and sorted distinct
-    flagged_meters through the report date for that station.
-  - Upgrade legacy logs grouped by campaign ID. Every member must be reviewed, with a common
-    station, entry day and review date and a unique meter within the group. Snapshot the meter
-    tolerances at conversion and derive flags. Reject incomplete or inconsistent groups as
-    bad_store. Preserve the old data and make repeat conversion a no-op.
-  - Ship the commands and list on the standard interfaces with the desk's roles, localized
-    messages and audit entries.
+  - The station report section calibration-campaigns lists pending, the sorted IDs of
+    currently scheduled campaigns whose planned day is on or before the report day.
+    flagged_meters is the sorted union of flags from reviews completed by that date.
+  - Upgrade legacy logs grouped by campaign ID. Skip IDs already in the version-two table.
+    In the remaining groups, every member must be reviewed, with a common station, entry day
+    and review date and a unique meter within the group. Snapshot meter tolerances and derive
+    flags. Reject incomplete or inconsistent groups as bad_store. Preserve saved campaigns
+    and paper logs and make repeat conversion a no-op.
 
   Ship the commands as calibration-campaigns schedule, calibration-campaigns review and
   calibration-campaigns list, with the matching /v1/calibration-campaigns/<action> routes.
   The minimum roles are operator for schedule and manager for review.
   Readers can list by scope and optional status (scheduled, reviewed) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register calibration-campaigns.scheduled and calibration-campaigns.reviewed.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

@@ -8,7 +8,8 @@ instruction: |
   - Offer one substitution per open order, on or after the order date. The alternate must be a
     different ready tool of the same kind. Cross-depot fulfillment is allowed. Store order,
     original model, alternate, source depot, units, offer day and the order's own depot as
-    scope. A live offer is not historical and has no acceptance date yet.
+    scope. A live offer has historical set to false and no acceptance date yet. Using the
+    original model or a different kind of tool is a bad_request.
   - An offer holds units against the alternate's ready quantity after open reservations. Other
     live offers and live accepted substitutions also consume that quantity, regardless of
     ordering depot. Historical substitutions do not hold current stock.
@@ -16,25 +17,22 @@ instruction: |
     units and recheck the alternate's remaining capacity, excluding this offer. Write the legacy
     substitute, fulfilled status and closed date as well as the accepted workflow state and
     date.
-  - In the desk report, pool-substitutions gives offered IDs sorted and accepted_units through
-    the selected day for the ordering depot. A subsequently accepted offer stays visible when
-    viewing the earlier date.
+  - In the ordering depot's desk report, the pool-substitutions section gives offered (sorted
+    IDs of offers made by the report day that are still open) and accepted_units (sum of units
+    from acceptances through that day).
   - Migrate fulfilled v1 orders with a substitute and closed date, keyed by order ID. Mark these
     accepted and historical, keep the legacy files readable, and skip orders already represented
     by a live workflow. Repeat upgrade without changes.
-  - Ship the CLI and API operations and document the permissions, bilingual responses and audit
-    behavior.
 
   Ship the commands as pool-substitutions offer, pool-substitutions accept and
   pool-substitutions list, with the matching /v1/pool-substitutions/<action> routes.
   The minimum roles are operator for offer and manager for accept.
   Readers can list by scope and optional status (offered, accepted) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register pool-substitutions.offered and pool-substitutions.accepted.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

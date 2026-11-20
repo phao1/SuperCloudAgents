@@ -20,19 +20,16 @@ instruction: |
     pickups and already represented collections.
   - Use the existing version-two extension format and named upgrade. Running it twice should add
     no rows and leave the old reader and legacy export working on the same file.
-  - Expose the queue and both actions through the CLI and API with the desk's role, message and
-    audit conventions.
 
   Ship the commands as reservation-handoffs stage, reservation-handoffs collect and
   reservation-handoffs list, with the matching /v1/reservation-handoffs/<action> routes.
   The minimum roles are operator for stage and manager for collect.
   Readers can list by scope and optional status (staged, collected) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register reservation-handoffs.staged and reservation-handoffs.collected.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |
@@ -43,7 +40,8 @@ instruction: |
   The write response and list entries are saved workflow records with id, scope, status and
   version. The other workflow fields are reservation, origin, tool, units, borrower, day, collected.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
-  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  state transitions, capacity, stale source records or duplicate work. Staging with the
+  original depot as the pickup is a bad_request. Rejected changes are atomic.
   Accept valid version-one workspaces even if some live workflows have already run. History
   upgrade must preserve those version-two records without importing them again.
 
