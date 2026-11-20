@@ -62,6 +62,26 @@ async def invite_for_tenant(
     return await store.for_tenant(tenant_id).invite_member(body.email, body.role)
 
 
+@router.post("/admin/tenants/{tenant_id}/tokens", status_code=201)
+async def issue_tenant_token(
+    tenant_id: str, body: TokenRequest, store: PlatformStore, response: Response,
+) -> dict[str, Any]:
+    """Bootstrap a tenant without OIDC: the operator issues its first API token."""
+    import hashlib
+    import secrets
+    from datetime import UTC, datetime, timedelta
+
+    await store.get_tenant(tenant_id)  # 404 for unknown tenants
+    response.headers["Cache-Control"] = "no-store"
+    token = "sca_" + secrets.token_urlsafe(32)
+    row = await store.for_tenant(tenant_id).create_api_token(
+        name=body.name, role=body.role or "admin", scopes=body.scopes, repo_url=body.repo_url,
+        token_hash=hashlib.sha256(token.encode()).hexdigest(),
+        expires_at=datetime.now(UTC) + timedelta(days=body.days), created_by="platform-admin",
+    )
+    return {**row, "token": token}
+
+
 @router.get("/admin/plans")
 async def list_plans(store: PlatformStore) -> list[dict[str, Any]]:
     return await store.list_plans()

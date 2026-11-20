@@ -253,3 +253,20 @@ async def test_backfill_reads_archived_histories_and_is_idempotent(store, tmp_pa
     assert await store.usage_backfill() == 1
     [day] = await store.usage_rows(completed.date(), completed.date())
     assert (day["tasks"], day["tokens_in"], day["cost_usd"]) == (1, 4, Decimal("0.125"))
+
+
+async def test_operator_bootstraps_a_tenant_admin_token_without_oidc(commercial_api):
+    client, _, _ = commercial_api
+    assert (await create_tenant(client, "bootstrap")).status_code == 201
+    path = "/v1/admin/tenants/bootstrap/tokens"
+    assert (await client.post(path, headers=TENANT, json={"name": "Owner"})).status_code == 403
+    assert (await client.post("/v1/admin/tenants/missing/tokens", headers=PLATFORM,
+                              json={"name": "Owner"})).status_code == 404
+    issued = await client.post(path, headers=PLATFORM, json={"name": "Owner"})
+    assert issued.status_code == 201 and issued.headers["cache-control"] == "no-store"
+    owner = {"Authorization": "Bearer " + issued.json()["token"]}
+    assert issued.json()["role"] == "admin"
+    assert (await client.get("/v1/tenant", headers=owner)).json()["id"] == "bootstrap"
+    member = await client.post("/v1/tenant/tokens", headers=owner, json={"name": "CI", "role": "member"})
+    assert member.status_code == 201
+    assert (await client.get("/v1/tenant/tokens", headers=TENANT)).json() == []

@@ -15,6 +15,14 @@ curl -X POST "$SCA_API_URL/v1/admin/tenants" \
   -d '{"id":"acme","display_name":"Acme","plan":"team","owner_email":"owner@example.org"}'
 ```
 
+未接入 OIDC 时，平台管理员可直接为租户签发首个管理员令牌，响应只返回一次原始令牌：
+
+```bash
+curl -X POST "$SCA_API_URL/v1/admin/tenants/acme/tokens" \
+  -H "Authorization: Bearer $SCA_PLATFORM_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"Acme owner","days":365}'
+```
+
 所有者首次通过 OIDC 登录时，以已验证邮箱领取待激活的邀请。后续按 OIDC `sub` 识别成员。
 OIDC 服务应在令牌中提供 `email` 和 `email_verified=true`。用户有多个租户的邀请或成员身份时，
 OIDC 服务需按 `SCA_OIDC_TENANT_CLAIM` 提供目标租户标识。已有租户继续接受部署方配置的
