@@ -464,3 +464,29 @@ async def test_kernel_sandbox_uses_the_kinds_backend(tmp_path):
     await kernel._create_sandbox(str(uuid4()))
     assert "/workspace/deps" in [m.target for m in created[0].mounts]
     assert created[0].network == "none"
+
+
+async def test_build_commands_honor_the_configured_timeout(tmp_path):
+    import asyncio
+
+    import pytest
+
+    from sca.agents.opencode_build import run_command
+
+    with pytest.raises(TimeoutError):
+        await run_command(["sleep", "5"], tmp_path / "build.log", timeout_s=0.2)
+    assert await asyncio.wait_for(run_command(["echo", "ok"], tmp_path / "build.log", 5), 10) == "ok"
+
+
+async def test_timed_out_build_container_is_removed(tmp_path):
+    import pytest
+
+    from sca.agents.opencode_build import run_command
+
+    docker = tmp_path / "docker"
+    docker.write_text(f'#!/bin/sh\nif [ "$1" = rm ]; then echo "$@" > {tmp_path}/removed; else sleep 5; fi\n')
+    docker.chmod(0o755)
+    with pytest.raises(TimeoutError):
+        await run_command([str(docker), "run", "--rm", "--name=sca-opencode-build-x", "img"],
+                          tmp_path / "build.log", timeout_s=0.2)
+    assert (tmp_path / "removed").read_text().split() == ["rm", "-f", "sca-opencode-build-x"]

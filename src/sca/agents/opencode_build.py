@@ -23,7 +23,7 @@ class Runner(Protocol):
     async def __call__(self, argv: list[str], log: Path) -> str: ...
 
 
-async def run_command(argv: list[str], log: Path) -> str:
+async def run_command(argv: list[str], log: Path, timeout_s: float = 900) -> str:
     process = await asyncio.create_subprocess_exec(
         *argv,
         stdout=asyncio.subprocess.PIPE,
@@ -32,7 +32,7 @@ async def run_command(argv: list[str], log: Path) -> str:
     )
     output = bytearray()
     try:
-        async with asyncio.timeout(900):
+        async with asyncio.timeout(timeout_s):
             assert process.stdout is not None
             with log.open("ab", buffering=0) as stream:
                 while chunk := await process.stdout.read(8192):
@@ -45,6 +45,13 @@ async def run_command(argv: list[str], log: Path) -> str:
         if process.returncode is None:
             process.kill()
         await process.wait()
+        name = next((arg.removeprefix("--name=") for arg in argv if arg.startswith("--name=")), None)
+        if len(argv) > 1 and argv[1] == "run" and name:
+            remover = await asyncio.create_subprocess_exec(
+                argv[0], "rm", "-f", name,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            )
+            await remover.wait()
         raise
 
     if process.returncode:
@@ -60,6 +67,8 @@ def build_command(
         settings.docker_bin,
         "run",
         "--rm",
+        # Named so a timed-out build can be removed; killing the docker CLI leaves it running.
+        f"--name=sca-opencode-build-{version}",
         "--network=none",
         f"--memory={settings.opencode_build_memory}",
         f"--memory-swap={settings.opencode_build_memory}",
@@ -143,7 +152,7 @@ def reserve_build(settings: Settings, build_id: str, tenant_id: str, **fields) -
     return record
 
 
-async def perform_build(settings: Settings, record: dict, runner: Runner = run_command) -> dict:
+async def perform_build(settings: Settings, record: dict, runner: Runner | None = None) -> dict:
     lock_path = records_dir(settings) / "build.lock"
     with lock_path.open("a") as lock:
         try:
@@ -152,6 +161,9 @@ async def perform_build(settings: Settings, record: dict, runner: Runner = run_c
             record = {**record, "status": "failed", "error": "已有构建正在运行，请稍后重试"}
             write_record(records_dir(settings) / f"{record['id']}.json", record)
             raise RuntimeError("Another OpenCode build is running") from exc
+        if runner is None:
+            async def runner(argv: list[str], log: Path) -> str:
+                return await run_command(argv, log, settings.opencode_build_timeout_s)
         return await _perform_build(settings, record, runner)
 
 

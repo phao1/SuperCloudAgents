@@ -198,6 +198,8 @@ class Settings(BaseSettings):
     opencode_src_cache: Path | None = None
     opencode_build_image: str = "oven/bun:1.4.4"
     opencode_build_memory: str = "2500m"
+    # Per-command limit for OpenCode builds; small machines that swap need well over 15 minutes.
+    opencode_build_timeout_s: int = Field(default=2700, ge=60)
     pi_sandbox_image: str = "sca-sandbox-pi:latest"
     pi_version: str = "1.5.2"
     opencode_sandbox_image: str = "sca-sandbox-opencode:latest"
