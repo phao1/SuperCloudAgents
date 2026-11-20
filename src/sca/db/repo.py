@@ -1082,3 +1082,265 @@ class Store:
             ).order_by(events.c.seq.desc()).limit(8))).scalars().all()
             return [{k: str(payload[k])[-1000:] for k in ('command', 'output_tail') if k in payload}
                     for payload in reversed(found)]
+
+    # MCP tool registry and task grants
+
+    def _feature_tenant(self) -> str:
+        if not self.tenant_id:
+            raise ValueError("Tool and knowledge operations require a tenant")
+        return self.tenant_id
+
+    async def task_submitter(self, task_id: UUID) -> str | None:
+        tenant = self._feature_tenant()
+        async with self._transaction() as session:
+            payload = await session.scalar(select(events.c.payload).where(
+                events.c.task_id == task_id, events.c.tenant_id == tenant,
+                events.c.type == "task.created",
+            ))
+        return payload.get("actor") if payload else None
+
+    def _visible_tools(self):
+        from sca.db.schema import tools
+        from sca.tools.models import PLATFORM
+
+        tenant = self._feature_tenant()
+        return select(tools).where(tools.c.tenant_id.in_((tenant, PLATFORM)))
+
+    async def list_tools(self) -> list[dict]:
+        from sca.db.schema import tools
+
+        async with self._transaction() as session:
+            rows = await session.execute(self._visible_tools().order_by(tools.c.name, tools.c.tenant_id))
+            return [dict(row) for row in rows.mappings()]
+
+    async def get_tool(self, name: str) -> dict:
+        from sca.db.schema import tools
+
+        statement = self._visible_tools().where(tools.c.name == name).order_by(
+            (tools.c.tenant_id == self.tenant_id).desc()
+        )
+        async with self._transaction() as session:
+            row = (await session.execute(statement)).mappings().first()
+            if row is None:
+                raise NotFoundError("工具不存在")
+            return dict(row)
+
+    async def create_tool(self, values: dict, actor: str) -> dict:
+        from sca.db.schema import tools
+
+        statement = pg_insert(tools).values(
+            **values, tenant_id=self._feature_tenant(), created_by=actor,
+        ).on_conflict_do_nothing().returning(tools)
+        async with self._transaction() as session:
+            row = (await session.execute(statement)).mappings().first()
+            if row is None:
+                raise ConflictError("该工具名称已存在")
+            return dict(row)
+
+    async def patch_tool(self, name: str, changes: dict) -> dict:
+        from pydantic import ValidationError
+
+        from sca.core.errors import InvalidTaskError
+        from sca.db.schema import tools
+        from sca.tools.models import ToolDefinition
+
+        owned = (tools.c.tenant_id == self._feature_tenant(), tools.c.name == name)
+        async with self._transaction() as session:
+            row = (await session.execute(select(tools).where(*owned).with_for_update())).mappings().first()
+            if row is None:
+                raise NotFoundError("工具不存在")
+            if not changes:
+                return dict(row)
+            current = {key: row[key] for key in ToolDefinition.model_fields}
+            try:
+                values = ToolDefinition.model_validate({**current, **changes}).model_dump()
+            except ValidationError:
+                raise InvalidTaskError("工具配置无效，请检查 URL、类型和请求头配置") from None
+            updated = await session.execute(update(tools).where(*owned).values(
+                **values, version=tools.c.version + 1,
+            ).returning(tools))
+            return dict(updated.mappings().one())
+
+    async def delete_tool(self, name: str) -> None:
+        from sqlalchemy import delete
+
+        from sca.db.schema import tools
+
+        async with self._transaction() as session:
+            removed = await session.scalar(delete(tools).where(
+                tools.c.tenant_id == self._feature_tenant(), tools.c.name == name,
+            ).returning(tools.c.name))
+            if removed is None:
+                raise NotFoundError("工具不存在")
+
+    async def list_tool_grants(self, owner: str, name: str, tenant: str) -> list[dict]:
+        from sca.db.schema import tool_grants as grants
+
+        query = select(grants).where(grants.c.tenant_id == tenant, grants.c.tool_tenant_id == owner,
+                                    grants.c.tool_name == name)
+        async with self._transaction() as session:
+            rows = await session.execute(query.order_by(grants.c.subject_type, grants.c.subject))
+            return [dict(row) for row in rows.mappings()]
+
+    async def add_tool_grant(self, values: dict, actor: str) -> dict:
+        from sqlalchemy.exc import IntegrityError
+
+        from sca.db.schema import tool_grants
+
+        statement = pg_insert(tool_grants).values(**values, granted_by=actor).on_conflict_do_update(
+            index_elements=list(tool_grants.primary_key.columns),
+            set_={"granted_by": tool_grants.c.granted_by},
+        ).returning(tool_grants)
+        try:
+            async with self._transaction() as session:
+                return dict((await session.execute(statement)).mappings().one())
+        except IntegrityError:
+            raise NotFoundError("工具不存在") from None
+
+    async def delete_tool_grant(self, owner: str, name: str, tenant: str,
+                                subject_type: str, subject: str) -> None:
+        from sqlalchemy import delete
+
+        from sca.db.schema import tool_grants as grants
+
+        async with self._transaction() as session:
+            await session.execute(delete(grants).where(
+                grants.c.tenant_id == tenant, grants.c.tool_tenant_id == owner,
+                grants.c.tool_name == name, grants.c.subject_type == subject_type,
+                grants.c.subject == subject,
+            ))
+
+    async def available_tools(self, actor: str, teams: list[str], *,
+                              names: list[str] | None = None) -> list[dict]:
+        from sqlalchemy import and_, or_
+
+        from sca.db.schema import tool_grants as grants
+        from sca.db.schema import tools
+
+        tenant = self._feature_tenant()
+        visible = self._visible_tools()
+        if names is not None:
+            visible = visible.where(tools.c.name.in_(names))
+        chosen = visible.distinct(tools.c.name).order_by(
+            tools.c.name, (tools.c.tenant_id == tenant).desc(),
+        ).subquery()
+        granted = select(grants.c.subject).where(
+            grants.c.tenant_id == tenant, grants.c.tool_tenant_id == chosen.c.tenant_id,
+            grants.c.tool_name == chosen.c.name,
+            or_(and_(grants.c.subject_type == "tenant", grants.c.subject == tenant),
+                and_(grants.c.subject_type == "user", grants.c.subject == actor),
+                and_(grants.c.subject_type == "team", grants.c.subject.in_(teams))),
+        ).exists()
+        async with self._transaction() as session:
+            rows = await session.execute(select(chosen).where(chosen.c.enabled, granted).order_by(chosen.c.name))
+            return [dict(row) for row in rows.mappings()]
+
+    # Tenant knowledge base
+
+    async def _has_knowledge_vectors(self, session: AsyncSession) -> bool:
+        return bool(await session.scalar(text("""SELECT EXISTS (
+            SELECT 1 FROM pg_attribute WHERE attrelid = 'kb_chunks'::regclass
+            AND attname = 'embedding' AND NOT attisdropped
+        )""")))
+
+    async def create_knowledge_document(self, document: dict, chunks: list[dict],
+                                        embedding_model: str | None) -> dict:
+        from sca.db.schema import kb_chunks, kb_documents
+        from sca.memory.embedding import literal
+
+        tenant, doc_id = self._feature_tenant(), uuid4()
+        async with self._transaction() as session:
+            row = (await session.execute(insert(kb_documents).values(
+                **document, id=doc_id, tenant_id=tenant, chunk_count=len(chunks),
+            ).returning(kb_documents))).mappings().one()
+            await session.execute(insert(kb_chunks), [
+                {"tenant_id": tenant, "document_id": doc_id, "ordinal": chunk["ordinal"],
+                 "heading": chunk["heading"], "content": chunk["content"]}
+                for chunk in chunks
+            ])
+            if embedding_model and await self._has_knowledge_vectors(session):
+                vectors = [{"tenant": tenant, "document": doc_id, "ordinal": chunk["ordinal"],
+                            "embedding": literal(chunk["embedding"]), "model": embedding_model}
+                           for chunk in chunks if chunk["embedding"] is not None]
+                if vectors:
+                    await session.execute(text("""UPDATE kb_chunks SET
+                        embedding = CAST(:embedding AS vector), embedding_model = :model
+                        WHERE tenant_id = :tenant AND document_id = :document AND ordinal = :ordinal
+                    """), vectors)
+            return dict(row)
+
+    def _readable_knowledge(self, teams: list[str]):
+        from sqlalchemy import or_
+
+        from sca.db.schema import kb_documents as docs
+
+        return (docs.c.tenant_id == self._feature_tenant(),
+                or_(func.cardinality(docs.c.allowed_teams) == 0, docs.c.allowed_teams.overlap(teams)))
+
+    async def list_knowledge_documents(self, teams: list[str], limit: int, offset: int) -> list[dict]:
+        from sca.db.schema import kb_documents as docs
+
+        metadata = [column for column in docs.c if column.key != "content"]
+        query = select(*metadata).where(*self._readable_knowledge(teams)).order_by(
+            docs.c.created_at.desc(), docs.c.id,
+        ).limit(limit).offset(offset)
+        async with self._transaction() as session:
+            return [dict(row) for row in (await session.execute(query)).mappings()]
+
+    async def get_knowledge_document(self, document_id: UUID, teams: list[str]) -> dict:
+        from sca.db.schema import kb_chunks as chunks
+        from sca.db.schema import kb_documents as docs
+
+        async with self._transaction() as session:
+            row = (await session.execute(select(docs).where(
+                docs.c.id == document_id, *self._readable_knowledge(teams),
+            ).with_for_update(read=True, key_share=True))).mappings().first()
+            if row is None:
+                raise NotFoundError("知识库文档不存在")
+            citations = await session.execute(select(chunks.c.ordinal, chunks.c.heading).where(
+                chunks.c.tenant_id == self.tenant_id, chunks.c.document_id == document_id,
+            ).order_by(chunks.c.ordinal))
+            return {**row, "citations": [dict(citation) for citation in citations.mappings()]}
+
+    async def delete_knowledge_document(self, document_id: UUID) -> None:
+        from sqlalchemy import delete
+
+        from sca.db.schema import kb_documents as docs
+
+        async with self._transaction() as session:
+            removed = await session.scalar(delete(docs).where(
+                docs.c.tenant_id == self._feature_tenant(), docs.c.id == document_id,
+            ).returning(docs.c.id))
+            if removed is None:
+                raise NotFoundError("知识库文档不存在")
+
+    async def search_knowledge(self, query: str, teams: list[str], limit: int,
+                               vector: list[float] | None, model: str | None) -> list[dict]:
+        from sqlalchemy import and_, case, literal_column, null, or_
+
+        from sca.db.schema import kb_chunks as chunks
+        from sca.db.schema import kb_documents as docs
+        from sca.memory.embedding import literal
+
+        parameters = {}
+        async with self._transaction() as session:
+            distance = null()
+            if vector and model and await self._has_knowledge_vectors(session):
+                embedding = literal_column("kb_chunks.embedding")
+                distance = case((
+                    and_(chunks.c.embedding_model == model, func.vector_dims(embedding) == len(vector)),
+                    embedding.op("<=>")(text("CAST(:query_vector AS vector)")),
+                ))
+                parameters["query_vector"] = literal(vector)
+            candidates = select(
+                chunks.c.document_id, docs.c.title, chunks.c.ordinal, chunks.c.heading,
+                chunks.c.content, distance.label("distance"),
+            ).select_from(chunks.join(docs)).where(*self._readable_knowledge(teams)).subquery()
+            matches = or_(candidates.c.distance.is_not(None), *[
+                column.icontains(query, autoescape=True)
+                for column in (candidates.c.title, candidates.c.heading, candidates.c.content)
+            ])
+            result = await session.execute(select(candidates).where(matches).order_by(
+                candidates.c.distance.asc().nulls_last(), candidates.c.document_id, candidates.c.ordinal,
+            ).limit(limit), parameters)
+            return [dict(row) for row in result.mappings()]
