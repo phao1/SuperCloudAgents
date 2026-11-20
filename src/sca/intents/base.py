@@ -12,11 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_SOURCE_BYTES = 2 * 1024 * 1024
 MAX_SOURCES = 16
+TICKET_TYPES = frozenset({"jira", "linear", "github_issue"})
+REMOTE_TYPES = TICKET_TYPES | {"figma"}
 
 
 class IntentSource(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: str = Field(pattern=r"^[a-z][a-z0-9-]{0,30}$")
+    type: str = Field(pattern=r"^[a-z][a-z0-9_-]{0,30}$")
     name: str = Field(pattern=r"^[a-z][a-z0-9-]{0,30}$")
     path: str | None = None
     file_id: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9-]{1,80}$")
@@ -26,7 +28,10 @@ class IntentSource(BaseModel):
     def reference(self) -> IntentSource:
         if len(json.dumps(self.params).encode()) > 32768:
             raise ValueError("intent parameters exceed size limit")
-        if (self.path is None) == (self.file_id is None):
+        if self.type in REMOTE_TYPES:
+            if self.path is not None or self.file_id is not None:
+                raise ValueError("remote intents use params without path or file_id")
+        elif (self.path is None) == (self.file_id is None):
             raise ValueError("provide exactly one of path or file_id")
         return self
 
@@ -35,6 +40,7 @@ class Check(BaseModel):
     name: str
     command: str
     artifacts: list[str] = Field(default_factory=list)
+    needs_base_sha: bool = False
 
 
 class IntentBundle(BaseModel):

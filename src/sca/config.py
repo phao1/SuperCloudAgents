@@ -8,13 +8,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Containers run natively on the host's architecture (Apple silicon gets arm64 images).
 HOST_ARCH: Literal["x64", "arm64"] = (
     "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
 )
+
+
+class IntentCredential(BaseModel):
+    token: SecretStr = Field(min_length=1, repr=False)
+    site: str | None = None
+    email: str | None = None
 
 
 class Settings(BaseSettings):
@@ -233,6 +239,12 @@ class Settings(BaseSettings):
             if candidate.exists():
                 return candidate.resolve().parent
         raise FileNotFoundError("codex binary not found; set SCA_CODEX_BIN_DIR")
+
+    # Design and ticket intake (worker only).
+    figma_api_url: str = "https://api.figma.com"
+    intent_credentials: dict[str, dict[str, IntentCredential]] = Field(
+        default_factory=dict, repr=False, exclude=True
+    )
 
 
 @lru_cache

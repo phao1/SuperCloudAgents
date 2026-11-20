@@ -26,10 +26,14 @@ class VisualAdapter:
 
     def compile(self, source: IntentSource, workspace: Path) -> IntentBundle:
         params = VisualParams.model_validate(source.params)
-        data = source_bytes(source, workspace)
+        return self.from_png(source.name, source_bytes(source, workspace), params)
+
+    @staticmethod
+    def from_png(name: str, data: bytes, params: VisualParams | None = None) -> IntentBundle:
         if not data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ValueError("visual baseline must be PNG")
-        name = source.name
+        if params is None:
+            return IntentBundle(context_files={name + "-baseline.png": data})
         test = f"{name}.spec.cjs"
         diff = f".sca/context/visual-{name}/diff.png"
         code = """const {test, expect} = require('/opt/sca-web/node_modules/@playwright/test');

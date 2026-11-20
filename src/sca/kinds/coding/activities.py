@@ -157,6 +157,7 @@ class CodingActivities(KernelActivities):
             self.publish,
             self.request_ci,
             self.record_ci,
+            self.write_ticket_outcome,
         ]
 
     @activity.defn(name="coding.prepare_mirror")
@@ -614,6 +615,52 @@ class CodingActivities(KernelActivities):
                 ):
                     if isinstance(ev, ExecExit) and ev.exit_code:
                         raise ApplicationError(f"could not install {name} in sandbox")
+
+    # Ticket intake and write-back.
+    @activity.defn(name="coding.write_ticket_outcome")
+    async def write_ticket_outcome(self, task_id: str) -> None:
+        from sca.core.models import TERMINAL_STATES, TaskState
+        from sca.intents.base import TICKET_TYPES, IntentSource
+        from sca.intents.remote import RemoteError, remote_connection
+        from sca.intents.tickets import Outcome, ticket_client
+
+        task = await self.store.get_task(task_id)
+        sources = [
+            source for source in task.spec.get("intents", [])
+            if source.get("type") in TICKET_TYPES
+            and source.get("params", {}).get("writeback", True)
+        ]
+        if task.state not in TERMINAL_STATES or not sources:
+            return
+        outcome = Outcome.from_task(task)
+        recorded = dict(task.result.get("ticket_writeback", {}))
+        async with remote_connection(self.settings, task.tenant_id, self.secrets) as remote:
+            for source in sources:
+                name = source["name"]
+                status = dict(recorded.get(name, {}))
+                if status.get("completed"):
+                    continue
+                recorded[name] = status
+                status.pop("error", None)
+                try:
+                    ticket = ticket_client(IntentSource.model_validate(source), remote)
+                    if not status.get("comment_posted"):
+                        await ticket.comment(outcome)
+                        status["comment_posted"] = True
+                        await self.store.update_result(task_id, {"ticket_writeback": recorded})
+                    if task.state == TaskState.SUCCEEDED:
+                        status["transitioned"] = await ticket.transition()
+                    status["completed"] = True
+                except RemoteError as exc:
+                    status["error"] = str(exc)
+                except (ValueError, KeyError, TypeError):
+                    status["error"] = "Invalid ticket configuration or provider response"
+                await self.store.update_result(task_id, {"ticket_writeback": recorded})
+                await self.store.append_event(
+                    task_id, "intents.ticket_writeback",
+                    {"name": name, "type": source["type"], **status},
+                    dedup_key=f"intents.ticket_writeback.{name}.{status.get('completed', False)}",
+                )
 
 
 __all__ = [

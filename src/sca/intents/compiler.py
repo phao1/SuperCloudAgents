@@ -1,4 +1,4 @@
-"""Worker-side compilation; never executes user tools or fetches remote references."""
+"""Worker-side compilation of local files and official API intent sources."""
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,18 +7,23 @@ from sca.core.interfaces import ObjectStore
 from sca.intents.base import (
     MAX_SOURCE_BYTES,
     MAX_SOURCES,
+    REMOTE_TYPES,
     IntentBundle,
     IntentSource,
     get,
     register,
 )
+from sca.intents.figma import compile_figma
 from sca.intents.openapi import OpenAPIAdapter
+from sca.intents.remote import RemoteClient, RemoteError
 from sca.intents.rules import RulesAdapter
+from sca.intents.tickets import compile_ticket
+from sca.intents.tokens import DesignTokensAdapter
 from sca.intents.visual import VisualAdapter
 
 
 def load_builtin() -> None:
-    for adapter in (OpenAPIAdapter(), VisualAdapter(), RulesAdapter()):
+    for adapter in (OpenAPIAdapter(), VisualAdapter(), RulesAdapter(), DesignTokensAdapter()):
         try:
             get(adapter.type)
         except ValueError:
@@ -26,24 +31,36 @@ def load_builtin() -> None:
 
 
 async def compile_sources(
-    sources: list[IntentSource], workspace: Path, objects: ObjectStore, tenant_id: str
+    sources: list[IntentSource],
+    workspace: Path,
+    objects: ObjectStore,
+    tenant_id: str,
+    *,
+    remote: RemoteClient | None = None,
 ) -> IntentBundle:
     if len(sources) > MAX_SOURCES or len({s.name for s in sources}) != len(sources):
         raise ValueError("intent sources must have unique names and at most 16 entries")
     load_builtin()
     result = IntentBundle()
     for source in sources:
-        adapter = get(source.type)
-        if source.file_id:
+        if source.type in REMOTE_TYPES:
+            if remote is None or remote.tenant_id != tenant_id:
+                raise ValueError("worker credentials are required for remote intents")
+            compile_remote = compile_figma if source.type == "figma" else compile_ticket
+            try:
+                bundle = await compile_remote(source, remote)
+            except (AttributeError, KeyError, TypeError, RecursionError):
+                raise RemoteError(source.type, "invalid data from provider") from None
+        elif source.file_id:
             data = await objects.get(f"tenants/{tenant_id}/files/{source.file_id}")
             if len(data) > MAX_SOURCE_BYTES:
                 raise ValueError("intent source exceeds size limit")
             with TemporaryDirectory() as directory:
                 root = Path(directory)
                 (root / "input").write_bytes(data)
-                bundle = adapter.compile(source.model_copy(update={"path": "input"}), root)
+                bundle = get(source.type).compile(source.model_copy(update={"path": "input"}), root)
         else:
-            bundle = adapter.compile(source, workspace)
+            bundle = get(source.type).compile(source, workspace)
         for name, data in bundle.context_files.items():
             if name in result.context_files and result.context_files[name] != data:
                 raise ValueError(f"conflicting context file: {name}")

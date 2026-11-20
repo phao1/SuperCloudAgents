@@ -409,19 +409,28 @@ class KernelActivities:
 
     @activity.defn
     async def compile_intents(self, task_id: str) -> dict:
-        from sca.intents.base import IntentSource
+        from sca.intents.base import REMOTE_TYPES, IntentSource
         from sca.intents.compiler import compile_sources, write_context
 
         task = await self.store.get_task(task_id)
         if "intents" in task.result:
             return task.result["intents"]
         sources = [IntentSource.model_validate(s) for s in task.spec.get("intents", [])]
+        workspace = self._workspace(task_id).workspace
         try:
-            bundle = await compile_sources(
-                sources, self._workspace(task_id).workspace, self.objects, task.tenant_id
-            )
-            if self._workspace(task_id).workspace.is_dir():
-                write_context(self._workspace(task_id).workspace, bundle)
+            async with contextlib.AsyncExitStack() as stack:
+                remote = None
+                if any(source.type in REMOTE_TYPES for source in sources):
+                    from sca.intents.remote import remote_connection
+
+                    remote = await stack.enter_async_context(
+                        remote_connection(self.settings, task.tenant_id, self.secrets)
+                    )
+                bundle = await compile_sources(
+                    sources, workspace, self.objects, task.tenant_id, remote=remote
+                )
+            if workspace.is_dir():
+                write_context(workspace, bundle)
         except (ValueError, OSError) as exc:
             raise _non_retryable(exc) from exc
         context_keys = {}
@@ -431,7 +440,10 @@ class KernelActivities:
             context_keys[name] = key
         compiled = {
             "context_keys": context_keys,
-            "checks": [check.model_dump() for check in bundle.checks],
+            "checks": [
+                check.model_dump(exclude=None if check.needs_base_sha else {"needs_base_sha"})
+                for check in bundle.checks
+            ],
             "setup": bundle.setup,
             "notes": [
                 *bundle.prompt_notes,
@@ -450,7 +462,10 @@ class KernelActivities:
                     {
                         "name": source.name,
                         "type": source.type,
-                        "checks": [c.name for c in bundle.checks if c.name == source.name],
+                        "checks": [
+                            c.name for c in bundle.checks
+                            if c.name == source.name or c.name.startswith(source.name + ".")
+                        ],
                     }
                     for source in sources
                 ]
@@ -466,10 +481,20 @@ class KernelActivities:
 
         task = await self.store.get_task(inp.task_id)
         checks = task.result.get("intents", {}).get("checks", [])
+        checks = [
+            check for check in checks if not check.get("needs_base_sha") or task.kind == "coding"
+        ]
         sandbox_id = await self._sandbox_id(inp.task_id)
         runs = await asyncio.gather(
             *(
-                self._run(sandbox_id, ["bash", "-lc", c["command"]], timeout_s=25 * 60)
+                self._run(
+                    sandbox_id,
+                    ["bash", "-lc", c["command"]] + (
+                        ["sca-intent", task.result.get("base_sha") or ""]
+                        if c.get("needs_base_sha") else []
+                    ),
+                    timeout_s=25 * 60,
+                )
                 for c in checks
             )
         )
