@@ -215,6 +215,12 @@ def create_app(
     app.include_router(tenancy_router)
     app.include_router(usage_router)
     _register_scm(app, settings)
+
+    # Phase 6 decoupling
+    from sca.api.impact import router as impact_router
+
+    app.state.settings = settings
+    app.include_router(impact_router)
     return app
 
 

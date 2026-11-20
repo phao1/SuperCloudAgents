@@ -20,6 +20,10 @@ class SubtaskResult:
     reason: str | None = None
     status: str = "failed"
     conflicts: list[str] = field(default_factory=list)
+    depends_on: list[str] = field(default_factory=list)
+
+
+MERGED_STATUSES = frozenset({"merged", "unchanged"})
 
 
 async def merge_subtasks(
@@ -59,11 +63,21 @@ async def merge_subtasks(
     current = base
     await git("update-ref", f"refs/heads/{branch}", current)
     results = []
+    by_name: dict[str, SubtaskResult] = {}
     for child_mirror, child in children:
         result = SubtaskResult(**vars(child))
         results.append(result)
+        by_name[child.name] = result
+        blocked = [
+            name for name in child.depends_on
+            if name not in by_name or by_name[name].status not in MERGED_STATUSES
+        ]
+        if blocked:
+            result.status = "blocked"
+            result.reason = result.reason or ("Dependencies did not merge: " + ", ".join(blocked))
+            continue
         if not child.passed:
-            result.status = "failed"
+            result.status = "blocked" if child.status == "blocked" else "failed"
             continue
         if not child.changed:
             result.status = "unchanged"
