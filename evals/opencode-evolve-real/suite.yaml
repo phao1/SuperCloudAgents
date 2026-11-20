@@ -1,0 +1,7 @@
+name: opencode-evolve-real
+kind: coding
+description: 真实工程演进基准，16 个开发用例与 8 个留出用例，覆盖组件实现、跨层改动、故障定位和反复验证。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 900
+  memory_enabled: false

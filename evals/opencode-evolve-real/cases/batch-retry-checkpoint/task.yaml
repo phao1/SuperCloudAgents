@@ -1,0 +1,7 @@
+split: holdout
+category: state-debug
+instruction: |
+  Repair the replay receipt failure reproduced by python -B verify.py, keeping existing checkpoints readable. The authoritative contracts are in docs/replay.md and docs/checkpoints.md.
+  Use only the standard library offline. Keep both documents and verify.py byte-for-byte unchanged.
+verify_command: python -B verify.py
+image: python:3.12

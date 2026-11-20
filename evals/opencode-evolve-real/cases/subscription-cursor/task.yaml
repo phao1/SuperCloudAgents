@@ -1,0 +1,7 @@
+split: holdout
+category: pipeline-debug
+instruction: |
+  Fix the stalled delivery replay reproduced by python -B verify.py. Follow the authoritative delivery contract in docs/delivery.md and the API docstrings it references.
+  Use the standard library offline. Keep docs/delivery.md and verify.py byte-for-byte unchanged.
+verify_command: python -B verify.py
+image: python:3.12

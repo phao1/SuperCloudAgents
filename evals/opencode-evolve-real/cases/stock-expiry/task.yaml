@@ -1,0 +1,8 @@
+split: dev
+category: vertical-feature
+instruction: |
+  Implement expiry dates for received lots in Stockroom. docs/ is authoritative, starting with docs/feature.md.
+              Use the standard library offline. Keep README.md, docs/, the existing tests/, stockroom/schema.sql,
+              and verify.py byte-for-byte unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

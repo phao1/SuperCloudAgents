@@ -1,0 +1,7 @@
+split: dev
+category: pipeline-debug
+instruction: |
+  Repair the board preview failure reproduced by python -B verify.py. Follow docs/preview.md and the API docstrings it references.
+  Use only the standard library offline. Keep docs/preview.md and verify.py byte-for-byte unchanged.
+verify_command: python -B verify.py
+image: python:3.12

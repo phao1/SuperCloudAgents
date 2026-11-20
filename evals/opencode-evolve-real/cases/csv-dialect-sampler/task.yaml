@@ -1,0 +1,6 @@
+split: holdout
+category: data-build
+instruction: |
+  Implement the CSV dialect sampler as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

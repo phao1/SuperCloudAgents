@@ -1,0 +1,7 @@
+split: dev
+category: state-debug
+instruction: |
+  Fix the receipt failure reproduced by python -B verify.py. The warehouse contract is in docs/transfers.md and the API docstrings it references.
+  Use the standard library offline. Keep docs/transfers.md and verify.py byte-for-byte unchanged.
+verify_command: python -B verify.py
+image: python:3.12
