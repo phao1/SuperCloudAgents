@@ -21,7 +21,6 @@ from sca.core.models import (
     ExecExit,
     RepoCredential,
     SandboxAdditions,
-    Task,
     TaskState,
     tail,
 )
@@ -225,21 +224,7 @@ class CodingActivities(KernelActivities):
             await child._save_state(inp.task_id, 0, parent.result["base_sha"])
             await child.create_sandbox(inp.task_id)
             return {}
-        if inp.action in {"run_setup", "destroy_sandbox"}:
-            await getattr(child, inp.action)(inp.task_id)
-            return {}
-        if inp.action == "collect_memory_proposals":
-            await child.collect_memory_proposals(StepInput(inp.task_id, inp.turn))
-            return {}
-        if inp.action == "run_agent_turn":
-            result = await child.run_agent_turn(
-                TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id)
-            )
-        else:
-            result = await getattr(child, inp.action)(StepInput(inp.task_id, inp.turn))
-        if inp.action == "check_budget":
-            return {"reason": result}
-        return asdict(result)
+        return await child.run_step(inp)
 
     @activity.defn(name="coding.merge_subtasks")
     async def merge_subtasks(self, inp: MergeInput) -> list[dict]:
@@ -297,7 +282,7 @@ class CodingActivities(KernelActivities):
         try:
             task = await self.store.get_task(task_id)
             ws = self._workspace(task_id)
-            enabled = self._snapshots_enabled(task, spec)
+            enabled = self._snapshots_enabled(spec)
             prepared = await ws.prepare(
                 spec.repo_url,
                 spec.base_ref,
@@ -355,12 +340,11 @@ class CodingActivities(KernelActivities):
     def _snapshots(self) -> SnapshotStore:
         return SnapshotStore(self.settings.data_dir / "snapshots", self.settings.snapshot_max_bytes)
 
-    def _snapshots_enabled(self, task: Task, spec: CodingSpec) -> bool:
+    def _snapshots_enabled(self, spec: CodingSpec) -> bool:
         return (self.settings.workspace_snapshots and self.settings.state_transport == "mount"
                 and self.settings.sandbox_driver == "docker" and not spec.intents
                 and not spec.subtasks and spec.plan == "none"
-                and (task.spec.get("fork_from_snapshot") is True
-                     or spec.labels.get("fork_from_snapshot") == "true"))
+                and (spec.fork_from_snapshot or spec.labels.get("fork_from_snapshot") == "true"))
 
     async def _snapshot_key(self, task_id: str, commit: str) -> str:
         from sca.workspace.snapshots import preparation_key
@@ -396,7 +380,7 @@ class CodingActivities(KernelActivities):
                                     setup_seconds: float) -> None:
         task = await self.store.get_task(task_id)
         spec = await self._spec(task_id)
-        if not self._snapshots_enabled(task, spec):
+        if not self._snapshots_enabled(spec):
             return
         metadata = await self._snapshots().publish(
             await self._snapshot_key(task_id, task.result["base_sha"]),

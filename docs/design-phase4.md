@@ -1121,10 +1121,8 @@ HanddClient；输出 JSON 的 p50_ms、p99_ms、wall_s 和 host_cpu_s。fixture 
   这是与 3.3 的存储表示差异：避免在非特权宿主重建 whiteout，代价是首次导出较大，
   不承诺快照本身只有差异大小。分叉仍为 overlay lower=准备层、upper=新任务私有目录。
   关闭 overlay 使用 `cp -a --reflink=auto`，不使用硬链接。
-- 可通过现有 POST `/v1/tasks` 的 `spec.labels.fork_from_snapshot="true"` 选择复用；
-  系统开关关闭时标签没有效果。顶层 `spec.fork_from_snapshot` 的模型接线需要负责人在
-  本任务范围外的 `src/sca/kinds/coding/spec.py` 加 `fork_from_snapshot: bool = False`。
-  活动端已经读取该字段。当前不宣称顶层字段已可提交。
+- 可通过 POST `/v1/tasks` 的 `spec.fork_from_snapshot=true` 选择复用。
+  已有任务也可继续使用 `spec.labels.fork_from_snapshot="true"`。两种写法都受系统开关控制。
 - 仅缓存无 intents、无 subtasks、plan=none 的编码任务，避免漏掉上下文相关准备条件。
   setup 必须把可复用结果留在工作区；容器系统目录、进程和环境变量不在文件快照内。
   agent_home、凭证挂载不进入归档。
@@ -1251,7 +1249,8 @@ Best-of-N 和 overlay 仅存 upper+base 的差分格式列为后续工作。
 | OpenCode 源码 | 5.56 秒 | 3.81 / 1.62 / 2.26 秒 | 是 | 1.4 MB | 263 MB |
 
 这里的 setup 很轻，不装依赖，所以分叉省下的时间有限；setup 越重（例如 pip/bun install），收益越大。
-Best-of-N 没有做（U 留作下一步）。快照默认关闭（`SCA_WORKSPACE_SNAPSHOTS=false`）。
+跨任务复用快照默认关闭（`SCA_WORKSPACE_SNAPSHOTS=false`）。
+第六期的实现见[编码任务 Best-of-N](#第六期编码任务-best-of-n)。
 
 快照的线上验证：打开 `SCA_WORKSPACE_SNAPSHOTS=true` 后，opencode-demo 跑重复 2 次（运行 `86e9ad11`）12/12 通过，
 但没有一个任务分叉。原因是这些用例都没有 setup 命令，而快照只在 setup 成功后生成，按设计如此。
@@ -1292,3 +1291,50 @@ kind + Calico 集群（`sca`），用 `kind load` 加载 `sca-egress:tls-v1` 和
 4. 网关 e2e 和 worker 迁移 e2e：修完第 1、2 条后都通过。
 
 修复后复跑全量：**711 passed、48 skipped、0 failed**（979 秒）；ruff 全部通过。
+
+## 第六期：编码任务 Best-of-N
+
+提交编码任务时设置 `best_of.n`（2 至 5）。Worker 准备工作区并执行一次 `setup_command`，
+然后从同一份文件快照启动独立的子工作流和沙箱。setup 产物需写在 `/workspace` 内。
+各尝试分别运行任务的验证命令，并拥有 `max_fix_attempts + 1` 轮的上限。
+`models` 和 `agent_versions` 分别循环分配，省略时沿用任务配置。尝试之间的快照由
+Best-of-N 自动创建。普通编码任务可在 Docker + mount 下打开 `SCA_WORKSPACE_SNAPSHOTS=true`，
+并提交顶层 `spec.fork_from_snapshot=true`，复用同租户同准备条件的缓存快照。
+
+按金额限制时需配置模型网关。`max_cost_usd` 默认平均分给各尝试，精度为百万分之一美元。
+如需指定金额，在 `best_of.per_attempt_max_cost_usd` 中按尝试编号给出 `n` 个上限，合计须在
+任务金额上限以内。`max_tokens` 也按尝试分配。没有费用记录时，候选的 `cost_usd` 为 `null`。
+Best-of-N 可用于单个编码目标，`plan` 使用 `none` 且 `subtasks` 为空。
+
+下面提交一个由审核者选候选的任务。`SCA_URL` 为 API 地址，`SCA_TOKEN` 为有相应权限的令牌。
+
+```bash
+curl -fsS -X POST "$SCA_URL/v1/tasks" \
+  -H "Authorization: Bearer $SCA_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"coding","spec":{"repo_url":"https://git.example.com/team/app.git",
+    "instruction":"修复订单金额舍入",
+    "setup_command":"python -m venv --copies .venv && .venv/bin/pip install -r requirements.txt",
+    "verify_commands":[".venv/bin/python -m pytest -q"], "push":true, "max_cost_usd":0.3,
+    "best_of":{"n":3,"models":["model-a","model-b"],"select":"human"}}}'
+
+curl -fsS "$SCA_URL/v1/tasks/$TASK_ID/best-of" -H "Authorization: Bearer $SCA_TOKEN"
+
+curl -fsS -X POST "$SCA_URL/v1/tasks/$TASK_ID/best-of/select" \
+  -H "Authorization: Bearer $SCA_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"attempt":2}'
+```
+
+使用提交响应的 `id` 设置 `TASK_ID`。GET 返回模型和版本、验证结果、费用、轮数、变更行数、
+`patch_url` 和 `chosen`。手动模式在 `AWAITING_REVIEW` 且 `awaiting_selection=true` 时接收从 1 起算的
+尝试编号。POST 返回 `202`，工作流接受第一个有效选择，发布后可用现有 `/v1/tasks/{id}/review` 审核。
+
+默认 `select=verify_then_cost` 在通过验证的候选中选择费用最低者，同价时比较增删行数。
+若均未通过，则先比较通过的验证命令数，再比较费用。费用未知的候选按费用排序时排在已知费用之后。
+选中提交成为任务分支的 HEAD，常规 `changes.patch`、推送和已配置的外部 CI 使用该分支。
+审核要求修改时，主任务从选中提交开始新会话。审计事件包括 `best_of.started`、
+`best_of.attempt_completed` 和 `best_of.selected`。结果沿用现有任务、事件和制品存储。
+
+### 验证结果
+
+25 项单元测试通过，使用真实 Git 和假沙箱验证了并发分叉、预置依赖、预算、选择、推送和人工反馈，
+并比较了普通任务的事件内容。当前环境禁止创建回环套接字，自动和人工选择的两项 Temporal 集成用例均跳过。

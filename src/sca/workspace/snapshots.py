@@ -11,7 +11,7 @@ import stat
 import tempfile
 import time
 from collections.abc import AsyncIterator
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from prometheus_client import Gauge
 
@@ -41,7 +41,14 @@ def tree_digest(root: Path, key: str) -> str:
             info.st_size if stat.S_ISREG(mode) else 0,
         ]).encode() + b"\0")
         if path.is_symlink():
-            digest.update(os.readlink(path).encode() + b"\0")
+            link = os.readlink(path)
+            destination = path.parent
+            # The tree moves after validation, so a link must stay inside it at each step.
+            for part in PurePosixPath(link).parts:
+                destination = (destination / part).resolve()
+                if not destination.is_relative_to(root):
+                    raise WorkspaceError("Snapshot symlink leaves the workspace")
+            digest.update(link.encode() + b"\0")
         elif path.is_file():
             with path.open("rb") as stream:
                 while chunk := stream.read(1024 * 1024):
@@ -63,45 +70,65 @@ class SnapshotStore:
             raise WorkspaceError("Invalid preparation key")
         return self.root / f"{key}.json"
 
+    def _pin(self, target: Path, identity: str) -> Path:
+        refs = self.root / f"{identity}.refs"
+        refs.mkdir(exist_ok=True)
+        owner = str(target.resolve())
+        pin = refs / hashlib.sha256(owner.encode()).hexdigest()
+        pin.write_text(owner)
+        return pin
+
     async def publish(self, key: str, archive: AsyncIterator[bytes], *,
-                      base_commit: str, saved_seconds: float) -> dict:
+                      base_commit: str, saved_seconds: float,
+                      archive_root: str = "", retain_at: Path | None = None) -> dict:
         index = self._index(key)
         async with (self.locks._lock(self.root / "locks" / "publication"),
                     self.locks._lock(self.root / "locks" / key)):
             if index.exists():
-                return json.loads(index.read_text())
-            with tempfile.TemporaryDirectory(prefix=".prepare-", dir=self.root) as temporary:
-                directory = Path(temporary)
-                size = 0
-                with (directory / "archive.tar").open("w+b") as stream:
-                    async for chunk in archive:
-                        size += len(chunk)
-                        if size > self.max_bytes:
-                            raise WorkspaceError("Prepared snapshot exceeds size limit")
-                        stream.write(chunk)
-                    stream.seek(0)
-                    await asyncio.to_thread(extract, stream, directory / "tree", self.max_bytes)
-                tree = directory / "tree"
-                if tree.is_symlink() or not tree.is_dir():
-                    raise WorkspaceError("Invalid snapshot root")
-                # Context belongs to the task, and is rebuilt by the kernel before setup.
-                context = tree / ".sca"
-                if context.is_symlink() or context.is_file():
-                    context.unlink()
-                elif context.exists():
-                    await asyncio.to_thread(shutil.rmtree, context)
-                identity = await asyncio.to_thread(tree_digest, tree, key)
-                target = self.root / identity
-                metadata = {"id": identity, "key": key, "base_commit": base_commit,
-                            "saved_seconds": saved_seconds, "size_bytes": await disk_bytes(tree)}
-                # Overlay checks the lower file's mode before copy-up. Preserve modes;
-                # immutability comes from publication and mounting only as a lower layer.
-                if not target.exists():
-                    tree.rename(target)
-                pending = index.with_suffix(".tmp")
-                pending.write_text(json.dumps(metadata))
-                pending.replace(index)
-                return metadata
+                metadata = json.loads(index.read_text())
+            else:
+                metadata = await self._publish(index, key, archive, base_commit, saved_seconds,
+                                               archive_root)
+            if retain_at is not None:
+                retain_at.mkdir(parents=True, exist_ok=True)
+                self._pin(retain_at, metadata["id"])
+                retain_at.with_name(f"{retain_at.name}.snapshot").write_text(metadata["id"])
+            return metadata
+
+    async def _publish(self, index: Path, key: str, archive: AsyncIterator[bytes], base_commit: str,
+                       saved_seconds: float, archive_root: str) -> dict:
+        with tempfile.TemporaryDirectory(prefix=".prepare-", dir=self.root) as temporary:
+            directory = Path(temporary)
+            size = 0
+            with (directory / "archive.tar").open("w+b") as stream:
+                async for chunk in archive:
+                    size += len(chunk)
+                    if size > self.max_bytes:
+                        raise WorkspaceError("Prepared snapshot exceeds size limit")
+                    stream.write(chunk)
+                stream.seek(0)
+                await asyncio.to_thread(extract, stream, directory / "tree", self.max_bytes)
+            tree = directory / "tree" / archive_root
+            if tree.is_symlink() or not tree.is_dir():
+                raise WorkspaceError("Invalid snapshot root")
+            # Context belongs to the task, and is rebuilt by the kernel before setup.
+            context = tree / ".sca"
+            if context.is_symlink() or context.is_file():
+                context.unlink()
+            elif context.exists():
+                await asyncio.to_thread(shutil.rmtree, context)
+            identity = await asyncio.to_thread(tree_digest, tree, key)
+            target = self.root / identity
+            metadata = {"id": identity, "key": key, "base_commit": base_commit,
+                        "saved_seconds": saved_seconds, "size_bytes": await disk_bytes(tree)}
+            # Overlay checks the lower file's mode before copy-up. Preserve modes;
+            # immutability comes from publication and mounting only as a lower layer.
+            if not target.exists():
+                tree.rename(target)
+            pending = index.with_suffix(".tmp")
+            pending.write_text(json.dumps(metadata))
+            pending.replace(index)
+            return metadata
 
     async def fork(self, key: str, target: Path, *, overlay: bool = False) -> dict | None:
         index = self._index(key)
@@ -120,10 +147,7 @@ class SnapshotStore:
                 source_file = target.parent / "layer-source.json"
                 source = json.loads(source_file.read_text()) if source_file.exists() else {}
                 source_file.write_text(json.dumps({**source, "snapshot_key": key}))
-            refs = self.root / f"{identity}.refs"
-            refs.mkdir(exist_ok=True)
-            pin = refs / hashlib.sha256(str(target.resolve()).encode()).hexdigest()
-            pin.write_text(str(target.resolve()))
+            pin = self._pin(target, identity)
             try:
                 if not overlay:
                     await command("cp", "-a", "--reflink=auto", "--", str(tree), str(target))
