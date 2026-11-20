@@ -100,8 +100,8 @@ def test_metering_combines_children_and_applies_late_updates_once():
     assert day == daily_delta(day, final, final)
     assert day["tasks"] == 1
     assert day["sandbox_seconds"] == 24
-    assert day["cost_usd"] == pytest.approx(0.3)
+    assert day["cost_usd"] == Decimal("0.3")
     models = aggregate([{"tenant_id": "a", "day": now.date(), **day}], "model")
     assert {row["model"]: row["cost_usd"] for row in models} == {
-        "m1": Decimal(0), "m2": Decimal("0.1"), "unknown": Decimal("0.2"),
+        "m1": 0.0, "m2": 0.1, "unknown": 0.2,
     }
