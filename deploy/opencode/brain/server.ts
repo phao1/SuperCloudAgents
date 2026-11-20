@@ -6,7 +6,7 @@ import { createServer } from "node:net"
 import { createInterface } from "node:readline"
 import { pathToFileURL } from "node:url"
 import { chmodSync, mkdirSync } from "node:fs"
-import { suspension, spawnWithSuspension, IdleSuspension } from "./driver"
+import { suspension, spawnWithSuspension, IdleSuspension, type HanddInput } from "./driver"
 import { turns } from "./turn-provider"
 import type { Context as PluginContext } from "@opencode/plugin/effect/plugin"
 import type { Session } from "@opencode/schema/session"
@@ -16,6 +16,7 @@ interface Turn {
   container: string; workdir: string; task_id: string; session_id?: string
   suspend_idle?: boolean; suspend_idle_min_s?: number
   turn_marker: string; docker_prefix: string[]; model_key: string
+  handd?: HanddInput
 }
 const directory = process.argv[2]!
 mkdirSync(directory, { recursive: true, mode: 0o700 })

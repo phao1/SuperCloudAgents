@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess
@@ -15,15 +17,27 @@ import time
 import uuid
 import weakref
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import ClassVar
+from typing import ClassVar, Literal
 
 from sca.agents.opencode import parse_opencode_line, validate_version
 from sca.config import Settings, get_settings
-from sca.core.errors import AgentTurnError
+from sca.core.errors import AgentTurnError, SandboxError
 from sca.core.interfaces import SandboxProvider, unpause_sandbox
 from sca.core.models import AgentContext, AgentEvent, SandboxAdditions
+from sca.sandbox.handd import (
+    CHUNK,
+    DAEMON,
+    MAX_FRAME,
+    MAX_PTY_OUTPUT,
+    Frame,
+    HanddClient,
+    HanddProcess,
+    terminal_socket,
+    unix_address,
+)
 
 
 def link_dependencies(source: Path, cache: Path) -> None:
@@ -73,6 +87,7 @@ class BrainPool:
     def __init__(self, settings: Settings, command: list[str]) -> None:
         self.settings, self.command = settings, command
         self.servers: dict[str, BrainServer] = {}
+        self.hands: dict[tuple[str, str], HanddClient] = {}
         self.closed = False
         self.worker_id = settings.opencode_brain_pool_worker_id
         self.instances.add(self)
@@ -235,6 +250,9 @@ class BrainPool:
                 await asyncio.gather(server.idle, return_exceptions=True)
             async with server.lock:
                 await self._stop(server)
+        clients = list(self.hands.values())
+        self.hands.clear()
+        await asyncio.gather(*(client.close() for client in clients))
 
     @classmethod
     async def close_all(cls) -> None:
@@ -357,10 +375,20 @@ class OpenCodeBrainBackend:
         pooled = self.settings.opencode_brain_pool
         pool_status = "cold"
         process = None
+        hand = None
+        helper = self.host.with_name("handd_exec.py")
+        if self.settings.sandbox_handd and DAEMON.is_file() and helper.is_file():
+            hand = BrainHandTurn(
+                self.pool.hands, sandbox_id, ctx, self.settings.data_dir, self.docker_prefix,
+                timeout_s,
+            )
 
         async def records() -> AsyncIterator[dict[str, object]]:
             nonlocal process, pool_status
             request = self.request(sandbox_id, ctx, prompt, session_id, marker)
+            if hand is not None and await hand.start():
+                request["handd"] = {"socket": str(hand.path), "python": sys.executable,
+                                    "helper": str(helper)}
             if pooled:
                 stream = self.pool.stream(
                     ctx.agent_version or self.settings.opencode_default_version, source,
@@ -425,6 +453,8 @@ class OpenCodeBrainBackend:
                                 model_ms += event.data.get("model_call_duration_ms", 0)
                             elif event.type in {"command", "tool", "file_change"}:
                                 tool_ms += event.data.get("duration_ms", 0)
+                                if event.type != "tool" or event.data.get("name") in FILE_TOOLS:
+                                    event.data["transport"] = hand.transport if hand else "exec"
                             failed |= event.type == "error"
                             if event.type == "usage" and (raw.get("part") or {}).get("reason") == "stop":
                                 finished = True
@@ -442,17 +472,226 @@ class OpenCodeBrainBackend:
                 except ProcessLookupError:
                     pass
                 await process.wait()
-            if sandbox is not None:
-                await unpause_sandbox(sandbox, sandbox_id)
-            cleanup = await asyncio.create_subprocess_exec(
-                *self.cleanup_command(sandbox_id, marker),
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
             try:
-                await asyncio.wait_for(cleanup.wait(), 10)
-            except TimeoutError:
-                cleanup.kill()
-                await cleanup.wait()
+                if sandbox is not None:
+                    await unpause_sandbox(sandbox, sandbox_id)
+            finally:
+                if hand is not None:
+                    await hand.close()
+            if hand is None or hand.transport == "exec":
+                cleanup = await asyncio.create_subprocess_exec(
+                    *self.cleanup_command(sandbox_id, marker),
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
+                try:
+                    await asyncio.wait_for(cleanup.wait(), 10)
+                except TimeoutError:
+                    cleanup.kill()
+                    await cleanup.wait()
         yield AgentEvent(type="usage", data={"summary": "brain_turn", "pool": pool_status,
             "brain_wall_time_ms": round((time.monotonic() - started) * 1000),
             "total_model_call_ms": model_ms, "total_tool_ms": tool_ms})
         yield AgentEvent(type="turn_completed", data={"final_message": final})
+
+
+# Brain handd transport
+
+FILE_TOOLS = frozenset({"read", "glob", "grep", "list", "ls"})
+PRIVATE_ENV = re.compile(r"KEY|TOKEN|SECRET|PASSWORD|OPENCODE_CONFIG", re.IGNORECASE)
+
+
+def _wire(frame: Frame) -> bytes:
+    return json.dumps(frame, separators=(",", ":")).encode() + b"\n"
+
+
+class BrainHandTurn:
+    """Serve tool subprocesses and read-only terminal subscribers during one brain turn."""
+
+    def __init__(
+        self, clients: dict[tuple[str, str], HanddClient], sandbox_id: str, ctx: AgentContext,
+        data_dir: Path, docker_prefix: list[str], timeout_s: float,
+    ) -> None:
+        self.clients = clients
+        self.client_key = (ctx.task_id, sandbox_id)
+        self.docker_prefix = docker_prefix
+        self.path = terminal_socket(data_dir, ctx.task_id)
+        self.deadline = time.monotonic() + timeout_s
+        self.secret = (ctx.model_api_key or "").encode()
+        self.transport: Literal["handd", "exec"] = "exec"
+        self.client: HanddClient | None = None
+        self.server: asyncio.Server | None = None
+        self.inode: int | None = None
+        self.connections: set[asyncio.Task[None]] = set()
+        self.viewers: set[asyncio.StreamWriter] = set()
+
+    async def start(self) -> bool:
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            self.path.parent.chmod(0o700)
+            with unix_address(self.path) as address:
+                self.server = await asyncio.start_unix_server(
+                    self.accept, address, limit=MAX_FRAME,
+                )
+            self.inode = self.path.stat().st_ino
+        except OSError:
+            return False
+        return True
+
+    async def close(self) -> None:
+        if self.server is None:
+            return
+        self.server.close()
+        connections = list(self.connections)
+        for connection in connections:
+            connection.cancel()
+        await asyncio.gather(*connections, return_exceptions=True)
+        await self.server.wait_closed()
+        with suppress(FileNotFoundError):
+            if self.path.stat().st_ino == self.inode:
+                self.path.unlink()
+
+    async def probe(self) -> None:
+        clients, key = self.clients, self.client_key
+        client = clients.get(key)
+        if client is None:
+            args = ["exec", "-i", key[1], "python3", "-u", "-c", DAEMON.read_text()]
+            command = ([*self.docker_prefix, shlex.join(["docker", *args])]
+                       if self.docker_prefix[0] == "sg" else [*self.docker_prefix, *args])
+            client = HanddClient(command, environment={"PATH": os.environ.get("PATH", "/usr/bin:/bin")})
+            clients[key] = client
+        previous_reader = client.reader
+        try:
+            await client.start()
+            if not client.supports_pty:
+                raise SandboxError("handd does not support PTY")
+        except (SandboxError, asyncio.CancelledError):
+            clients.pop(key, None)
+            await client.close()
+            raise
+
+        self.client = client
+        self.transport = "handd"
+
+        def forget(reader: asyncio.Task[None]) -> None:
+            if clients.get(key) is client and client.reader is reader:
+                clients.pop(key)
+
+        if client.reader is not None and client.reader is not previous_reader:
+            client.reader.add_done_callback(forget)
+
+    def accept(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        task = asyncio.create_task(self.handle(reader, writer))
+        self.connections.add(task)
+        task.add_done_callback(self.connections.discard)
+
+    async def handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            async with asyncio.timeout(5):
+                request = json.loads(await reader.readline())
+            match request["op"]:
+                case "watch":
+                    self.viewers.add(writer)
+                    try:
+                        writer.write(_wire({"ready": True}))
+                        await writer.drain()
+                        await reader.read(1)
+                    finally:
+                        self.viewers.discard(writer)
+                case "probe":
+                    await self.probe()
+                    writer.write(_wire({"ready": True}))
+                    await writer.drain()
+                case "exec":
+                    await self.run(request, reader, writer)
+        except (KeyError, OSError, SandboxError, TimeoutError, TypeError, ValueError):
+            # EOF without an exit frame tells the tool helper that execution failed.
+            pass
+        except asyncio.CancelledError:
+            writer.transport.abort()
+            raise
+        finally:
+            writer.close()
+            with suppress(OSError):
+                await writer.wait_closed()
+
+    async def run(
+        self, request: Frame, reader: asyncio.StreamReader, writer: asyncio.StreamWriter,
+    ) -> None:
+        if self.client is None:
+            raise SandboxError("handd not ready")
+        options = {
+            "workdir": request["cwd"],
+            "env": {key: value for key, value in request["env"].items()
+                    if not PRIVATE_ENV.search(key)},
+            "timeout_s": max(0, self.deadline - time.monotonic()),
+        }
+        if request.get("pty") is True:
+            handle = self.client.open_pty(request["argv"], **options)
+        else:
+            stdin = base64.b64decode(request.get("stdin", ""), validate=True)
+            handle = self.client.open_exec(request["argv"], stdin=stdin, **options)
+        async with handle as job:
+            output = asyncio.create_task(self.forward(job, writer))
+            input_ = asyncio.create_task(self.receive(job, reader))
+            try:
+                done, _ = await asyncio.wait((output, input_), return_when=asyncio.FIRST_COMPLETED)
+                for task in done:
+                    task.result()
+            finally:
+                output.cancel()
+                input_.cancel()
+                await asyncio.gather(output, input_, return_exceptions=True)
+
+    async def receive(self, job: HanddProcess, reader: asyncio.StreamReader) -> None:
+        if not job.pty:
+            await reader.read(1)
+            return
+        while line := await reader.readline():
+            frame = json.loads(line)
+            if "data" in frame:
+                data = base64.b64decode(frame["data"], validate=True)
+                if len(data) > CHUNK:
+                    raise SandboxError("PTY input frame exceeds limit")
+                await job.write(data)
+            elif "cols" in frame:
+                await job.resize(frame["cols"], frame["rows"])
+
+    def publish(self, kind: str, job: HanddProcess, **fields: object) -> None:
+        if not self.viewers:
+            return
+        packet = _wire({"event": f"terminal.{kind}", "session_id": job.id, **fields})
+        for viewer in self.viewers:
+            if viewer.transport.get_write_buffer_size() >= MAX_PTY_OUTPUT:
+                viewer.transport.abort()
+            else:
+                viewer.write(packet)
+
+    async def forward(self, job: HanddProcess, writer: asyncio.StreamWriter) -> None:
+        pending = b""
+        exit_fields: Frame = {"exit_code": None}
+        if job.pty:
+            self.publish("open", job)
+        try:
+            async for frame in job.frames():
+                if job.pty and "stdout" in frame:
+                    pending += base64.b64decode(frame["stdout"], validate=True)
+                    if self.secret:
+                        pending = pending.replace(self.secret, b"[redacted]")
+                    # Hold a possible prefix of a key split across daemon frames.
+                    keep = 0
+                    for size in range(min(len(pending), len(self.secret) - 1), 0, -1):
+                        if pending.endswith(self.secret[:size]):
+                            keep = size
+                            break
+                    if len(pending) > keep:
+                        chunk, pending = pending[:len(pending) - keep], pending[len(pending) - keep:]
+                        self.publish("output", job, data=base64.b64encode(chunk).decode())
+                if "exit" in frame:
+                    exit_fields = {"exit_code": frame["exit"], "timed_out": frame["timed_out"],
+                                   "truncated": frame.get("truncated", False)}
+                writer.write(_wire(frame))
+                await writer.drain()
+        finally:
+            if job.pty:
+                if pending:
+                    self.publish("output", job, data=base64.b64encode(pending).decode())
+                self.publish("exit", job, **exit_fields)

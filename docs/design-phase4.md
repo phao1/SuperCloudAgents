@@ -1097,6 +1097,42 @@ HanddClient；输出 JSON 的 p50_ms、p99_ms、wall_s 和 host_cpu_s。fixture 
 `src/sca/kinds/coding/activities.py:3 I001`（范围外 import 排序），此前全仓检查通过。
 未修改另一位工程师的文件；负责人整合时需解决该项再跑全仓检查。
 
+### Phase 6 常驻 brain 工具与实时终端
+
+在 Docker Worker 设置 `SCA_SANDBOX_HANDD=true` 后提交
+`agent_backend: "opencode-brain"` 的任务。Brain 校验沙箱使用 `network=none`，
+首次工具调用时握手，后续 shell 和文件工具跨轮复用同一任务沙箱的 handd 连接。
+握手失败时本轮使用原有 exec 路径。已经发出的命令如果断线，其结果未知。
+`agent.command`、`agent.file_change` 及文件读取、搜索工具事件中的
+`transport` 为 `handd` 或 `exec`；`duration_ms` 记录 OpenCode 的单次工具耗时。
+
+OpenCode 的远程 workspace spawner 通过 `OPENCODE_TERMINAL=1` 标识 shell。
+handd 为它分配 80×24 的控制终端，文件工具沿用二进制管道。Shell 命令可用
+管道或 here-document 提供输入。内部 Python 调用方可用
+`HanddClient.open_pty(argv, cols=80, rows=24, timeout_s=120)`，
+再对会话调用 `write(bytes)`、`resize(cols, rows)`、`frames()`、`close()`。
+NDJSON 握手带 `pty: true` 能力位，控制消息使用同一请求 ID 和
+`op: "pty.open" | "pty.write" | "pty.resize" | "pty.close"`。
+输出帧使用 base64 `stdout`，终态使用 `exit` 和 `timed_out`。
+PTY 每次最多传出 1 MiB，超出后丢弃多余输出并在终态标记 `truncated: true`。
+
+任务所属租户的 viewer 可通过 SSE 观看后续 PTY 输出。API 和 Worker 需要在同一主机
+以同一运行用户访问 `SCA_DATA_DIR` 下的本地 Unix socket。
+
+```bash
+curl -N -H "Authorization: Bearer $TOKEN" "$API/v1/tasks/$TASK_ID/terminal"
+```
+
+每条消息含 `session_id`，`terminal.output` 的 `data` 字段是含 ANSI 控制码的
+原始终端字节的 base64；`terminal.open` 和 `terminal.exit` 标记会话生命周期。
+API 会在任务终态关闭流，输出只用于实时观看。Wheel 内置
+`sca/sandbox/_handd_daemon.py`，provider 可从安装包启动守护进程。
+
+局部进程测试覆盖 PTY 读写、尺寸、超时、输出上限与进程组清理。Fake brain 测试比较
+两种传输的单次耗时并断言事件字段，SSE 测试用匿名管道验证终态前的实时输出和
+租户读权限。专项测试 18 个通过。含模拟执行延迟的四次调用中，handd 耗时
+48–49 ms，exec 耗时 69–75 ms。真实 Docker/Bun 环境的端到端和性能验证待部署环境执行。
+
 ## P4.4 快照与分叉
 
 实现默认关闭：`SCA_WORKSPACE_SNAPSHOTS=true` 开启，仅支持 Docker + mount。
@@ -1236,8 +1272,7 @@ Best-of-N 和 overlay 仅存 upper+base 的差分格式列为后续工作。
 | handd | 4 | 同上 | 4.2 / 21.6 / 16.7 ms | 8–34 ms | 0.1–2.6 秒 |
 
 退出条件（工具调用开销 p50/p99 低于直通）达到：单命令开销降到原来的 1/30 到 1/8，宿主 CPU 也大幅下降。
-已知限制：brain 驱动里的命令还是每次 `docker exec`，没有走 handd（W 留作下一步）。
-所以脑手分离模式下的工具调用还拿不到这部分收益。handd 默认关闭。
+这组历史数据测的是 provider；Phase 6 的 brain 路由和开启方式见上文「常驻 brain 工具与实时终端」。
 
 ### 快照与分叉
 
