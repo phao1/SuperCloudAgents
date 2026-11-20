@@ -1,6 +1,5 @@
 """I/O boundary for evolution; model evidence contains dev data only."""
 
-import asyncio
 import json
 from datetime import UTC, datetime
 from pathlib import Path
@@ -13,7 +12,9 @@ from sca.agents.opencode_prompt import read_source_prompt, version_commit
 from sca.config import Settings
 from sca.core.interfaces import ModelGateway
 from sca.db.repo import Store
-from sca.eval.suites import load_suite
+from sca.eval.activities import load_activity_suite
+from sca.eval.errors import suite_changed
+from sca.eval.suites import matches_suite_hash
 from sca.eval.trajectory import overall_passed
 from sca.evolve.checks import overlay_hash, static_check
 from sca.evolve.models import Proposal
@@ -65,9 +66,9 @@ class EvolutionActivities:
         return self.store.for_tenant(request['tenant_id'])
 
     async def suite(self, request: dict) -> dict:
-        suite = await asyncio.to_thread(load_suite, Path(request['config']['suite']))
-        if suite['hash'] != request['suite_hash']:
-            raise ValueError('suite changed during evolution')
+        suite = await load_activity_suite(Path(request['config']['suite']))
+        if not matches_suite_hash(suite, request['suite_hash']):
+            raise suite_changed('Suite changed during evolution')
         return suite
 
     @activity.defn(name='evolve_initialize')
@@ -83,7 +84,9 @@ class EvolutionActivities:
     async def prepare_run(self, request: dict) -> dict:
         suite = await self.suite(request)
         cfg = request['config']
-        payload = {'id': request['run_id'], 'suite': cfg['suite'], 'split': request['split'], 'suite_hash': suite['hash'],
+        # Preserve the pinned hash so runs within an existing evolution can still be paired.
+        suite_hash = request['suite_hash']
+        payload = {'id': request['run_id'], 'suite': cfg['suite'], 'split': request['split'], 'suite_hash': suite_hash,
                    'variant': {'agent_backend': 'opencode', 'agent_version': cfg['agent_version'],
                                'model': cfg['model'], 'agent_overlay': request['overlay'],
                                'use_champion': False},
@@ -96,7 +99,7 @@ class EvolutionActivities:
                            champion_id=request.get('champion_id'))
         await self.scoped(request).create_eval_run({
             'id': UUID(payload['id']), 'tenant_id': request['tenant_id'], 'suite': suite['name'],
-            'suite_hash': suite['hash'], 'variant': payload, 'created_by': request['created_by'],
+            'suite_hash': suite_hash, 'variant': payload, 'created_by': request['created_by'],
             'status': 'queued'})
         return payload
 
@@ -216,10 +219,14 @@ class EvolutionActivities:
 
     @activity.defn(name='evolve_status')
     async def status(self, request: dict) -> None:
+        store = self.scoped(request)
+        if reason := request.get('reason'):
+            await store.fail_evolution(request['id'], request['spent_usd'], reason)
+            return
         values = {'status': request['status'], 'spent_usd': request['spent_usd']}
         if request['status'] not in ('running', 'awaiting_approval'):
             values['finished_at'] = datetime.now(UTC)
-        await self.scoped(request).update_evolution(request['id'], values)
+        await store.update_evolution(request['id'], values)
 
     @activity.defn(name='evolve_promote')
     async def promote(self, request: dict) -> dict:

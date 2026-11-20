@@ -1,15 +1,21 @@
 """Real Temporal orchestration with fake eval children and I/O activities."""
 
 import asyncio
+from datetime import timedelta
 from uuid import uuid4
 
+import httpx
 import pytest
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
-from temporalio.worker import Worker
+from temporalio.worker import Replayer, Worker
 
-from sca.config import get_settings
+from sca.config import Settings, get_settings
+from sca.eval.activities import EvalActivities
+from sca.eval.suites import load_suite
+from sca.eval.workflow import EvalRunWorkflow
+from sca.evolve.activities import EvolutionActivities
 from sca.evolve.models import EvolutionConfig
 from sca.evolve.workflow import EvolutionWorkflow
 
@@ -114,3 +120,82 @@ async def test_evolution_paths(temporal_env, scenario, expected, promotions):
         assert len(records) == 2
         assert sum(r['split'] == 'dev' and not r['overlay'] for r in runs.values()) == 1
     assert all(c['decision'] != 'pending' for c in records.values())
+
+
+async def test_suite_change_fails_eval_and_evolution(temporal_env, store, tmp_path, monkeypatch):
+    suite_path = tmp_path / 'suite'
+    for case_id in ('a', 'b', 'c'):
+        case = suite_path / 'cases' / case_id
+        (case / 'data').mkdir(parents=True)
+        (case / 'data/input.csv').write_text('value\n1\n')
+        (case / 'acceptance').mkdir()
+        (case / 'acceptance/hidden.py').write_text('assert True\n')
+        (case / 'acceptance.yaml').write_text('command: python hidden.py\n')
+        (case / 'task.yaml').write_text('split: dev\nquestion: Count rows\n')
+    (suite_path / 'suite.yaml').write_text('name: test\nkind: analysis\n')
+    config = EvolutionConfig(suite=str(suite_path), agent_version='v', repeat=1, concurrency=1,
+                             generations=1).model_dump()
+    evolution_id = uuid4()
+    scoped = store.for_tenant('eval')
+    await scoped.create_evolution({'id': evolution_id, 'status': 'queued', 'config': config,
+                                  'created_by': 'test'})
+
+    settings = Settings(_env_file=None, data_dir=tmp_path / 'state')
+    evaluation = EvalActivities(settings, store)
+    evolution = EvolutionActivities(settings, store, None)
+    task_id = str(uuid4())
+    submissions, attempts = [], []
+
+    def api(request):
+        if request.url.path == '/v1/files':
+            return httpx.Response(201, json={'tenant_id': 'eval', 'id': str(uuid4())})
+        assert request.url.path == '/v1/tasks'
+        submissions.append(request.headers['Idempotency-Key'])
+        if len(submissions) == 1:
+            return httpx.Response(503)
+        return httpx.Response(201, json={'tenant_id': 'eval', 'id': task_id})
+
+    monkeypatch.setattr(evaluation, 'http', lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(api), base_url='http://test'))
+
+    @activity.defn(name='eval_submit')
+    async def submit(request: dict) -> str:
+        attempts.append((request['case']['id'], activity.info().attempt))
+        return await evaluation.submit(request)
+
+    @activity.defn(name='eval_collect')
+    async def collect(request: dict) -> float:
+        assert request['task_id'] == task_id
+        (suite_path / 'cases/b/acceptance/hidden.py').write_text('assert False\n')
+        return 0.0
+
+    workflows = [EvolutionWorkflow, EvalRunWorkflow]
+    queue = f'evolve-suite-change-{uuid4()}'
+    async with Worker(temporal_env.client, task_queue=queue, workflows=workflows,
+                      activities=[*evolution.all(), evaluation.prepare, submit, collect,
+                                  evaluation.finish]):
+        async with asyncio.timeout(25):
+            handle = await temporal_env.client.start_workflow(
+                EvolutionWorkflow.run,
+                {'id': str(evolution_id), 'tenant_id': 'eval', 'created_by': 'test',
+                 'config': config, 'suite_hash': load_suite(suite_path)['hash']},
+                id=f'evolve-{evolution_id}', task_queue=queue, execution_timeout=timedelta(seconds=30),
+            )
+            assert await handle.result() == 'failed'
+    assert attempts == [('a', 1), ('a', 2), ('b', 1)]
+    assert len(submissions) == 2 and submissions[0] == submissions[1]
+
+    search = await scoped.get_evolution(str(evolution_id))
+    assert search['status'] == 'failed'
+    [entry] = search['journal']
+    run_id = str(entry['id'])
+    run = await scoped.get_eval_run(run_id)
+    assert run['status'] == 'failed'
+    assert run['reason'] == 'Suite changed after evaluation started'
+    assert run_id in search['reason'] and run['reason'] in search['reason']
+    eval_handle = temporal_env.client.get_workflow_handle(f'eval-{run_id}')
+    assert await eval_handle.result() == 'failed'
+
+    replayer = Replayer(workflows=workflows)
+    for completed in (handle, eval_handle):
+        await replayer.replay_workflow(await completed.fetch_history())

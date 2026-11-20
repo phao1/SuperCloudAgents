@@ -5,9 +5,16 @@ from typing import Any
 
 from temporalio import workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ActivityError
+
+from sca.eval.errors import eval_failure_reason
 
 with workflow.unsafe.imports_passed_through():
     from sca.evolve.checks import dev_basis, gate, metrics, select_best
+
+
+class EvalRunFailed(Exception):
+    pass
 
 
 @workflow.defn
@@ -47,6 +54,9 @@ class EvolutionWorkflow:
         await workflow.execute_child_workflow('EvalRunWorkflow', payload, id='eval-' + run_id)
         run = await self.act('read_run', {'run_id': run_id})
         self.spent += metrics(run)['cost_usd']
+        if run['status'] == 'failed' and workflow.patched("eval-suite-change-nonretryable"):
+            reason = run.get('reason') or '请查看评测记录'
+            raise EvalRunFailed(f'评测 {run_id} 失败：{reason}')
         await self.act('status', {'status': 'running', 'spent_usd': self.spent})
         return run
 
@@ -140,7 +150,15 @@ class EvolutionWorkflow:
                 if stale >= self.config['patience']:
                     status = 'patience_exhausted'
                     break
-        except Exception:
+        except Exception as exc:
+            reason = None
+            if isinstance(exc, EvalRunFailed):
+                reason = str(exc)
+            elif isinstance(exc, ActivityError):
+                reason = eval_failure_reason(exc)
+            if reason is not None and workflow.patched("eval-suite-change-nonretryable"):
+                await self.act('status', {'status': 'failed', 'spent_usd': self.spent, 'reason': reason})
+                return 'failed'
             await self.act('status', {'status': 'failed', 'spent_usd': self.spent})
             raise
         await self.act('status', {'status': status, 'spent_usd': self.spent})

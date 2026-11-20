@@ -210,3 +210,31 @@ curl -X POST -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" \
 单测覆盖任务启动时固定冠军、灰度分桶、定时评测触发条件、采集文件布局和留出集
 隔离。迁移 `0016` 已离线生成 SQL。开发沙箱拒绝 Postgres 和 Temporal 连接，真实
 数据库的行级安全与定时工作流尚待集成环境验证。
+
+### 6.5 评测套件变更
+
+评测在排队和提交每个用例前校验套件内容。套件根目录的 `README.md` 文档修改不会影响新评测。
+用例规格、隐藏验收和仓库内容（包括仓库内的 README）仍参与校验。内容变更或输入校验错误会
+结束评测并记录 `status: failed` 和 `reason`。Postgres 和 API 的临时故障继续重试。
+评测会停止安排后续批次，当前批次已发起的提交和已提交的任务可以独立完成，失败后不再收集结果。
+
+演进收到失败的评测结果后会结束，并在详情中记录失败原因和对应评测 ID。固化构建的回归结果为
+`regression_status: failed` 时，查看 `regression_reason`。并行的另一组固化评测可以独立完成。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evals/runs/$EVAL_RUN_ID" \
+  -H "Authorization: Bearer $EVAL_ADMIN_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" \
+  -H "Authorization: Bearer $EVAL_ADMIN_TOKEN"
+curl -fsS "$SCA_API_URL/v1/champions/$CHAMPION_ID" \
+  -H "Authorization: Bearer $EVAL_ADMIN_TOKEN"
+```
+
+旧评测的摘要保留在记录中。已有演进继续使用原摘要配对，旧基线复测在验证原摘要后也保留相同
+的配对标识。旧冠军的固化先验证原始套件，再用新摘要成对运行覆盖版和固化版评测。如果旧摘要
+因根目录 README 改动而无法验证，请恢复原始套件内容或用当前套件重新建立基线。摘要不同的两次
+独立运行需要重新评测后才能配对。无需数据库迁移。
+
+相关单测 89 项通过，模拟 I/O 验证了套件中途变更时评测和演进一起结束。Temporal Replayer
+通过了两份合成的旧版评测历史回放。当前沙箱拒绝 Postgres 和 Temporal 的套接字连接，
+真实服务上的集成测试仍待验证。

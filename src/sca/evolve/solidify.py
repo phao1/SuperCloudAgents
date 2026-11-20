@@ -11,7 +11,12 @@ from uuid import UUID
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
-from temporalio.exceptions import ActivityError, ApplicationError
+from temporalio.exceptions import (
+    ActivityError,
+    ApplicationError,
+    ChildWorkflowError,
+    WorkflowAlreadyStartedError,
+)
 
 with workflow.unsafe.imports_passed_through():
     from sqlalchemy.exc import NoResultFound
@@ -21,7 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from sca.config import Settings
     from sca.core.models import AgentOverlay
     from sca.db.repo import Store
-    from sca.eval.suites import case_metadata, load_suite, select_cases
+    from sca.eval.suites import case_metadata, load_suite, matches_suite_hash, select_cases
 
 
 SOLIDIFY_KIND = "champion-solidify"
@@ -94,7 +99,7 @@ def regression_plan(
     if path.is_symlink() or not path.is_dir() or path.resolve().parent != root:
         raise ValueError("The champion's evaluation suite is not installed")
     suite = load_suite(path)
-    if suite["hash"] != evidence["suite_hash"]:
+    if not matches_suite_hash(suite, evidence["suite_hash"]):
         raise ValueError("The champion's evaluation suite has changed")
     cases = select_cases(suite)
     repeat, case_budget = source["repeat"], source["case_budget"]
@@ -179,13 +184,27 @@ class ChampionSolidifyActivities:
         record = json.loads(path.read_text())
         statuses = request["statuses"]
         store = self.store.for_tenant(record["tenant_id"])
+        failures = []
         for key, status in statuses.items():
-            if status == "failed":
-                await store.finish_eval_run(request["runs"][key]["id"], "failed")
+            if status != "failed":
+                continue
+            run_id = request["runs"][key]["id"]
+            try:
+                run = await store.get_eval_run(run_id)
+            except NoResultFound:
+                reason = "评测未能排队"
+            else:
+                if run["status"] != "failed":
+                    await store.finish_eval_run(run_id, "failed")
+                reason = run.get("reason") or "请查看评测记录"
+            label = "覆盖版" if key == "overlay" else "固化版"
+            failures.append(f"{label}评测 {run_id} 失败：{reason}")
         record["regression_status"] = next(
             (status for status in ("failed", "budget_exhausted") if status in statuses.values()),
             "completed",
         )
+        if failures:
+            record["regression_reason"] = "；".join(failures)
         write_record(path, record)
         return record
 
@@ -193,8 +212,27 @@ class ChampionSolidifyActivities:
         return [self.prepare, self.queue_regression, self.finish_regression]
 
 
+class RegressionEvalFailed(Exception):
+    def __init__(self, variant: str) -> None:
+        super().__init__(variant)
+        self.variant = variant
+
+
 @workflow.defn
 class ChampionSolidifyWorkflow:
+    async def evaluate(self, key: str, run: dict, fail_fast: bool) -> str:
+        # A sibling evaluation can finish and record its own result after the regression fails.
+        options = {"parent_close_policy": workflow.ParentClosePolicy.ABANDON} if fail_fast else {}
+        try:
+            outcome = await workflow.execute_child_workflow(
+                "EvalRunWorkflow", run, id=f"eval-{run['id']}", result_type=str, **options,
+            )
+        except (ChildWorkflowError, WorkflowAlreadyStartedError):
+            outcome = "failed"
+        if fail_fast and outcome not in ("completed", "budget_exhausted"):
+            raise RegressionEvalFailed(key)
+        return outcome
+
     @workflow.run
     async def run(self, request: dict) -> dict:
         options = {"retry_policy": RetryPolicy(maximum_attempts=3),
@@ -213,13 +251,15 @@ class ChampionSolidifyWorkflow:
         except ActivityError:
             statuses = dict.fromkeys(runs, "failed")
         else:
-            outcomes = await asyncio.gather(*(
-                workflow.execute_child_workflow(
-                    "EvalRunWorkflow", run, id=f"eval-{run['id']}", result_type=str,
-                ) for run in runs.values()
-            ), return_exceptions=True)
-            statuses = {key: outcome if outcome in ("completed", "budget_exhausted") else "failed"
-                        for key, outcome in zip(runs, outcomes, strict=True)}
+            fail_fast = workflow.patched("eval-suite-change-nonretryable")
+            try:
+                outcomes = await asyncio.gather(*(
+                    self.evaluate(key, run, fail_fast) for key, run in runs.items()
+                ), return_exceptions=not fail_fast)
+                statuses = {key: outcome if outcome in ("completed", "budget_exhausted") else "failed"
+                            for key, outcome in zip(runs, outcomes, strict=True)}
+            except RegressionEvalFailed as exc:
+                statuses = {exc.variant: "failed"}
         return await workflow.execute_activity("champion_solidify_finish_regression", {
             **regression, "statuses": statuses,
         }, **options)

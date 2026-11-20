@@ -5,6 +5,7 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from sca.api.app import create_app
@@ -71,5 +72,7 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
         next_task = await store.for_tenant('eval').get_task(next_id)
         assert next_task.spec['repo_url'] == task.spec['repo_url']
     (case / 'task.yaml').write_text('question: changed\n')
-    with pytest.raises(ValueError, match='suite changed'):
+    with pytest.raises(ApplicationError, match='Suite changed') as exc:
         await env.run(acts.submit, submission)
+    assert exc.value.type == 'SuiteChanged'
+    assert exc.value.non_retryable

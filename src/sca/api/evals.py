@@ -20,7 +20,7 @@ from sca.core.models import Principal
 from sca.db.schema import eval_runs
 from sca.eval.compare import compare
 from sca.eval.rescore import rescore_run
-from sca.eval.suites import Split, case_metadata, load_suite, select_cases
+from sca.eval.suites import Split, case_metadata, load_suite, matches_suite_hash, select_cases
 from sca.eval.trajectory import overall_passed
 from sca.eval.workflow import EvalRunWorkflow
 from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
@@ -125,7 +125,7 @@ async def enqueue_run(
     except (ValueError, OSError):
         raise HTTPException(422, "Invalid suite") from None
     settings = get_settings()
-    if expected_suite_hash is not None and suite["hash"] != expected_suite_hash:
+    if expected_suite_hash is not None and not matches_suite_hash(suite, expected_suite_hash):
         raise HTTPException(409, "套件内容已变化，请用当前套件重新运行基线")
     variant = body.variant.model_dump(exclude_none=True)
     if body.suite == PROMPT_SUITE:
@@ -146,7 +146,8 @@ async def enqueue_run(
         payload["source_build_id"] = str(source_build_id)
     await request.app.state.store.for_tenant("eval").create_eval_run({
         "id": UUID(run_id), "tenant_id": "eval", "suite": suite["name"],
-        "suite_hash": suite["hash"], "variant": payload,
+        # Retests remain comparable to their verified baseline, including legacy hashes.
+        "suite_hash": expected_suite_hash or suite["hash"], "variant": payload,
         "created_by": user.subject, "status": "queued",
     })
     try:

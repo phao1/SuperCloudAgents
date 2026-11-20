@@ -13,6 +13,7 @@ from sca.evolve.workflow import EvolutionWorkflow
     ('budget', 'budget_exhausted', 0), ('patience', 'patience_exhausted', 0),
     ('approve', 'completed', 1), ('reject', 'completed', 0),
     ('stop', 'stopped', 0), ('invalid', 'patience_exhausted', 0),
+    ('eval_failed', 'failed', 0), ('legacy_eval_failed', 'budget_exhausted', 0),
 ])
 async def test_controller(monkeypatch, mode, expected, promotions):
     from sca.evolve import workflow as module
@@ -33,6 +34,9 @@ async def test_controller(monkeypatch, mode, expected, promotions):
                 return {'id': request['run_id']}
             case 'evolve_read_run':
                 item = requests[request['run_id']]
+                if mode in ('eval_failed', 'legacy_eval_failed'):
+                    return {'id': request['run_id'], 'status': 'failed', 'reason': 'Suite changed',
+                            'results': []}
                 passed = bool(item['overlay'])
                 if mode in ('rejection', 'patience') and item['split'] == 'holdout':
                     passed = not bool(item['overlay'])
@@ -71,13 +75,19 @@ async def test_controller(monkeypatch, mode, expected, promotions):
 
     monkeypatch.setattr(module.workflow, 'execute_activity', execute)
     monkeypatch.setattr(module.workflow, 'execute_child_workflow', child)
+    monkeypatch.setattr(module.workflow, 'patched', lambda _: mode != 'legacy_eval_failed')
     monkeypatch.setattr(module.workflow, 'uuid4', uuid4)
     monkeypatch.setattr(module.workflow, 'wait_condition', wait)
     result = await controller.run({'id': str(uuid4()), 'config': cfg})
     assert result == expected
     assert len(promoted) == promotions
     assert all(c['decision'] != 'pending' for c in candidates.values())
+    assert statuses[-1]['status'] == expected
     assert statuses[-1]['spent_usd'] <= cfg['budget_usd']
+    if mode == 'eval_failed':
+        run_id = next(iter(requests))
+        assert statuses[-1]['reason'] == f'评测 {run_id} 失败：Suite changed'
+        assert len(statuses) == 1
     if mode in ('patience', 'invalid'):
         assert len(candidates) == 2
         assert sum(r['split'] == 'dev' and not r['overlay'] for r in requests.values()) == 1
