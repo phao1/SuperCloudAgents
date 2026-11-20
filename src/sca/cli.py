@@ -325,3 +325,41 @@ def usage_backfill() -> None:
             await store.sessionmaker.kw["bind"].dispose()
 
     output({"tasks_processed": asyncio.run(run())})
+
+
+# Stripe payments
+@admin_app.command("report-usage-to-stripe")
+def report_usage_to_stripe(month: Annotated[str, typer.Option(help="Closed UTC month (YYYY-MM).")]) -> None:
+    """Send settled monthly usage overages to Stripe."""
+    import asyncio
+    from datetime import UTC, date, datetime
+
+    from sca.billing.payments import StripePaymentProvider
+    from sca.billing.usage_to_stripe import report_usage
+    from sca.db.engine import get_store
+
+    try:
+        selected = date.fromisoformat(month + "-01")
+        if selected.isoformat()[:7] != month:
+            raise ValueError
+    except ValueError:
+        raise typer.BadParameter("月份格式应为 YYYY-MM", param_hint="--month") from None
+    if selected >= datetime.now(UTC).date().replace(day=1):
+        raise typer.BadParameter("请选择已结束的 UTC 自然月", param_hint="--month")
+    settings = get_settings()
+    if not settings.stripe_secret_key:
+        typer.echo("请配置 SCA_STRIPE_SECRET_KEY", err=True)
+        raise typer.Exit(1)
+
+    async def run() -> dict[str, Any]:
+        store = get_store()
+        try:
+            return await report_usage(store, StripePaymentProvider(settings), selected,
+                                      settings.billing_markup)
+        finally:
+            await store.sessionmaker.kw["bind"].dispose()
+
+    result = asyncio.run(run())
+    output(result)
+    if result["failed_tenants"]:
+        raise typer.Exit(1)

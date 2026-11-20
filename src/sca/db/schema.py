@@ -420,3 +420,62 @@ kb_chunks = Table(
     ForeignKeyConstraint(["tenant_id", "document_id"], ["kb_documents.tenant_id", "kb_documents.id"],
                          ondelete="CASCADE"),
 )
+
+# Stripe payments
+plans.append_column(Column("stripe_price_id", Text, unique=True))
+plans.append_column(Column("included_usage_usd", Numeric))
+plans.append_constraint(CheckConstraint(
+    "included_usage_usd >= 0 AND included_usage_usd < 'Infinity'::numeric",
+    name="plans_included_usage_usd",
+))
+
+billing_customers = Table(
+    "billing_customers", metadata,
+    Column("tenant_id", Text, ForeignKey("tenants.id"), primary_key=True),
+    Column("stripe_customer_id", Text, nullable=False, unique=True),
+    Column("subscription_id", Text),
+    Column("subscription_status", Text),
+    Column("price_id", Text),
+    Column("current_period_end", DateTime(timezone=True)),
+    Column("suspended_for_nonpayment", Boolean, nullable=False, server_default="false"),
+    Column("checkout_session_id", Text),
+    Column("checkout_price_id", Text),
+)
+
+billing_events = Table(
+    "billing_events", metadata,
+    Column("id", Text, primary_key=True),
+    Column("type", Text, nullable=False),
+    Column("tenant_id", Text, ForeignKey("tenants.id"), nullable=False),
+    timestamp("received_at"),
+    Column("payload", JSONB, nullable=False),
+)
+Index("ix_billing_events_tenant_received", billing_events.c.tenant_id, billing_events.c.received_at)
+
+billing_invoices = Table(
+    "billing_invoices", metadata,
+    Column("id", Text, primary_key=True),
+    Column("tenant_id", Text, ForeignKey("tenants.id"), nullable=False),
+    Column("subscription_id", Text),
+    Column("number", Text),
+    Column("amount_due", BigInteger, nullable=False),
+    Column("amount_paid", BigInteger, nullable=False),
+    Column("currency", Text, nullable=False),
+    Column("status", Text, nullable=False),
+    Column("attempt_count", Integer, nullable=False),
+    Column("hosted_invoice_url", Text),
+    Column("period_start", DateTime(timezone=True)),
+    Column("period_end", DateTime(timezone=True)),
+)
+Index("ix_billing_invoices_tenant_period", billing_invoices.c.tenant_id, billing_invoices.c.period_end)
+
+billing_usage_reports = Table(
+    "billing_usage_reports", metadata,
+    Column("tenant_id", Text, ForeignKey("tenants.id"), primary_key=True),
+    Column("month", Date, primary_key=True),
+    Column("stripe_customer_id", Text, nullable=False),
+    Column("subscription_id", Text, nullable=False),
+    Column("amount_cents", BigInteger, nullable=False),
+    Column("stripe_invoice_item_id", Text),
+    timestamp("created_at"),
+)
