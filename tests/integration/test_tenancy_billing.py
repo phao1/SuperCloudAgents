@@ -276,3 +276,23 @@ async def test_plan_limits_are_json_numbers(commercial_api):
     client, _, _ = commercial_api
     plans = {p["name"]: p for p in (await client.get("/v1/admin/plans", headers=PLATFORM)).json()}
     assert plans["free"]["monthly_cost_limit_usd"] == 10 and plans["enterprise"]["max_task_cost_usd"] is None
+
+
+async def test_tenant_admin_changes_roles_and_removes_members_but_not_owners(commercial_api):
+    client, _, _ = commercial_api
+    assert (await create_tenant(client, owner_email="boss@acme.example")).status_code == 201
+    invite = await client.post("/v1/tenant/members", headers=TENANT,
+                               json={"email": "dev@acme.example", "role": "viewer"})
+    assert invite.status_code == 201
+    path = "/v1/tenant/members/dev@acme.example"
+    assert (await client.patch(path, headers=OTHER, json={"role": "admin"})).status_code == 404
+    changed = await client.patch(path, headers=TENANT, json={"role": "member"})
+    assert changed.status_code == 200 and changed.json()["role"] == "member"
+    assert (await client.patch(path, headers=TENANT, json={"role": "owner"})).status_code == 422
+    owner = "/v1/tenant/members/boss@acme.example"
+    assert (await client.patch(owner, headers=TENANT, json={"role": "viewer"})).status_code == 409
+    assert (await client.delete(owner, headers=TENANT)).status_code == 409
+    assert (await client.delete(path, headers=OTHER)).status_code == 404
+    assert (await client.delete(path, headers=TENANT)).status_code == 204
+    emails = [m["email"] for m in (await client.get("/v1/tenant/members", headers=TENANT)).json()]
+    assert emails == ["boss@acme.example"]

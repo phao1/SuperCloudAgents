@@ -8,6 +8,7 @@ from sca.core.models import Principal
 from sca.db.repo import Store
 from sca.tenancy.models import (
     MemberInvite,
+    MemberRoleUpdate,
     PlatformMemberInvite,
     TenantCreate,
     TenantNameUpdate,
@@ -108,6 +109,20 @@ async def list_members(request: Request, user: TenantAdmin) -> list[dict[str, An
 @router.post("/tenant/members", status_code=201)
 async def invite_member(body: MemberInvite, request: Request, user: TenantAdmin) -> dict[str, Any]:
     return await request.app.state.store.for_tenant(user.tenant_id).invite_member(body.email, body.role)
+
+
+@router.patch("/tenant/members/{email}")
+async def update_member(
+    email: str, body: MemberRoleUpdate, request: Request, user: TenantAdmin,
+) -> dict[str, Any]:
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    return await store.update_member_role(email.strip().lower(), body.role)
+
+
+@router.delete("/tenant/members/{email}", status_code=204)
+async def remove_member(email: str, request: Request, user: TenantAdmin) -> Response:
+    await request.app.state.store.for_tenant(user.tenant_id).remove_member(email.strip().lower())
+    return Response(status_code=204)
 
 
 @router.post("/tenant/tokens", status_code=201)

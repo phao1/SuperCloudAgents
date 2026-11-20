@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import RowMapping, func, insert, select, text, update
+from sqlalchemy import RowMapping, delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1548,6 +1548,38 @@ class Store:
             if row is None:
                 raise ConflictError("该邮箱已被邀请或已加入租户")
             return self._member_view(row)
+
+    async def _non_owner_member(self, session: AsyncSession, email: str) -> None:
+        from sca.db.schema import tenant_members
+
+        if self.tenant_id is None:
+            raise ValueError("Tenant scope required")
+        role = await session.scalar(select(tenant_members.c.role).where(
+            tenant_members.c.tenant_id == self.tenant_id, tenant_members.c.email == email,
+        ).with_for_update())
+        if role is None:
+            raise NotFoundError("成员不存在")
+        if role == "owner":
+            # Ownership changes go through the platform operator, so a tenant never loses its owner.
+            raise ConflictError("所有者只能由平台管理员调整")
+
+    async def update_member_role(self, email: str, role: str) -> dict[str, Any]:
+        from sca.db.schema import tenant_members
+
+        async with self._transaction() as session:
+            await self._non_owner_member(session, email)
+            row = (await session.execute(update(tenant_members).where(
+                tenant_members.c.tenant_id == self.tenant_id, tenant_members.c.email == email,
+            ).values(role=role).returning(tenant_members))).mappings().one()
+            return self._member_view(row)
+
+    async def remove_member(self, email: str) -> None:
+        from sca.db.schema import tenant_members
+
+        async with self._transaction() as session:
+            await self._non_owner_member(session, email)
+            await session.execute(delete(tenant_members).where(
+                tenant_members.c.tenant_id == self.tenant_id, tenant_members.c.email == email))
 
     async def oidc_member_tenants(self, subject: str, email: str | None) -> list[str]:
         async with self._transaction() as session:

@@ -458,7 +458,7 @@ const portalSettings = (() => {
       await loadTokens();
     });
     root.append(ui.panel('租户资料', info), ui.panel('套餐额度', quota),
-      ui.panel('团队成员', members, invite, el('small', '成员角色变更或移除请联系平台运营。')),
+      ui.panel('团队成员', members, invite, el('small', '所有者的变更由平台运营处理。')),
       ui.panel('API 令牌', tokens, create, once, feedback));
     const loadUsage = usageView(root);
 
@@ -488,9 +488,35 @@ const portalSettings = (() => {
     }
     async function loadMembers() {
       const rows = await data(membersPath);
-      ui.list(members, ['邮箱', '角色', '状态', '加入时间'], rows.map(row => [
-        row.email, roleLabels[row.role], row.status === 'pending' ? '待首次登录' : '已加入',
-        ui.date(row.activated_at),
+      const path = row => membersPath + '/' + enc(row.email);
+      const roleSelect = row => {
+        const select = el('select');
+        select.setAttribute('aria-label', row.email + ' 的角色');
+        for (const [value, label] of roles) {
+          const option = el('option', label);
+          option.value = value;
+          option.selected = value === row.role;
+          select.append(option);
+        }
+        select.addEventListener('change', async () => {
+          try {
+            await api(path(row), {role: select.value}, 'PATCH');
+            ui.setMessage(feedback, row.email + ' 的角色已更新。');
+          } catch (e) {
+            select.value = row.role;
+            ui.setMessage(feedback, e.message || '角色更新失败。');
+          }
+        });
+        return select;
+      };
+      ui.list(members, ['邮箱', '角色', '状态', '加入时间', '操作'], rows.map(row => [
+        row.email, row.role === 'owner' ? roleLabels.owner : roleSelect(row),
+        row.status === 'pending' ? '待首次登录' : '已加入', ui.date(row.activated_at),
+        row.role === 'owner' ? '—' : ui.action('移除', async () => {
+          if (!confirm('确认将 ' + row.email + ' 移出租户？')) return;
+          await api(path(row), undefined, 'DELETE');
+          await loadMembers();
+        }, feedback),
       ]), '暂无成员邀请。');
     }
     async function loadTokens() {

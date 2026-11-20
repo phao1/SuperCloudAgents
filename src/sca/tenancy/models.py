@@ -45,5 +45,11 @@ class MemberInvite(BaseModel):
     role: Literal["admin", "member", "viewer"] = Field(default="member")
 
 
+class MemberRoleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: Literal["admin", "member", "viewer"]
+
+
 class PlatformMemberInvite(MemberInvite):
     role: MemberRole = "owner"
