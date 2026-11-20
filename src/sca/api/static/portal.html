@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>SuperCloudAgents · 评测工作台</title>
+<title>SuperCloudAgents · 工作台</title>
+<link rel="stylesheet" href="/portal/assets/portal-operations.css">
 <style>
 :root {
   color-scheme: light;
@@ -457,19 +458,25 @@ body[data-trace-expanded] { overflow: hidden; }
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <a class="brand" href="#/overview"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>评测工作台</small></span></a>
+    <a class="brand" href="#/overview"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>工作台</small></span></a>
     <nav aria-label="主导航">
       <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
-      <a href="#/evals"><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
-      <a href="#/tasks"><span class="nav-symbol" aria-hidden="true">⌘</span>任务进度</a>
-      <a href="#/memories">共享记忆</a>
-      <a href="#/analysis">数据分析</a>
-      <a href="#/loop"><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
-      <a href="#/compare"><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
-      <a href="#/versions"><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
+      <a href="#/submit" data-access="member" hidden>提交任务</a>
+      <a href="#/tasks" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>任务进度</a>
+      <a href="#/analysis" data-access="tenant" hidden>数据分析</a>
+      <a href="#/evals" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
+      <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
+      <a href="#/evolutions" data-access="admin" hidden>自动演进</a>
+      <a href="#/compare" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
+      <a href="#/versions" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
+      <a href="#/memories" data-access="tenant" hidden>共享记忆</a>
+      <a href="#/tools" data-access="tenant" hidden>工具与知识库</a>
+      <a href="#/integrations" data-access="admin" hidden>集成</a>
+      <a href="#/team" data-access="admin" hidden>团队与用量</a>
+      <a href="#/platform" data-access="platform" hidden>平台管理</a>
     </nav>
     <footer>
-      <small>本地工作空间 · eval 租户</small>
+      <small id="sidebar-workspace">尚未连接</small>
       <label>外观<select id="theme"><option value="">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
     </footer>
   </aside>
@@ -483,7 +490,7 @@ body[data-trace-expanded] { overflow: hidden; }
     </header>
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
-      <p>请先在概览连接 eval 工作空间。</p>
+      <p>请先在概览连接 Portal 工作空间。</p>
       <a href="#/overview" id="connect-link">前往连接 →</a>
     </div>
 
@@ -497,9 +504,9 @@ body[data-trace-expanded] { overflow: hidden; }
               <input id="token" type="password" autocomplete="off" required aria-describedby="token-note">
               <button id="connect" class="primary" type="submit">连接</button>
             </div>
-            <small id="token-note">使用 eval 租户令牌。审核和构建需要相应权限。</small>
+            <small id="token-note">使用租户、OIDC 或平台管理员令牌连接。</small>
           </form>
-          <form id="provider-key-form">
+          <form id="provider-key-form" data-access="eval-admin" hidden>
             <label for="provider-key">DeepSeek API Key</label>
             <div class="input-row">
               <input id="provider-key" type="password" autocomplete="off" required disabled aria-describedby="provider-key-note">
@@ -509,9 +516,9 @@ body[data-trace-expanded] { overflow: hidden; }
             <p id="provider-key-status" class="status-text" role="status"></p>
           </form>
         </div>
-        <details><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
+        <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
       </div>
-      <div class="cards">
+      <div class="cards" data-access="eval" hidden>
         <article class="feature">
           <h2>系统提示词自演进</h2>
           <p>用 OpenCode 跑基线，让 OpenCode 根据用例证据起草系统提示词修改。审阅、构建，再用同一套件比较。</p>
@@ -523,15 +530,19 @@ body[data-trace-expanded] { overflow: hidden; }
           <a class="button" href="#/evals/repair">运行缺陷基线 →</a>
         </article>
       </div>
-      <div id="overview-metrics" class="metrics"></div>
-      <div id="recent-loop" class="panel result-card"></div>
+      <div id="overview-metrics" class="metrics" data-access="eval" hidden></div>
+      <div id="recent-loop" class="panel result-card" data-access="eval" hidden></div>
+    </section>
+
+    <section id="submit-page" class="page" hidden>
+      <div id="submit-form" class="panel"></div>
     </section>
 
     <section id="evaluation" class="page" hidden>
       <div class="panel">
         <div class="panel-head"><div><h2>启动评测</h2><p>为基线选择套件、模型和 OpenCode 版本。</p></div></div>
         <div id="suite-cards" class="suites"></div>
-        <form id="run-form" class="stack">
+        <form id="run-form" class="stack" data-access="member" hidden>
           <div class="fields">
             <label>套件<select id="suite" required></select></label>
             <label>后端<select id="backend"><option value="opencode">OpenCode</option><option value="pi">pi</option><option value="codex">Codex</option></select></label>
@@ -591,6 +602,27 @@ body[data-trace-expanded] { overflow: hidden; }
       </div>
       <div id="task-details" class="page" hidden>
         <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span></header>
+        <p id="task-extras-status" class="status-text portal-message" role="status"></p>
+        <div class="panel" hidden><h2>拉取请求与工单</h2><div id="task-delivery" class="stack"></div></div>
+        <div class="panel" hidden><h2>工具与冠军</h2><div id="task-tools-champion" class="stack"></div></div>
+        <div class="panel" hidden><h2>范围越界</h2><div id="task-scope" class="scroll" tabindex="0" aria-label="范围越界"></div></div>
+        <div class="panel" hidden>
+          <h2>Best-of-N 尝试</h2>
+          <div id="task-best-of" class="scroll" tabindex="0" aria-label="Best-of-N 尝试"></div>
+          <p id="task-best-of-status" class="status-text portal-message" role="status"></p>
+          <details id="task-attempt-patch" open hidden><summary id="task-attempt-patch-title">候选补丁</summary>
+            <div id="task-attempt-patch-text" class="diff"></div>
+          </details>
+        </div>
+        <div class="panel" hidden><h2>代码影响分析</h2><div id="task-impact" class="stack"></div></div>
+        <div id="task-terminal-panel" class="panel" hidden>
+          <div class="panel-head"><h2>实时终端（只读）</h2><div class="form-actions">
+            <button id="task-terminal-start" type="button">观看输出</button>
+            <button id="task-terminal-stop" type="button" hidden>停止观看</button>
+          </div></div>
+          <p id="task-terminal-status" class="status-text" role="status"></p>
+          <pre id="task-terminal-output" class="portal-terminal" tabindex="0" aria-label="终端输出"></pre>
+        </div>
         <section id="swimlane" aria-labelledby="task-time-title">
           <header class="task-time-toolbar">
             <h3 id="task-time-title">执行泳道</h3>
@@ -677,7 +709,11 @@ body[data-trace-expanded] { overflow: hidden; }
             <label>修改意见<textarea id="task-review-feedback"></textarea></label>
             <div id="task-review-actions"></div>
           </div>
-          <div id="analysis-report-panel" hidden><h3>分析报告</h3><pre id="analysis-report"></pre></div>
+          <div id="analysis-report-panel" class="stack" hidden>
+            <div class="panel-head"><h3>分析报告</h3><a id="task-analysis-link" href="#/analysis">在数据分析中打开</a></div>
+            <article id="analysis-rendered" class="markdown"></article>
+            <details><summary>Markdown 源文</summary><pre id="analysis-report"></pre></details>
+          </div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
           <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
@@ -691,7 +727,7 @@ body[data-trace-expanded] { overflow: hidden; }
         <label>范围筛选<input id="memory-filter" placeholder="留空查看全部范围"></label>
         <button id="memory-refresh" type="button">刷新记忆</button><div id="memory-list"></div>
       </div>
-      <form id="memory-form" class="panel stack"><h2>创建记忆</h2>
+      <form id="memory-form" class="panel stack" data-access="member" hidden><h2>创建记忆</h2>
         <label>内容<textarea id="memory-text" required maxlength="500"></textarea></label>
         <label>分类<select id="memory-category"><option value="convention">约定</option><option value="pitfall">陷阱</option><option value="command">命令</option><option value="preference">偏好</option></select></label>
         <label>范围<input id="memory-scope" required value="tenant" maxlength="2000"></label>
@@ -700,14 +736,27 @@ body[data-trace-expanded] { overflow: hidden; }
       </form>
     </section>
     <section id="analysis-page" class="page" hidden>
-      <form id="analysis-form" class="panel stack"><h2>数据分析</h2>
+      <form id="analysis-form" class="panel stack" data-access="member" hidden><h2>提交分析任务</h2>
         <label>数据文件<input id="analysis-files" type="file" accept=".csv,.json" multiple required></label>
         <label>分析问题<textarea id="analysis-question" required></textarea></label>
         <label>检查命令（可选，每行一条，最多 16 条）<textarea id="analysis-checks"></textarea></label>
-        <small>检查命令在分析沙箱中运行。报告将以 Markdown 纯文本显示。</small>
+        <small>检查命令在分析沙箱中运行。</small>
         <button id="analysis-submit" type="submit">上传并开始分析</button><p id="analysis-status" role="status"></p>
       </form>
+      <div id="analysis-page-report" class="panel" hidden>
+        <div class="panel-head"><h2>分析报告</h2><a id="analysis-report-task" href="#/tasks">查看任务进度</a></div>
+        <article id="analysis-rendered-detail" class="markdown"></article>
+      </div>
+      <div class="panel"><h2>最近的分析任务</h2><div id="analysis-recent" class="scroll" tabindex="0" aria-label="最近的分析任务"></div></div>
     </section>
+    <section id="evolutions-page" class="page" hidden>
+      <nav id="evolution-nav" class="portal-tabs" aria-label="自动演进功能"></nav>
+      <div id="evolution-content" class="page"></div>
+    </section>
+    <section id="tools-page" class="page" hidden><div id="tools-content" class="page"></div></section>
+    <section id="integrations-page" class="page" hidden><div id="integrations-content" class="page"></div></section>
+    <section id="team-page" class="page" hidden><div id="team-content" class="page"></div></section>
+    <section id="platform-page" class="page" hidden><div id="platform-content" class="page"></div></section>
     <section id="loop" class="page" hidden>
       <div class="panel">
         <div class="panel-head">
@@ -753,12 +802,12 @@ body[data-trace-expanded] { overflow: hidden; }
               <label class="wide"><span id="instruction-label">问题诊断</span><textarea id="instruction" maxlength="10000"></textarea></label>
             </div>
             <div class="action-bar">
-              <button id="start-fix" class="primary" type="button" disabled>发起修复</button>
+              <button id="start-fix" class="primary" type="button" data-access="member" hidden disabled>发起修复</button>
               <button id="fix-trace" type="button">查看修复轨迹</button>
               <div id="loop-memory-proposals" hidden></div>
-              <button id="approve" type="button" disabled>批准修复</button>
-              <button id="build" type="button" disabled>构建新版本</button>
-              <button id="rerun" type="button" disabled>用新版本重跑评测</button>
+              <button id="approve" type="button" data-access="member" hidden disabled>批准修复</button>
+              <button id="build" type="button" data-access="eval-admin" hidden disabled>构建新版本</button>
+              <button id="rerun" type="button" data-access="member" hidden disabled>用新版本重跑评测</button>
             </div>
           </div>
         </details>
@@ -778,13 +827,18 @@ body[data-trace-expanded] { overflow: hidden; }
 </aside>
 <script src="/portal/task-flow.js"></script>
 <script src="/portal/task-timeline.js"></script>
+<script src="/portal/assets/portal-ui.js"></script>
+<script src="/portal/assets/portal-markdown.js"></script>
+<script src="/portal/assets/portal-tasks.js"></script>
+<script src="/portal/assets/portal-evolution.js"></script>
+<script src="/portal/assets/portal-settings.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id), enc=encodeURIComponent;
 let runs=[],versions=[],selectedTask=null,eventCursor=0,refreshing=false;
 let fixes=[], flow={}, fixSelection=null, taskEvents=[], taskLoading=false, suites=[], serverTasks=[], builds=[];
 let portalToken=localStorage.getItem('sca-portal-token')||'';
-let portalConfig=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
+let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
 let selectedIteration=null, currentLoopTask=null, pendingReview=null, promptPreviewKey=null;
 const pendingActions=new Set();
 $('token').value=portalToken;
@@ -815,17 +869,20 @@ async function api(path,body,method){
       Authorization:'Bearer '+portalToken,'Content-Type':'application/json'
     },body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)
   });
-  if(r.status===401||r.status===403){
-    throw Object.assign(Error(r.status===401?'认证失败（401）：请重新输入有效令牌并连接。':'权限不足（403）：请使用 eval 租户令牌；构建需要管理员权限。'),{status:r.status})
-  }
-  if(!r.ok){
-    const data=await r.json().catch(()=>({}));
-    throw Error(data.error?.message||'请求失败：'+r.status)
-  }
+  if(!r.ok)throw await apiFailure(r);
   return r
 }
-async function data(path,body){
-  return (await api(path,body)).json()
+async function apiFailure(r){
+  const body=typeof r.json==='function'?await r.json().catch(()=>({})):{};
+  const message=body?.error?.message;
+  if(r.status===401||r.status===403){
+    const note=r.status===401?'认证失败（401）：请重新输入有效令牌并连接。':'权限不足（403）：当前令牌无法执行此操作。';
+    return Object.assign(Error(body?.error?.code==='tenant_suspended'?message:note),{status:r.status});
+  }
+  return Object.assign(Error(message||'请求失败：'+r.status),{status:r.status});
+}
+async function data(path,body,method){
+  return (await api(path,body,method)).json()
 }
 function options(id,rows,value,label){
   const target=$(id),previous=target.value;
@@ -996,7 +1053,8 @@ function taskCase(task){
   return task.spec?.labels?.case_id;
 }
 function taskChoice(task){
-  return (taskCase(task)||task.kind)+' · '+task.id.slice(0,8)+' · '+statusText(task.state);
+  const summary=task.spec?.instruction||task.spec?.question||'';
+  return (taskCase(task)||summary.split('\n')[0].slice(0,54)||task.kind)+' · '+task.id.slice(0,8)+' · '+statusText(task.state);
 }
 function renderTaskChoices(){
   const choices=[{id:'',label:'选择最近的任务'},
@@ -1060,7 +1118,7 @@ async function matrix(){
   runDetails.set(id,run);
   const rows=run.results,repeat=run.variant.repeat||1;
   const cases=[...new Set([...(suites.find(s=>s.name===run.suite)?.cases||[]),...rows.map(r=>r.case_id)])].sort();
-  const allowPrompt=canOptimize(run);
+  const allowPrompt=portalUI.can('member')&&canOptimize(run);
   updateRescoreButton(run);
   if(visibleMatrix?.run===run&&visibleMatrix.caseCount===cases.length
     &&visibleMatrix.allowPrompt===allowPrompt)return;
@@ -1077,7 +1135,7 @@ async function matrix(){
     box.className=row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
     box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(row.verification_passed?'✓ 通过':'✕ 未通过')));
     if(allowPrompt)box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
-    else if(!overallPassed(row)&&typeof row.acceptance_passed==='boolean')box.append(button('诊断与修复 →',()=>selectCase(run,row,true)));
+    else if(portalUI.can('member')&&!overallPassed(row)&&typeof row.acceptance_passed==='boolean')box.append(button('诊断与修复 →',()=>selectCase(run,row,true)));
     return box;
   })])));
   renderRunDiagnostics(run);
@@ -1108,7 +1166,7 @@ async function showComparison(a,b){
   if(location.hash!=='#/compare/'+enc(a)+'/'+enc(b))return;
   const verdict=verdictFor(oldRun,newRun),box=el('div',undefined,'verdict');
   box.append(el('small','结论卡 · A '+(variant(oldRun).agent_version||a.slice(0,8))+' → B '+(variant(newRun).agent_version||b.slice(0,8))),el('h3',(verdict.adopt?'✓ 建议采纳':'⊘ 不建议采纳'),verdict.adopt?'good':'bad'),el('p',verdict.reason),el('small','修复 '+verdict.fixed+' 项 · 回归 '+verdict.regressions+' 项。单次样本不能证明稳定性或因果。'));
-  if(canOptimize(newRun)&&newRun.variant.source_build_id){
+  if(portalUI.can('member')&&canOptimize(newRun)&&newRun.variant.source_build_id){
     box.append(button('以 B 继续第 '+promptRoundForRun(newRun)+' 轮',()=>continuePrompt(newRun,oldRun)));
   }
   const am=dimensions(oldRun.results),bm=dimensions(newRun.results),cards=el('div',undefined,'metrics');
@@ -1164,6 +1222,7 @@ async function openTask(id){
 async function selectTask(id){
   if(selectedTask===id){await updateTask();return}
   stopTaskStream();
+  portalTasks.resetTask();
   stopReplay();
   selectedTask=id;
   eventCursor=0;
@@ -1199,6 +1258,12 @@ Object.assign(eventLabels,{
   'review.submitted':'已提交审核',
   'ci.requested':'等待 CI',
   'ci.completed':'CI 已回报',
+  'pr.opened':'拉取请求已创建',
+  'scope.violation':'范围越界',
+  'tools.attached':'已附加工具',
+  'champion.applied':'已应用冠军',
+  'best_of.attempt_completed':'候选尝试已完成',
+  'best_of.selected':'候选已选中',
 });
 
 function finishedTask(state){return ['SUCCEEDED','FAILED','CANCELLED'].includes(state)}
@@ -1446,6 +1511,7 @@ async function streamTask(taskId){
       if(batch.length){
         appendTaskEvents(batch);
         renderTaskState(currentTask);
+        portalTasks.render(currentTask,taskEvents);
         renderArchitecture(currentTask);
       }
     }
@@ -1545,6 +1611,7 @@ async function updateTask(){
     await renderTaskReview(t);
     if(selectedTask!==id)return;
     renderTaskObservability(currentTask);
+    portalTasks.render(currentTask,taskEvents);
     if(renderedEventCursor!==eventCursor){
       renderTimeline();
       renderedEventCursor=eventCursor;
@@ -1552,12 +1619,23 @@ async function updateTask(){
     void streamTask(id);
     const [,routeId,section,seq]=location.hash.slice(2).split('/');
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
-    const artifacts=await data('/tasks/'+enc(id)+'/artifacts');
+    const [artifacts]=await Promise.all([data('/tasks/'+enc(id)+'/artifacts'),portalTasks.refreshTask(t)]);
     if(selectedTask!==id)return;
-    $('analysis-report-panel').hidden=true;
     if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
-      const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
-      if(selectedTask===id){$('analysis-report').textContent=report;$('analysis-report-panel').hidden=false}
+      const artifact=artifacts.find(a=>a.name==='report.md');
+      const key=id+'|'+artifact.created_at+'|'+artifact.size_bytes;
+      if($('analysis-report-panel').dataset.report!==key){
+        const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
+        if(selectedTask===id){
+          $('analysis-report').textContent=report;
+          $('analysis-rendered').replaceChildren(portalMarkdown.render(report));
+          $('analysis-report-panel').dataset.report=key;
+          $('task-analysis-link').href='#/analysis/'+enc(id);
+          $('analysis-report-panel').hidden=false;
+        }
+      }
+    }else {
+      $('analysis-report-panel').hidden=true;
     }
     if(artifacts.some(a=>a.name==='changes.patch')){
       const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
@@ -1724,7 +1802,7 @@ function renderPromptReview(task,ready){
   const awaiting=task.state==='AWAITING_REVIEW';
   const key=task.id+':'+(task.result?.turns||0)+':'+(task.result?.commit||'');
   if(promptPreviewKey!==key)$('prompt-preview').hidden=true;
-  $('prompt-feedback-form').hidden=!awaiting;
+  $('prompt-feedback-form').hidden=!awaiting||!portalUI.can('member');
   $('prompt-request-changes').disabled=Boolean(pendingReview)||pendingActions.has('prompt-request-changes');
   $('prompt-review-state').textContent=pendingReview?'修改意见已发送，等待下一执行轮。'
     :awaiting?(ready?'本轮修改范围已通过验证。可以要求修改，或批准候选进入构建。'
@@ -2054,7 +2132,9 @@ async function renderMemoryProposals(task,targetId){
   }
 }
 async function renderTaskReview(task){
-  $('task-review').hidden=task.state!=='AWAITING_REVIEW';
+  const awaitingChoice=task.spec.best_of?.select==='human'&&task.result.best_of_chosen==null;
+  $('task-review').hidden=task.state!=='AWAITING_REVIEW'||awaitingChoice||!portalUI.can('member');
+  if($('task-review').hidden)return;
   await renderMemoryProposals(task,'task-memory-proposals');
   if(selectedTask!==task.id)return;
   $('task-review-actions').replaceChildren(...[['approve','批准'],['request_changes','要求修改'],['reject','拒绝']].map(([decision,label])=>button(label,async()=>{
@@ -2067,11 +2147,13 @@ async function renderTaskReview(task){
   })));
 }
 async function loadMemories(){
+  const identity=portalIdentity;
   const status=$('memory-status').value,scope=$('memory-filter').value.trim();
   const rows=await data('/memories?status='+enc(status)+(scope?'&scope='+enc(scope):''));
+  if(identity!==portalIdentity)return;
   $('memory-list').replaceChildren(rows.length?table(['内容','范围','分类','来源任务','上次使用','操作'],rows.map(memory=>{
     const actions=el('div');
-    actions.append(button(memory.status==='active'?'停用':'启用',async()=>{
+    if(portalUI.can('member'))actions.append(button(memory.status==='active'?'停用':'启用',async()=>{
       await api('/memories/'+enc(memory.id),{status:memory.status==='active'?'retired':'active'},'PATCH');await loadMemories();
     }),button('删除',async()=>{
       if(!confirm('确认删除这条共享记忆？'))return;
@@ -2097,15 +2179,18 @@ $('analysis-form').onsubmit=async event=>{
     const files=[...$('analysis-files').files],question=$('analysis-question').value.trim();
     const checks=$('analysis-checks').value.split('\n').map(line=>line.trim()).filter(Boolean);
     if(!question||!files.length||files.length>32||checks.length>16||files.some(file=>! /\.(csv|json)$/i.test(file.name)))throw Error('请填写问题，选择 1–32 个 CSV/JSON 文件，检查命令最多 16 条。');
-    const inputs=[];
+    const inputs=[], token=portalToken;
     for(const file of files){
+      if(token!==portalToken)return;
       $('analysis-status').textContent='正在上传：'+file.name;
       const form=new FormData();form.append('file',file);
       const response=await fetch('/v1/files',{method:'POST',headers:{Authorization:'Bearer '+portalToken},body:form,signal:AbortSignal.timeout(120000)});
-      if(!response.ok)throw Error('上传失败：'+response.status);
+      if(!response.ok)throw await apiFailure(response);
       inputs.push((await response.json()).id);
     }
+    if(token!==portalToken)return;
     const task=await data('/tasks',{kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}});
+    if(token!==portalToken)return;
     $('analysis-status').textContent='任务已创建：'+task.id;
     await openTask(task.id);
   }catch(e){error(e)}finally{control.disabled=false}
@@ -2113,26 +2198,51 @@ $('analysis-form').onsubmit=async event=>{
 const pages={
   memories:['memories-page','共享记忆','管理跨任务复用的约定。'],
   analysis:['analysis-page','数据分析','上传数据并追踪分析报告。'],
-  overview:['overview','概览','启动评测，追踪任务，再比较候选版本。'],
+  overview:['overview','概览','连接工作空间，提交或查看任务。'],
+  submit:['submit-page','提交任务','配置仓库、验证命令和任务所需的上下文。'],
   evals:['evaluation','评测中心','配置评测条件，查看每个用例的结果。'],
   runs:['run-detail','运行详情','从结果矩阵打开任务证据。'],
   compare:['compare-page','版本对比','查看通过率、耗时和费用的变化。'],
   tasks:['trace','任务进度','沿架构图查看任务经过的模块和事件。'],
   loop:['loop','自演进闭环','追踪从基线、候选到回归的进度。'],
+  evolutions:['evolutions-page','自动演进','查看开发集与留出集证据，管理晋升、定期计划与灰度。'],
   versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
+  tools:['tools-page','工具与知识库','查看 MCP 工具和知识库文档。'],
+  integrations:['integrations-page','集成','管理代码托管集成并查看设计与工单的凭证配置。'],
+  team:['team-page','团队与用量','管理成员邀请、API 令牌与租户用量。'],
+  platform:['platform-page','平台管理','管理租户和套餐，查看平台用量。'],
 };
-async function route(){
+const pageAccess={
+  overview:'public',submit:'member',tasks:'tenant',analysis:'tenant',versions:'tenant',memories:'tenant',
+  evals:'eval',runs:'eval',compare:'eval',loop:'eval',evolutions:'admin',integrations:'admin',
+  tools:'tenant',team:'admin',platform:'platform',
+};
+function pageRoute(){
   const [requested,...parts]=location.hash.slice(2).split('/');
   const page=Object.hasOwn(pages,requested)?requested:'overview';
-  const current=portalConfig?page:'overview';
+  return {page,parts,current:portalUI.can(pageAccess[page])?page:'overview'};
+}
+function syncAccess(){
+  for(const node of document.querySelectorAll('[data-access]'))node.hidden=!portalUI.can(node.dataset.access);
+  const labels={viewer:'只读',member:'成员',admin:'租户管理员'};
+  $('sidebar-workspace').textContent=portalIdentity?.platform_admin?'平台管理员'
+    :portalIdentity?portalIdentity.tenant_id+' · '+labels[portalIdentity.role]:'尚未连接';
+}
+async function route(){
+  const {page,current,parts}=pageRoute();
   if(current!=='tasks'){
     stopTaskStream();
+    portalTasks.stopTerminal();
     stopReplay();
     if(traceFullscreen())await setTraceFullscreen(false);
   }
+  if(current!=='team')portalSettings.clearSensitive();
+  syncAccess();
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
-  $('connect-prompt').hidden=Boolean(portalConfig)||page==='overview';
+  $('connect-prompt').hidden=current===page;
+  $('connect-prompt').querySelector('p').textContent=portalIdentity
+    ?'当前令牌无法访问此页面，请切换到具有相应权限的令牌。':'请先在概览连接 Portal 工作空间。';
   $('page-title').textContent=title;
   $('page-description').textContent=description;
   document.querySelectorAll('.sidebar nav a').forEach(link=>{
@@ -2147,6 +2257,13 @@ async function route(){
   syncEvalForm();
   activeRun=current==='runs'&&parts[0]?decodeURIComponent(parts[0]):null;
   if(activeRun)await matrix();
+  if(current==='submit')await portalTasks.loadSubmit();
+  if(current==='evolutions')await portalEvolution.load(parts);
+  if(['tools','integrations','team','platform'].includes(current))await portalSettings.load(current);
+  if(current==='analysis'){
+    portalTasks.renderAnalysisChoices();
+    await portalTasks.showAnalysis(parts[0]?decodeURIComponent(parts[0]):null);
+  }
   if(current==='memories')await loadMemories();
   if(current==='loop'){
     if(['round','build'].includes(parts[0])&&parts[1]){
@@ -2235,17 +2352,20 @@ $('optimize-prompt').onclick=()=>{
 $('connect-form').onsubmit=async event=>{
   event.preventDefault();
   if(refreshing)return;
-  const previous=portalToken;
-  portalToken=$('token').value.trim();
-  if(!portalToken){portalToken=previous;return}
-  portalConfig=null;
+  const token=$('token').value.trim();
+  if(!token)return;
+  resetPortalSession();
+  portalToken=token;
   $('connect').disabled=true;
   $('connection-status').textContent='正在连接…';
-  await refresh();
-  if(portalConfig)localStorage.setItem('sca-portal-token',portalToken);
+  await refresh(true);
+  if(portalUI.can('tenant'))localStorage.setItem('sca-portal-token',portalToken);
+  else if(portalUI.can('platform')){
+    $('token').value='';
+    localStorage.removeItem('sca-portal-token');
+  }
   else{portalToken='';localStorage.removeItem('sca-portal-token')}
   $('connect').disabled=false;
-  await route().catch(error);
 };
 $('provider-key-form').onsubmit=async event=>{
   event.preventDefault();
@@ -2408,39 +2528,95 @@ function displayConnection(text,style){
   indicator.textContent=style==='complete'?'已连接':style==='problem'?'连接异常':'待连接';
   if($('connection-status').textContent!==text)$('connection-status').textContent=text;
 }
-async function refresh(){
+function resetPortalSession(){
+  stopTaskStream();
+  stopReplay();
+  portalTasks.reset();
+  portalEvolution.reset();
+  portalSettings.reset();
+  portalIdentity=portalConfig=null;
+  canRescore=false;
+  selectedTask=currentTask=currentLoopTask=activeRun=selectedIteration=fixSelection=pendingReview=null;
+  eventCursor=0;
+  runDetails.clear();
+  runEvidence.clear();
+  memoryChoices.clear();
+  runs=versions=suites=serverTasks=builds=fixes=taskEvents=historyRows=[];
+  visibleMatrix=null;
+  flow={};
+  $('task-id').value='';
+  $('task-review-feedback').value='';
+  $('task-details').hidden=true;
+  $('evidence').hidden=true;
+  $('analysis-form').reset();
+  $('memory-form').reset();
+  $('memory-filter').value='';
+  for(const id of ['analysis-status','memory-list','task-summary','timeline','patch','evidence-body']){
+    $(id).replaceChildren();
+  }
+  $('health').hidden=true;
+  $('provider-key').value='';
+  $('provider-key').disabled=true;
+  $('provider-key-form').querySelector('button').disabled=true;
+  $('config').textContent='尚未连接';
+  renderTaskChoices();
+  syncAccess();
+}
+async function loadRecentTasks(){
+  serverTasks=await data('/tasks?limit=100');
+  renderTaskChoices();
+}
+async function refresh(manual=false){
   if(refreshing||!portalToken)return;
   refreshing=true;
   try{
-    await loadConfig();
-    const results=await Promise.allSettled([loadSuites(),loadVersions()]);
-    for(const item of results)if(item.status==='rejected')throw item.reason;
-    if(location.hash.startsWith('#/tasks'))await updateTask();
-    const [page,preset]=location.hash.slice(2).split('/');
-    if(page==='evals')applyEvalPreset(preset);
-    syncEvalForm();
-    await loadRuns();
-    await updateFlow();
-    if(location.hash.startsWith('#/compare/')){
-      const [,a,b]=location.hash.slice(2).split('/');
-      if(a&&b)await showComparison(decodeURIComponent(a),decodeURIComponent(b));
+    const connect=manual||!portalIdentity;
+    if(connect){
+      $('error').textContent='';
+      const identity=await data('/portal/whoami');
+      if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
+      if(!identity.platform_admin)await loadConfig();
+      portalIdentity=portalIdentity||identity;
+      syncAccess();
+      displayConnection(identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
+      if(portalUI.can('tenant')){
+        const results=await Promise.allSettled([loadVersions(),...(portalUI.can('eval')?[loadSuites()]:[])]);
+        for(const item of results)if(item.status==='rejected')error(item.reason);
+      }
     }
-    $('error').textContent='';
-    displayConnection('已连接 eval 工作空间','complete');
+    const {current:page,parts}=pageRoute();
+    if(portalUI.can('tenant')){
+      if(page==='overview'&&!connect)await loadConfig();
+      if(portalUI.can('eval')&&['overview','evals','runs','compare','loop'].includes(page)){
+        await loadRuns();
+        if(page==='overview'||page==='loop')await updateFlow();
+        else if(page==='runs')await loadRecentTasks();
+      }else if(connect||page==='tasks'||page==='analysis'){
+        await loadRecentTasks();
+      }
+      if(page==='versions'&&!connect)await loadVersions();
+      if(!connect&&page==='tasks')await updateTask();
+      if(!connect&&page==='evolutions')await portalEvolution.poll();
+      if(!connect&&page==='analysis'){
+        portalTasks.renderAnalysisChoices();
+        if(parts[0]&&!$('analysis-page-report').dataset.report)await portalTasks.showAnalysis(decodeURIComponent(parts[0]));
+      }
+    }
+    if(connect)await route();
   }catch(e){
-    if(e.status===401||e.status===403){
-      portalConfig=null;
-      $('health').hidden=true;
-      $('provider-key').disabled=true;
-      $('provider-key-form').querySelector('button').disabled=true;
-      $('config').textContent='尚未连接';
+    if(!portalIdentity||e.status===401){
+      resetPortalSession();
+      if(e.status===401||e.status===403){
+        portalToken='';
+        localStorage.removeItem('sca-portal-token');
+      }
       await route();
+      displayConnection('请检查访问令牌或服务状态。','problem');
     }
     error(e);
-    displayConnection('请检查访问令牌或服务状态。','problem');
   }finally{refreshing=false}
 }
-$('refresh').onclick=()=>refresh().catch(error);
+$('refresh').onclick=()=>refresh(true).catch(error);
 $('theme').value=localStorage.getItem('sca-portal-theme')||'';
 document.documentElement.dataset.theme=$('theme').value;
 $('theme').onchange=()=>{
@@ -2455,7 +2631,7 @@ document.addEventListener('keydown',event=>{
 });
 window.addEventListener('hashchange',()=>route().catch(error));
 route().catch(error);
-refresh().then(()=>route()).catch(error);
+refresh().catch(error);
 setInterval(()=>refresh().catch(error),4000);
 </script>
 </body>
