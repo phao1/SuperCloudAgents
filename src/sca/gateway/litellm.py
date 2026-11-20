@@ -73,9 +73,10 @@ class LiteLLMGateway:
         except (KeyError, TypeError, ValueError) as exc:
             raise GatewayError("invalid embedding response") from exc
 
-    async def complete(self, messages: list[dict[str, str]], model: str) -> str:
+    async def complete(self, messages: list[dict[str, str]], model: str, *,
+                       max_tokens: int = 1024) -> str:
         data = await self._post('/v1/chat/completions', {
-            'model': model, 'messages': messages, 'max_tokens': 1024, 'temperature': 0,
+            'model': model, 'messages': messages, 'max_tokens': max_tokens, 'temperature': 0,
         })
         try:
             content = data['choices'][0]['message']['content']

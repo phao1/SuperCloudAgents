@@ -78,3 +78,13 @@ async def test_prepare_persists_split_and_overlay_before_child(tmp_path):
     assert payload['budget'] == .7
     assert payload['variant']['agent_overlay'] == {}
     assert saved['status'] == 'queued'
+
+
+async def test_fenced_or_wrapped_proposals_parse_with_room_for_full_prompts(tmp_path):
+    activities, _, gateway, request = setup(tmp_path)
+    body = json.dumps({'candidates': [{'hypothesis': 'h', 'overlay': {'tool_guidance': 'Run tests'}}]})
+    gateway.complete.side_effect = ['```json\n{"diagnoses": ["p"]}\n```', 'Here:\n```json\n' + body + '\n```']
+    result = await activities.propose(request)
+    assert result[0]['hypothesis'] == 'h' and result[0]['static_check']['valid']
+    assert result[0]['diagnosis'] == {'diagnoses': ['p']}
+    assert gateway.complete.call_args.kwargs['max_tokens'] >= 4096

@@ -33,6 +33,26 @@ DEFAULT_TOOL_GUIDANCE = (
 CODING_TOOLS = ("shell", "read", "edit", "write", "patch", "grep", "glob", "todo")
 
 
+def parse_json(raw: str) -> Any:
+    """Parse model JSON, tolerating Markdown fences and prose around the value."""
+    text = raw.strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1] if '\n' in text else ''
+        text = text.rsplit('```', 1)[0]
+    try:
+        return json.loads(text)
+    except ValueError:
+        pass
+    for open_, close in (('[', ']'), ('{', '}')):
+        start, end = text.find(open_), text.rfind(close)
+        if 0 <= start < end:
+            try:
+                return json.loads(text[start:end + 1])
+            except ValueError:
+                continue
+    raise ValueError('no JSON value in model output')
+
+
 def json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, default=str))
 
@@ -110,7 +130,7 @@ class EvolutionActivities:
             {'role': 'system', 'content': system + ' Return {"diagnoses": [1-3 concise failure patterns]}.'},
             {'role': 'user', 'content': json.dumps(json_safe(evidence))[:24000]}], self.settings.evolve_model)
         try:
-            diagnosis = json.loads(diagnosis[:12000])
+            diagnosis = parse_json(diagnosis[:12000])
             patterns = diagnosis['diagnoses']
             if not isinstance(patterns, list) or not 1 <= len(patterns) <= 3:
                 raise ValueError('invalid diagnosis')
@@ -131,11 +151,15 @@ class EvolutionActivities:
              'surfaces you change; omitted surfaces keep their current value. tool_descriptions replaces '
              'the description of the named tools. Preserve ${OPENCODE_TOOL_GUIDANCE} in system_prompt. '
              'Do not repeat failed hypotheses.'},
-            {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}], self.settings.evolve_model)
+            {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}], self.settings.evolve_model,
+            # Each candidate may carry a full system prompt; the default 1024 tokens truncates the JSON.
+            max_tokens=8192)
         try:
-            values = json.loads(raw[:200000])
+            values = parse_json(raw[:200000])
         except ValueError:
             values = []
+        if isinstance(values, dict):
+            values = next((v for v in values.values() if isinstance(v, list)), [values])
         if not isinstance(values, list):
             values = []
         suite = await self.suite(request)
