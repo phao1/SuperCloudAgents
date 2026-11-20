@@ -19,6 +19,7 @@ from temporalio.exceptions import (
 )
 
 with workflow.unsafe.imports_passed_through():
+    from sca.intents.base import TICKET_TYPES
     from sca.kernel.workflow import TaskWorkflow
     from sca.kinds.coding.activities import (
         SCM_ATTEMPTS,
@@ -83,7 +84,26 @@ class CodingTaskWorkflow(TaskWorkflow):
 
     @workflow.run
     async def run(self, task_id: str) -> str:
-        return await super().run(task_id)
+        try:
+            return await super().run(task_id)
+        finally:
+            await self._write_ticket_outcome(task_id)
+
+    async def _write_ticket_outcome(self, task_id: str) -> None:
+        # When cancellation interrupts load_task, the activity can still read the persisted spec.
+        if self._task_spec is not None and not any(
+            source.get("type") in TICKET_TYPES and source.get("params", {}).get("writeback", True)
+            for source in self._task_spec.get("intents", [])
+        ):
+            return
+        if workflow.patched("coding-ticket-writeback"):
+            try:
+                await workflow.execute_activity(
+                    "coding.write_ticket_outcome", task_id,
+                    start_to_close_timeout=timedelta(minutes=3), retry_policy=_NO_RETRY,
+                )
+            except ActivityError:
+                workflow.logger.warning("could not record ticket write-back for %s", task_id)
 
     # SCM
     async def _set_state(self, task_id: str, state: str, reason: str | None = None) -> None:

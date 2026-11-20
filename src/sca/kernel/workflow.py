@@ -19,6 +19,7 @@ from temporalio.exceptions import (
 )
 
 with workflow.unsafe.imports_passed_through():
+    from sca.intents.base import REMOTE_TYPES
     from sca.kernel.activities import (
         CheckpointResult,
         PublishInput,
@@ -47,6 +48,7 @@ class TaskWorkflow:
         self._pause_requested = False
         self._sandbox_up = False
         self._admission = False
+        self._task_spec: dict | None = None
         self._extension_signals: dict[tuple[str, str], tuple[str, list[Any]]] = {}
 
     async def _extension_signal(self, name: str, key: str, args: list[Any]) -> None:
@@ -155,6 +157,7 @@ class TaskWorkflow:
 
     async def _run(self, task_id: str) -> str:
         spec: dict = await workflow.execute_activity("load_task", task_id, **_QUICK)
+        self._task_spec = spec
         spec.setdefault("_kind", "analysis" if "question" in spec else "coding")
         max_fixes: int = spec["max_fix_attempts"]
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
@@ -164,6 +167,11 @@ class TaskWorkflow:
         early_context = workflow.patched("memory-before-planning")
         intents = {}
         memory_note = ""
+        intent_options = (
+            {"start_to_close_timeout": timedelta(minutes=4), "retry_policy": _retry(2)}
+            if any(source.get("type") in REMOTE_TYPES for source in spec.get("intents", []))
+            else _QUICK
+        )
         if early_context:
             if spec.get("memory_enabled"):
                 memory_note = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
@@ -173,7 +181,7 @@ class TaskWorkflow:
                         spec["hooks"]["prepare"], task_id,
                         start_to_close_timeout=timedelta(minutes=10), retry_policy=_retry(3),
                     )
-                intents = await workflow.execute_activity("compile_intents", task_id, **_QUICK)
+                intents = await workflow.execute_activity("compile_intents", task_id, **intent_options)
             spec["_context_notes"] = "\n".join([*intents.get("notes", []), memory_note])
             spec["_intent_setup"] = bool(intents.get("setup"))
         await self._set_state(task_id, "PROVISIONING")
@@ -193,7 +201,7 @@ class TaskWorkflow:
             )
         if not early_context:
             if spec.get("intents"):
-                intents = await workflow.execute_activity("compile_intents", task_id, **_QUICK)
+                intents = await workflow.execute_activity("compile_intents", task_id, **intent_options)
             if spec.get("memory_enabled"):
                 memory_note = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
         await workflow.execute_activity(

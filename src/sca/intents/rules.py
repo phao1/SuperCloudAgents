@@ -1,5 +1,6 @@
 """Compile linter configuration into a sandbox command."""
 
+import json
 import shlex
 from pathlib import Path
 from typing import Literal
@@ -45,3 +46,17 @@ class RulesAdapter:
                 }[params.tool]
             ],
         )
+
+
+def design_token_check(name: str, literals: dict[str, list[str]]) -> IntentBundle:
+    if not literals:
+        return IntentBundle()
+    config = name + "-token-literals.json"
+    command = shlex.join(["python", ".sca/context/token_check.py", ".sca/context/" + config])
+    return IntentBundle(
+        context_files={
+            "token_check.py": Path(__file__).with_name("token_check.py").read_bytes(),
+            config: json.dumps(literals).encode(),
+        },
+        checks=[Check(name=name, command=command + ' "$1"', needs_base_sha=True)],
+    )

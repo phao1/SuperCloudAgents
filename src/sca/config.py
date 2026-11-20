@@ -9,13 +9,19 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
+from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Containers run natively on the host's architecture (Apple silicon gets arm64 images).
 HOST_ARCH: Literal["x64", "arm64"] = (
     "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
 )
+
+
+class IntentCredential(BaseModel):
+    token: SecretStr = Field(min_length=1, repr=False)
+    site: str | None = None
+    email: str | None = None
 
 
 class Settings(BaseSettings):
@@ -249,6 +255,11 @@ class Settings(BaseSettings):
     scm_portal_url: AnyHttpUrl | None = None
     # Tenant ID -> secret reference -> webhook signing secret.
     scm_webhook_secrets: dict[str, dict[str, SecretStr]] = Field(default_factory=dict)
+    # Design and ticket intake (worker only).
+    figma_api_url: str = "https://api.figma.com"
+    intent_credentials: dict[str, dict[str, IntentCredential]] = Field(
+        default_factory=dict, repr=False, exclude=True
+    )
 
 
 @lru_cache
