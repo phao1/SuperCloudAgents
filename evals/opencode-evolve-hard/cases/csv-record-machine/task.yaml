@@ -1,0 +1,14 @@
+split: dev
+category: parser
+instruction: 'Implement app.parse(text) -> list[list[str]], a strict CSV dialect. (1) Comma separates
+  fields; (2) LF and CRLF terminate records outside quotes; bare CR outside quotes is invalid; (3) double
+  quotes may open only at field start; (4) inside quotes preserve commas, LF and CRLF literally, doubled
+  quotes decode to one quote; (5) after closing quote allow only comma, record terminator or EOF, no spaces;
+  (6) unclosed quotes or quotes in unquoted fields are invalid; (7) errors raise ValueError("invalid csv");
+  (8) empty text gives []; (9) a blank physical record gives [""]; (10) trailing delimiter adds an empty
+  field; trailing record terminator adds no extra record; (11) preserve spaces, Unicode, BOM as ordinary
+  data; (12) quoted empty field at EOF is a record. Do not use csv.reader''s permissive default as the
+  specification. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

@@ -1,0 +1,15 @@
+split: dev
+category: parser
+instruction: 'Repair app.parse(text) -> nested dict. Rules: (1) split physical lines on LF, remove one
+  trailing CR; (2) ignore blank lines and lines whose stripped form starts # or ;, even during continuation;
+  (3) [section] headings have stripped nonempty names, malformed brackets are errors; (4) entries before
+  a section belong to ""; (5) split entries at first = and strip key/value edges; empty keys or missing
+  = are errors; (6) a nonblank line starting space/tab continues the previous entry, appending LF plus
+  stripped text, even if it contains = or [x]; no previous entry is an error; (7) section headings reset
+  the continuation target; (8) repeated sections merge, repeated keys replace without changing insertion
+  order; (9) no inline comments or interpolation; (10) errors are ValueError("line N") using physical
+  1-based line numbers; (11) preserve Unicode and case; (12) empty text returns {}. For entry parsing,
+  indentation is checked before heading syntax. Use only the Python standard library, offline. Keep these
+  files byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

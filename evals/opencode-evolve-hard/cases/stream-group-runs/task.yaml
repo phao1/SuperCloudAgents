@@ -1,0 +1,13 @@
+split: dev
+category: streaming
+instruction: 'Implement app.runs(items, key=lambda x:x) -> lazy iterator of (key, tuple_of_items), grouping
+  adjacent equal keys only. (1) Accept one-shot and infinite inputs; (2) on construction do not consume
+  input or call key; (3) call key exactly once per consumed item; (4) to emit a run consume at most its
+  items plus one lookahead item; (5) cache lookahead key; (6) equality, not hashing, so list keys work;
+  (7) None is ordinary data; (8) preserve object identities and order; (9) empty input yields nothing;
+  (10) exceptions from source/key propagate unchanged on advancement; (11) no eager collection of the
+  entire input; memory may grow with current run only. Runs can be infinite, in which case emitting that
+  run need not terminate. Use only the Python standard library, offline. Keep these files byte-for-byte
+  unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

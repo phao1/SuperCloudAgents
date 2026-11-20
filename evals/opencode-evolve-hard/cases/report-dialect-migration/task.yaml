@@ -1,0 +1,18 @@
+split: holdout
+category: multi-file
+instruction: 'Migrate report serialization through app.py, web.py, cli.py, dialect.json and GUIDE.md.
+  app.render(rows) accepts one-shot iterable of pairs (name,count), preserves order, returns CSV str.
+  Header fields exactly name then count, serialized with the configured delimiter. Use dialect.json at
+  call time for delimiter and lineterminator; set config exactly {"delimiter":";","lineterminator":"\r\n"}.
+  Minimal CSV quoting, double embedded quotes, quote CR and LF as well as delimiter; Unicode retained;
+  zero rows still header. Counts are nonnegative int excluding bool else ValueError("invalid count");
+  names must be str else ValueError("invalid name"); zero allowed. No mutation. web.render(rows) must
+  call app.render at runtime and return UTF-8 bytes with BOM prefix. CLI python -m cli reads a JSON array
+  of pairs from stdin, writes app.render result as UTF-8 bytes WITHOUT BOM (no newline translation); malformed
+  JSON or validation errors exit 2, no stdout, stderr exactly "invalid input\n". Replace GUIDE.md with
+  exactly "CSV: semicolon; CRLF; web=UTF-8-BOM; cli=UTF-8.\n". Add >=3 passing unittest test methods in
+  tests/test_report.py calling production code for quoting, zero count and invalid count. Use only the
+  Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

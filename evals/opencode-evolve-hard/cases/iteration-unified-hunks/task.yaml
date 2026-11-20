@@ -1,0 +1,16 @@
+split: holdout
+category: iteration
+instruction: 'Repair app.apply(base,diff) and run python -m unittest discover -s tests; existing tests
+  are protected. This is a deliberately restricted unified diff, with no file headers: each hunk header
+  exactly "@@ -A,B +C,D @@" plus LF, ASCII nonnegative integers; explicit counts required. Base/diff consist
+  only of LF-terminated lines (or empty). Each following body line starts space (context), - (remove),
+  + (add), ending LF. Context/removal text must match base exactly. Consume B old lines, emit D new lines;
+  mismatches raise ValueError("invalid diff"). Old offset is A-1 when B>0, A when B=0; new offset C-1
+  when D>0, C when D=0. Offsets must match already emitted output plus untouched gap. Hunks are ordered
+  and cannot consume already consumed lines; insertion at cursor allowed. Old offset must be in [cursor,len(base_lines)].
+  Preserve untouched lines and Unicode exactly. Reject unsupported headers, markers (including no-newline
+  marker), malformed counts or missing final LF. Empty diff returns base. No mutation or external commands.
+  Use only the Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py,
+  tests/test_contract.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

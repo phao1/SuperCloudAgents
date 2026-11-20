@@ -1,0 +1,13 @@
+split: dev
+category: iteration
+instruction: 'Repair app.subtract(intervals,cuts). Run ALL existing tests with python -m unittest discover
+  -s tests; tests must not be modified. Both arguments are one-shot iterables of integer half-open (start,end)
+  intervals. Reject bool/nonint endpoints or reversed intervals with ValueError("invalid interval"), even
+  if the other collection is empty. Ignore empty intervals. Union overlapping or touching base intervals
+  and cuts independently, then return sorted nonempty tuples representing base minus cuts. Cuts can extend
+  outside base; endpoint touching removes no area. Preserve inputs; support negative and arbitrarily large
+  integers exactly. Duplicates must not duplicate output. Empty input returns []. Public verify is only
+  a smoke test. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py, tests/test_contract.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

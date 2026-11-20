@@ -1,0 +1,13 @@
+split: holdout
+category: parser
+instruction: 'Implement app.expand(field, low, high) -> sorted list[int] for inclusive integer bounds
+  (0<=low<=high<=100 supplied). Grammar: comma-separated items, each base optionally /step. Base is *
+  or ASCII unsigned integer or ascending A-B; step is positive ASCII unsigned integer. A single N/step
+  means N through high by step; A-B/step and */step start at A or low. Accept leading zeros. Reject whitespace
+  anywhere, signs, Unicode digits, empty items, repeated slash/dash, zero step, reversed/out-of-bounds
+  ranges or numbers with ValueError("invalid field"). Duplicates collapse; ordering is numeric. Validate
+  the entire field, even if previous items already cover all bounds. No names or wraparound. Bounds are
+  not mutated. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

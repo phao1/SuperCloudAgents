@@ -1,0 +1,13 @@
+split: holdout
+category: unicode
+instruction: 'Implement app.index(words) -> dict normalized key to list of (original_position, original_word).
+  Accept a one-shot iterable of strings; invalid nonstring raises ValueError("word N") with zero-based
+  original position. Normalize each word by strip(), NFC, casefold(), NFC again, in that order. Empty
+  normalized keys are skipped but still count in positions. Preserve first-key order. Deduplicate original
+  spellings within each key by exact string equality, keeping first position; different spellings with
+  same key stay. Preserve original spelling including surrounding spaces and decomposed marks. Do not
+  mutate inputs. No ASCII transliteration; Chinese and emoji retained. Return fresh dictionaries/lists
+  on every call. Empty iterable yields {}. Use only the Python standard library, offline. Keep these files
+  byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

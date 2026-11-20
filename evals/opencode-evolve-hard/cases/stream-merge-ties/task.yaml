@@ -1,0 +1,12 @@
+split: dev
+category: streaming
+instruction: 'Implement app.merge(left,right,key=lambda x:x) lazily merging two already sorted iterables.
+  Requirements: no input/key calls until first advancement; at most one buffered element per source; key
+  exactly once per consumed item, even when buffered; ties take left first, preserve each source''s order;
+  no hashing or sentinel collision (None allowed with suitable key); accept infinite sources; after yielding
+  an item, do not refill its source until the consumer asks for the next item; never mutate inputs; exhausted
+  sources aren''t advanced again; source/key exceptions propagate unchanged when encountered; empty inputs
+  produce empty output. Compare keys with <=. Keep signatures. Use only the Python standard library, offline.
+  Keep these files byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

@@ -1,0 +1,15 @@
+split: dev
+category: state-machine
+instruction: 'Repair app.apply(state, events) -> None. state is {''balances'': dict[str,int], ''seen'':
+  dict[str,tuple[str,int]]}; events is a one-shot iterable of (event_id, account, delta). Requirements:
+  (1) update original state and its nested dicts in place; (2) missing balance starts at zero; (3) delta
+  must be int, never bool; event ID and account must be nonempty strings, else ValueError("invalid event");
+  (4) resulting negative balance raises ValueError("overdraft"); (5) first valid event records seen[id]=(account,delta);
+  (6) replay of same ID/payload has no effect; conflicting payload raises ValueError("conflict"); (7)
+  validate types before replay lookup; (8) all events form one atomic transaction: any error, including
+  iterator failure, restores both dictionaries'' values, order and identities; (9) re-raise original iterator
+  exception object; (10) do not mutate event objects; (11) zero delta creates a balance; (12) empty input
+  is a no-op. Initial state is valid. Use only the Python standard library, offline. Keep these files
+  byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

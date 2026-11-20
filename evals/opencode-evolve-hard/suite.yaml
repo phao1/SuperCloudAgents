@@ -1,0 +1,7 @@
+name: opencode-evolve-hard
+kind: coding
+description: 高难度演进基准：16 个开发用例、8 个留出用例，检验完整读题、搜索、精确编辑与验证行为。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 420
+  memory_enabled: false

@@ -1,0 +1,18 @@
+split: holdout
+category: search
+instruction: 'Repair app.run(names), finding the active suffix resolver. Input is one-shot iterable of
+  filename strings; nonstring raises ValueError("invalid filename"). Use final basename after either /
+  or backslash; match suffix case-insensitively using casefold and choose longest matching catalog suffix.
+  Basename must have at least one character before suffix, so .txt alone is unknown; hidden files like
+  .note.txt match. Preserve trailing spaces (no strip), do not parse URL query/fragment, do not inspect
+  filesystem. Return list of MIME strings in input order; unknown/no extension/trailing separator -> engine.catalog.DEFAULT.
+  Both TYPES mapping and DEFAULT must be read at runtime; changed/new suffixes take effect. Preserve input
+  and catalog. Only modify app.py or active engine modules; README.md, catalog.py and archive files remain
+  byte-exact. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py, README.md, engine/catalog.py, engine/archive/__init__.py, engine/archive/suffixes_00.py,
+  engine/archive/suffixes_01.py, engine/archive/suffixes_02.py, engine/archive/suffixes_03.py, engine/archive/suffixes_04.py,
+  engine/archive/suffixes_05.py, engine/archive/suffixes_06.py, engine/archive/suffixes_07.py, engine/archive/suffixes_08.py,
+  engine/archive/suffixes_09.py, engine/archive/suffixes_10.py, engine/archive/suffixes_11.py. Run python
+  verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

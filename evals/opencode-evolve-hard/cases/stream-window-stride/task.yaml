@@ -1,0 +1,12 @@
+split: holdout
+category: streaming
+instruction: 'Implement app.windows(items,width,step=1) -> lazy iterator of full tuples starting at offsets
+  0,step,2*step,...; discard incomplete final windows. width and step must be positive int excluding bool,
+  invalid values raise ValueError("invalid window") on first advancement before touching input. Construction
+  is lazy. Support one-shot and infinite input, None data, and step smaller/equal/larger than width. For
+  each yielded window consume exactly through its last element, with no lookahead or skip for the next
+  window until resumed. Memory bounded by width, not step or total input. Preserve identities and input.
+  Source exceptions propagate unchanged; empty/short input yields nothing. Use only the Python standard
+  library, offline. Keep these files byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

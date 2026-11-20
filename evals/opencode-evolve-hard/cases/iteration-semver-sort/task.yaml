@@ -1,0 +1,16 @@
+split: dev
+category: iteration
+instruction: 'Repair app.order(versions) and run python -m unittest discover -s tests; never modify existing
+  tests. Accept one-shot iterable of version strings, return original strings sorted by ascending SemVer
+  precedence, stable on equal precedence; no mutation. Grammar: exactly major.minor.patch, each ASCII
+  unsigned integer without leading zeros except 0; optional -prerelease then optional +build. Prerelease/build
+  are nonempty dot-separated ASCII alphanumeric-or-hyphen identifiers; prerelease purely numeric identifiers
+  cannot have leading zeros; build numeric zeros are allowed. No whitespace/prefixes/empty identifiers.
+  Invalid version raises ValueError("invalid version"), even late in input. Compare core integers exactly.
+  Release is greater than any prerelease. Compare prerelease identifiers left to right: numeric numerically,
+  numeric before nonnumeric, nonnumeric in ASCII lexical order; common prefix shorter first. Build ignored
+  for precedence. Empty iterable -> []. Hyphen-only identifiers are valid. Use only the Python standard
+  library, offline. Keep these files byte-for-byte unchanged: verify.py, tests/test_contract.py. Run python
+  verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

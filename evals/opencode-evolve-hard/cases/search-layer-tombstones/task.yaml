@@ -1,0 +1,16 @@
+split: dev
+category: search
+instruction: 'Repair app.run(layers) on the active production path. layers is one-shot iterable of dictionaries;
+  fold left-to-right, higher layer overrides by key presence including False, 0, "", None, [], {}. A string
+  value equal to engine.catalog.DELETE at call time removes that key. Removal of absent key is a no-op;
+  subsequent reintroduction goes at end. Override of present key preserves order. This is a shallow per-key
+  replacement, not recursive merge; returned values must be deep independent of all inputs and vice versa.
+  Do not mutate inputs. Empty layers -> {}. DELETE may be changed at runtime, so do not duplicate or capture
+  it. Only modify app.py or active engine modules; README.md, catalog.py and archive files stay byte-exact.
+  Use only the Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py,
+  README.md, engine/catalog.py, engine/archive/__init__.py, engine/archive/layers_00.py, engine/archive/layers_01.py,
+  engine/archive/layers_02.py, engine/archive/layers_03.py, engine/archive/layers_04.py, engine/archive/layers_05.py,
+  engine/archive/layers_06.py, engine/archive/layers_07.py, engine/archive/layers_08.py, engine/archive/layers_09.py,
+  engine/archive/layers_10.py, engine/archive/layers_11.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

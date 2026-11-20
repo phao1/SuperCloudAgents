@@ -1,0 +1,12 @@
+split: dev
+category: unicode
+instruction: 'Implement app.width(text) with this code-point policy (not grapheme clustering): NFC is
+  NOT applied. Start column 0. Tab advances to next multiple of 4; LF resets column to 0 and updates maximum
+  line width; CR is ignored. Unicode categories Mn, Me, Cf have width 0. Other Cc controls raise ValueError("control
+  U+XXXX") with uppercase hex padded to at least 4 digits. All other characters with east_asian_width
+  W or F have width 2, others 1. Return maximum column of all lines, including final line. ZWJ is Cf and
+  emoji sequences sum constituent widths. Empty text has width 0. Preserve input; no terminal access or
+  third-party libraries. Use only the Python standard library, offline. Keep these files byte-for-byte
+  unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

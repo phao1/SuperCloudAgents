@@ -1,0 +1,14 @@
+split: dev
+category: state-machine
+instruction: 'Implement app.Leases(clock). acquire(key, owner, ttl) -> bool: TTL must be positive int
+  excluding bool, else ValueError("invalid ttl") before reading clock; owners are strings. Read injected
+  clock once per valid acquire/renew/release/owner call. A lease is live iff now < expiry. acquire succeeds
+  for absent/expired key or same live owner; success sets expiry=now+ttl, other owner returns False without
+  change. renew(key,owner,ttl) has same TTL validation but succeeds only for live matching owner. release(key,owner)
+  deletes only live matching lease and returns bool. owner(key) returns live owner''s string or None.
+  At exact expiry lease is dead; expired renew/release return False. Empty owner is valid and must not
+  be treated as absent. Instances are independent. Never sleep or read wall time. Use only the Python
+  standard library, offline. Keep these files byte-for-byte unchanged: verify.py. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

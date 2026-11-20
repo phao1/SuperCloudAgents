@@ -1,0 +1,16 @@
+split: dev
+category: multi-file
+instruction: 'Repair redaction across app.py, policy.json, api.py, audit.py and GUIDE.md. app.redact(value)
+  returns a deep independent JSON-like structure: recurse dictionaries and lists; replace values of sensitive
+  string keys by "[redacted]" even if None or nested, without descending into that value. Sensitive comparison
+  strips then casefolds keys against policy.json fields at call time; retain original keys and order.
+  Other scalars remain unchanged. Set fields exactly ["password","token","api_key"]. api.render(value)
+  must call app.redact at runtime then return compact ensure_ascii=False JSON. audit.render(value) must
+  call app.redact at runtime then return sorted-key compact ensure_ascii=False JSON plus LF. No mutation
+  or shared mutable descendants. Non-string dict keys are outside scope. Replace GUIDE.md with exactly
+  "Sensitive fields: password, token, api_key. Marker: [redacted].\n" (\n denotes LF). Add unittest tests
+  in tests/test_redaction.py with >=3 test methods calling production code, covering recursion, input
+  independence, and one renderer; tests must pass. Use only the Python standard library, offline. Keep
+  these files byte-for-byte unchanged: verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

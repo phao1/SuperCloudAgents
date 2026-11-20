@@ -1,0 +1,14 @@
+split: dev
+category: unicode
+instruction: 'Implement app.patch(text, edits): edits is one-shot iterable of (start,end,replacement)
+  in Python code-point offsets. Validate ints excluding bool, string replacements, 0<=start<=end<=len(text);
+  otherwise ValueError("invalid edit"). Stable sort by start; for equal start, zero-width insertions precede
+  nonempty spans and keep their input order. Nonempty spans must not overlap; zero-width insertion strictly
+  inside a nonempty span is overlap; touching endpoints and repeated insertions allowed. Overlap raises
+  ValueError("overlap"). All validation completes before returning. Preserve all untouched text exactly
+  including CRLF, BOM, decomposed accents and emoji; never normalize or mutate edits. Empty edits returns
+  original text. Replacement may be empty or contain newlines. Adjacent replacements work. Use only the
+  Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

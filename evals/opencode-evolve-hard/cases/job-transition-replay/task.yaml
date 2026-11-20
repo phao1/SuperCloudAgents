@@ -1,0 +1,14 @@
+split: holdout
+category: state-machine
+instruction: 'Implement app.reduce(events) -> dict ID to (state, attempt). Events are one-shot (id, action)
+  pairs, IDs are strings. New ID starts queued, attempt 0; transitions: queued/start -> running, increment
+  attempt; running/succeed -> done; running/fail -> failed; failed/retry -> queued, preserve attempt;
+  queued/cancel or failed/cancel -> cancelled. Repeating the action producing current state is idempotent:
+  start while running, succeed while done, fail while failed, retry while queued, cancel while cancelled.
+  Exception: retry on a never-seen ID is invalid. Any other transition raises ValueError("ID:ACTION").
+  Unknown actions are invalid and must not create IDs. Include IDs in first event order. Empty events
+  returns {}. Do not mutate input. Terminal done/cancelled cannot restart. A retry then start counts a
+  new attempt. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

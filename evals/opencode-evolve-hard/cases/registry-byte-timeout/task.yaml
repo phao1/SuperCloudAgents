@@ -1,0 +1,11 @@
+split: holdout
+category: large-file
+instruction: 'In the 1800-record app.py registry change only service-1561 field timeout to 0. Preserve
+  every other byte, including the UTF-8 BOM, CRLF line endings, decomposed accents, comments, key order,
+  spacing and final newline. Within the target line change only that field value. lookup(key) must still
+  return an independent dictionary with the same signature; all unrelated records stay unchanged. Do not
+  regenerate or reformat the file. Deprecated snapshots in archive/ are unused and must remain byte-exact.
+  Use only the Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py,
+  archive/registry.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

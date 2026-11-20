@@ -1,0 +1,17 @@
+split: dev
+category: search
+instruction: 'Repair app.run(roles) by finding the active production path, not deprecated snapshots. roles
+  is a one-shot iterable. For each string role, strip+casefold and match a canonical name or alias in
+  engine.catalog.ROLES at call time. Catalog maps canonical -> (permissions list, aliases list). Unknown
+  roles ignored; nonstrings raise ValueError("invalid role"). If aliases collide, first catalog entry
+  wins. Return permissions in role input order, then catalog permission order, deduplicated by first occurrence
+  (not sorted). Support falsey permission strings. Preserve catalog and input. Catalog changes and complete
+  replacement of ROLES at runtime must take effect. No duplicated catalog. Empty input -> []. Only modify
+  app.py or active engine modules; keep README.md, catalog.py and all archive files unchanged. Use only
+  the Python standard library, offline. Keep these files byte-for-byte unchanged: verify.py, README.md,
+  engine/catalog.py, engine/archive/__init__.py, engine/archive/roles_00.py, engine/archive/roles_01.py,
+  engine/archive/roles_02.py, engine/archive/roles_03.py, engine/archive/roles_04.py, engine/archive/roles_05.py,
+  engine/archive/roles_06.py, engine/archive/roles_07.py, engine/archive/roles_08.py, engine/archive/roles_09.py,
+  engine/archive/roles_10.py, engine/archive/roles_11.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

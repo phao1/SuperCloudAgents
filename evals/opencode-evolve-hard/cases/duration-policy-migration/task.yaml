@@ -1,0 +1,18 @@
+split: dev
+category: multi-file
+instruction: 'Migrate the duration policy consistently across app.py, service.py, cli.py, policy.json,
+  GUIDE.md and tests/test_policy.py. Public API app.parse(text) returns integer milliseconds: strip surrounding
+  whitespace; accept ASCII unsigned integer followed by ms, s, m (case sensitive, no internal spaces),
+  multiplier 1,1000,60000; allow leading zeros; invalid syntax ValueError("invalid duration"); enforce
+  policy.json max_ms inclusively, beyond max ValueError("duration too large"). Set policy default to "250ms"
+  and max_ms to 120000; parse must read policy at call time so changing max_ms takes effect without reload.
+  service.timeout(text=None) uses policy default at call time only for None (empty string is invalid),
+  and calls app.parse at runtime. CLI python -m cli [DURATION] uses service.timeout; success prints decimal
+  milliseconds plus LF, exit 0; invalid duration or argument count prints exactly "invalid duration\n"
+  to stderr, no stdout, exit 2. Replace GUIDE.md with exactly "default=250ms; max=120000ms; units=ms,s,m\n"
+  (\n means LF). Add at least three unittest test methods in tests/test_policy.py calling production code,
+  covering default, conversion, and an invalid value; these tests must pass. Keep signatures. Never modify
+  callers'' strings. Use only the Python standard library, offline. Keep these files byte-for-byte unchanged:
+  verify.py. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12
