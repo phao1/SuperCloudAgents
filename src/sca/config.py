@@ -8,7 +8,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Containers run natively on the host's architecture (Apple silicon gets arm64 images).
@@ -233,6 +233,13 @@ class Settings(BaseSettings):
             if candidate.exists():
                 return candidate.resolve().parent
         raise FileNotFoundError("codex binary not found; set SCA_CODEX_BIN_DIR")
+
+    # SCM
+    scm_github_api_url: AnyHttpUrl = AnyHttpUrl("https://api.github.com")
+    scm_gitea_hosts: dict[str, AnyHttpUrl] = Field(default_factory=dict)
+    scm_portal_url: AnyHttpUrl | None = None
+    # Tenant ID -> secret reference -> webhook signing secret.
+    scm_webhook_secrets: dict[str, dict[str, SecretStr]] = Field(default_factory=dict)
 
 
 @lru_cache

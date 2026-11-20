@@ -226,3 +226,20 @@ champions = Table(
 )
 Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
       unique=True, postgresql_where=champions.c.active)
+
+# SCM
+scm_integrations = Table(
+    "scm_integrations", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, nullable=False),
+    Column("provider", Text, nullable=False),
+    Column("host", Text, nullable=False),
+    Column("repo_full_name", Text, nullable=False),
+    Column("webhook_secret_ref", Text, nullable=False),
+    Column("default_spec", JSONB, nullable=False),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    timestamp("created_at"), timestamp("updated_at"),
+    CheckConstraint("provider IN ('github', 'gitea')"),
+    UniqueConstraint("tenant_id", "provider", "host", "repo_full_name"),
+    UniqueConstraint("tenant_id", "webhook_secret_ref"),
+)

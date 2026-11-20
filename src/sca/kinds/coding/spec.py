@@ -23,6 +23,17 @@ class SubtaskSpec(BaseModel):
     instruction: str = Field(min_length=1)
 
 
+class PullRequestSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: str | None = Field(default=None, min_length=1, max_length=250)
+    body: str | None = Field(default=None, max_length=20000)
+    draft: bool = False
+    base: str | None = Field(default=None, min_length=1)
+    open_on: Literal["review", "approve"] = "review"
+    merge_on_approve: bool = False
+
+
 class CodingSpec(CommonSpec):
     model_config = ConfigDict(extra="forbid")
 
@@ -59,3 +70,16 @@ class CodingSpec(CommonSpec):
 
     def checks(self) -> list[str]:
         return [c for c in [self.verify_command, *self.verify_commands] if c and c.strip()]
+
+    # SCM
+    pull_request: PullRequestSpec | None = None
+
+    @model_validator(mode="after")
+    def validate_pull_request(self) -> CodingSpec:
+        pr = self.pull_request
+        if pr is not None:
+            if not self.push:
+                raise ValueError("pull_request requires push: true")
+            if self.auto_finish and (pr.open_on == "approve" or pr.merge_on_approve):
+                raise ValueError("opening or merging a pull request on approval requires human review")
+        return self

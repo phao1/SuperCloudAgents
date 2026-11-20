@@ -20,8 +20,12 @@ from temporalio.exceptions import (
 with workflow.unsafe.imports_passed_through():
     from sca.kernel.workflow import TaskWorkflow
     from sca.kinds.coding.activities import (
+        SCM_ATTEMPTS,
         CiOutcome,
         CiRequest,
+        ScmInput,
+        ScmPhase,
+        SetStateInput,
         StepInput,
         WorkspaceInfo,
     )
@@ -50,6 +54,40 @@ class CodingTaskWorkflow(TaskWorkflow):
     @workflow.run
     async def run(self, task_id: str) -> str:
         return await super().run(task_id)
+
+    # SCM
+    def __init__(self) -> None:
+        super().__init__()
+        self._scm_review = False
+
+    async def _set_state(self, task_id: str, state: str, reason: str | None = None) -> None:
+        if self._scm_review and state in {"SUCCEEDED", "CANCELLED"}:
+            await self._sync_scm(task_id, "approve" if state == "SUCCEEDED" else "reject")
+        # Earlier histories return None from set_state and need no further activity.
+        enabled = await workflow.execute_activity(
+            "set_state", SetStateInput(task_id, state, reason), **_QUICK,
+        )
+        if state == "AWAITING_REVIEW":
+            self._scm_review = bool(enabled)
+            if enabled:
+                await self._sync_scm(task_id, "review")
+        elif enabled and state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+            await self._sync_scm(task_id, "terminal")
+
+    async def _finish(self, task_id: str, state: str, reason: str) -> None:
+        self._scm_review = False  # An external cancellation is distinct from a review decision.
+        await super()._finish(task_id, state, reason)
+
+    async def _sync_scm(self, task_id: str, phase: ScmPhase) -> None:
+        try:
+            await workflow.execute_activity(
+                "coding.sync_scm", ScmInput(task_id, phase),
+                start_to_close_timeout=timedelta(minutes=1), retry_policy=_retry(SCM_ATTEMPTS),
+            )
+        except ActivityError as exc:
+            if is_cancelled_exception(exc):
+                raise
+            workflow.logger.warning("SCM activity %s failed for task %s", phase, task_id)
 
 
 @workflow.defn(name="coding.before_turn")
