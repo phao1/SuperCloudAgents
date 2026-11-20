@@ -61,7 +61,10 @@ class EvalActivities:
         suite = await load_activity_suite(Path(request["suite"]))
         expected_hash = request.get("suite_hash")
         if expected_hash is not None and not matches_suite_hash(suite, expected_hash):
-            raise suite_changed("Suite changed after evaluation was queued")
+            # Also record it here: histories started before the workflow learned to do so rely on it.
+            message = "Suite changed after evaluation was queued"
+            await self.store.finish_eval_run(request["id"], "failed", reason=message)
+            raise suite_changed(message)
         try:
             cases = select_cases(suite, request.get("split"))
         except ValueError as exc:

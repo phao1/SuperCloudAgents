@@ -154,7 +154,7 @@ async def test_prepare_rejects_suite_changes(split_suite, tmp_path):
     assert exc.value.type == 'SuiteChanged'
     assert exc.value.non_retryable
     store.create_eval_run.assert_not_called()
-    store.finish_eval_run.assert_not_called()
+    store.finish_eval_run.assert_awaited_once()  # recorded even for pre-patch workflow histories
 
 
 async def test_prepare_accepts_legacy_hash_without_rewriting_lineage(split_suite, tmp_path):
