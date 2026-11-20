@@ -134,6 +134,7 @@ make up-all    # also start the optional services (needs a .env with provider ke
 | --- | --- | --- |
 | Self-evolution | OpenCode prompts and tool descriptions evolve as overlays: reflect on dev failures, propose candidates, gate on a holdout split for quality or cost, promote a champion. Schedules, approvals, percentage rollouts, rollback, solidifying a champion into a built version, and harvesting real tasks as cases. | `/v1/evolutions`, `/v1/champions`, `/v1/evolution-schedules`, Portal → 自动演进 |
 | Multi-tenant business | Tenants on plans (cost and concurrency limits), suspension, members and roles, tenant API tokens, operator-issued first tokens, per-tenant usage metering and monthly CSV billing export. | `SCA_PLATFORM_ADMIN_TOKEN`, `/v1/admin/*`, `/v1/tenant`, `/v1/usage` ([docs/operations.md](docs/operations.md)) |
+| Payments | Stripe Checkout for monthly plans, a billing portal, invoice history, and monthly usage overages. | `/v1/tenant/billing`, `/v1/admin/billing`, `sca admin report-usage-to-stripe` ([setup](docs/operations.md#stripe-订阅与付款)) |
 | Code hosting | GitHub / Gitea: tasks from issues, pull requests with review and CI status, outcomes written back. | `/v1/scm`, [docs/scm.md](docs/scm.md) |
 | Best-of-N | N independent attempts from one prepared snapshot; the platform picks the cheapest verified one, or a human picks. | `"best_of": {"n": 3}` |
 | Decoupled subtasks | Subtasks with `depends_on` and path scopes; auto planning; impact analysis of the published commit. | `subtasks`, `"plan": "auto"`, `/v1/tasks/{id}/impact` ([docs/decouple.md](docs/decouple.md)) |
@@ -163,7 +164,7 @@ Tests marked `k8s` need a local [kind](https://kind.sigs.k8s.io) cluster named `
 - Run it for people and repositories you would let run code on that machine. The sandbox is
   network-restricted and can run under gVisor, but the default runtime is the plain container
   runtime.
-- No dashboards or alerts. Billing is metered and exported; payment collection is not built in.
+- No dashboards or alerts.
 
 [`docs/design-phase2.md` §10](docs/design-phase2.md) has the full list.
 

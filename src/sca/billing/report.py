@@ -1,4 +1,5 @@
 import csv
+from calendar import monthrange
 from collections import defaultdict
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
@@ -37,6 +38,32 @@ def _spreadsheet_text(value: str) -> str:
     return "'" + value if value.lstrip().startswith(("=", "+", "-", "@")) else value
 
 
+def month_end(month: date) -> date:
+    return month.replace(day=monthrange(month.year, month.month)[1])
+
+
+def monthly_usage(
+    rows: list[dict[str, Any]], start: date, end: date,
+) -> dict[date, dict[str, Any]]:
+    monthly: dict[date, dict[str, Any]] = defaultdict(lambda: dict.fromkeys(USAGE_FIELDS, 0))
+    for row in rows:
+        if start <= row["day"] <= end:
+            bucket = monthly[row["day"].replace(day=1)]
+            for metric in USAGE_FIELDS:
+                bucket[metric] += row[metric]
+    return monthly
+
+
+def overage_cents(
+    month: date, rows: list[dict[str, Any]], included: Decimal, markup: Decimal,
+) -> int:
+    usage = monthly_usage(rows, month, month_end(month)).get(month)
+    if usage is None:
+        return 0
+    overage = max(Decimal(0), usage["cost_usd"] - included) * markup
+    return int((overage * 100).quantize(Decimal(1), rounding=ROUND_HALF_UP))
+
+
 def billing_csv(
     tenant_id: str,
     plan: str,
@@ -46,12 +73,7 @@ def billing_csv(
     markup: Decimal,
     base_fee: Decimal,
 ) -> str:
-    monthly: dict[date, dict[str, Any]] = defaultdict(lambda: dict.fromkeys(USAGE_FIELDS, 0))
-    for row in rows:
-        if start <= row["day"] <= end:
-            bucket = monthly[row["day"].replace(day=1)]
-            for metric in USAGE_FIELDS:
-                bucket[metric] += row[metric]
+    monthly = monthly_usage(rows, start, end)
 
     stream = StringIO(newline="")
     writer = csv.writer(stream)

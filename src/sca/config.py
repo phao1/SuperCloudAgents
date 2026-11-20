@@ -263,6 +263,21 @@ class Settings(BaseSettings):
         default_factory=dict, repr=False, exclude=True
     )
 
+    # Stripe payments
+    stripe_secret_key: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    stripe_webhook_secret: SecretStr | None = Field(default=None, repr=False, exclude=True)
+    stripe_api_url: AnyHttpUrl = AnyHttpUrl("https://api.stripe.com")
+    billing_success_url: AnyHttpUrl | None = None
+    billing_cancel_url: AnyHttpUrl | None = None
+    billing_payment_failure_attempts: int = Field(default=3, ge=1)
+
+    @model_validator(mode="after")
+    def billing_urls(self) -> Settings:
+        team_url = self.api_url.rstrip("/") + "/portal#/team"
+        self.billing_success_url = self.billing_success_url or AnyHttpUrl(team_url)
+        self.billing_cancel_url = self.billing_cancel_url or AnyHttpUrl(team_url)
+        return self
+
 
 @lru_cache
 def get_settings() -> Settings:

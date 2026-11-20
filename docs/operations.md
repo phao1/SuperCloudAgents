@@ -85,6 +85,47 @@ curl "$SCA_API_URL/v1/usage/export.csv?from=2026-11-01&to=2026-11-30" \
 再加该租户当前套餐的月基础费，四舍五入到美分。`SCA_BILLING_BASE_FEES_USD` 接受 JSON
 映射，例如 `{"free":0,"team":29,"enterprise":99}`。默认倍率为 1，基础费为 0。
 
+## Stripe 订阅与付款
+
+1. 将数据库升级到 `0022_payments`。在 Stripe 测试模式下创建按月收费的 USD Price。用数据库管理账号把 Price ID 写入对应套餐。`included_usage_usd` 是月费已包含的网关成本额度，可低于提交额度。省略时沿用 `monthly_cost_limit_usd`，两者均为空时按 0 美元计算。
+
+   ```sql
+   UPDATE plans SET stripe_price_id = 'price_REPLACE_WITH_TEST_PRICE_ID',
+                    included_usage_usd = 20 WHERE name = 'team';
+   ```
+
+2. 在 API 环境中配置 `SCA_STRIPE_SECRET_KEY` 和 `SCA_STRIPE_WEBHOOK_SECRET`。在 Stripe Workbench 创建接收快照事件的 webhook，地址为 `https://<API 域名>/v1/billing/stripe/webhook`。订阅 `checkout.session.completed`、`customer.subscription.created`、`customer.subscription.updated`、`customer.subscription.deleted`、`invoice.paid` 和 `invoice.payment_failed`。本地可用 Stripe CLI 转发测试事件，使用监听命令给出的签名密钥。[Stripe webhook 测试说明](https://docs.stripe.com/webhooks#test-webhook)
+
+   ```bash
+   stripe listen --forward-to "$SCA_API_URL/v1/billing/stripe/webhook" \
+     --events checkout.session.completed,customer.subscription.created,customer.subscription.updated,customer.subscription.deleted,invoice.paid,invoice.payment_failed
+   ```
+
+3. 在 Stripe 启用客户门户的付款方式更新和发票历史。若允许租户自助更换套餐或取消订阅，在客户门户启用相应功能，套餐仅选已映射的月度 Price。结账成功及取消后的默认地址为 `$SCA_API_URL/portal#/team`，可分别用 `SCA_BILLING_SUCCESS_URL` 和 `SCA_BILLING_CANCEL_URL` 覆盖。删除租户前先在 Stripe 取消该租户的订阅。[Stripe 客户门户配置](https://docs.stripe.com/customer-management/configure-portal)
+
+租户管理员在 Portal 的 **团队与用量 → 订阅与付款** 选择套餐。已有订阅的租户通过 **管理付款方式** 打开 Stripe 客户门户。订阅状态、当前套餐、计费周期结束时间和最近 10 张发票来自本地数据库，由 webhook 更新。以下两个 POST 返回 `{"url":"…"}`。
+
+```bash
+curl "$SCA_API_URL/v1/tenant/billing" -H "Authorization: Bearer $TENANT_TOKEN"
+curl -X POST "$SCA_API_URL/v1/tenant/billing/checkout" \
+  -H "Authorization: Bearer $TENANT_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"plan":"team"}'
+curl -X POST "$SCA_API_URL/v1/tenant/billing/portal" -H "Authorization: Bearer $TENANT_TOKEN"
+curl "$SCA_API_URL/v1/admin/billing" -H "Authorization: Bearer $SCA_PLATFORM_ADMIN_TOKEN"
+curl "$SCA_API_URL/v1/admin/billing?view=invoices&tenant_id=acme" \
+  -H "Authorization: Bearer $SCA_PLATFORM_ADMIN_TOKEN"
+```
+
+`GET /v1/admin/billing` 列出各租户的订阅状态。`view=events` 可查看 webhook 事件的编号、类型和接收时间。发票金额使用币种的最小单位。订阅欠费或 Stripe 发票的付款失败次数达到 `SCA_BILLING_PAYMENT_FAILURE_ATTEMPTS`（默认 3）会暂停提交，相关欠费结清后可自动恢复。订阅取消会将套餐切回 `free` 并暂停提交，租户可以重新订阅并付款。平台管理员设置的暂停由平台管理员恢复。
+
+每个 UTC 自然月结束后，使用 `SCA_DATABASE_URL` 和 `SCA_STRIPE_SECRET_KEY` 运行月度用量命令。可由定时任务每月调用一次。
+
+```bash
+sca admin report-usage-to-stripe --month 2026-10
+```
+
+命令使用已有用量数据和当前订阅套餐的包含额度，把超出额度的网关成本乘以 `SCA_BILLING_MARKUP` 并四舍五入到美分，作为 USD 项目加入对应订阅的下一张发票。月订阅费由 Stripe Price 收取。金额大于 0 时，每个租户每月登记一项，登记后金额固定，重跑会跳过已报送的项目。返回的 `failed_tenants` 是可重跑的租户，任一报送失败时命令以非零状态退出。
+
 ## 工作目录和缓存清理
 
 `SCA_TASK_RETENTION_DAYS` 默认 14 天。定时维护清理超过保留期的终态任务目录

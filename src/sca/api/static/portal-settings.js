@@ -4,6 +4,7 @@ const portalSettings = (() => {
   const ui = portalUI;
   const toolsPath = '/tools', documentsPath = '/knowledge/documents', scmPath = '/integrations/scm';
   const membersPath = '/tenant/members', tokensPath = '/tenant/tokens', tenantsPath = '/admin/tenants';
+  const billingPath = '/tenant/billing';
   const roleLabels = {owner: '所有者', admin: '管理员', member: '成员', viewer: '只读'};
   const roles = ['member', 'viewer', 'admin'].map(role => [role, roleLabels[role]]);
   const formats = [['text', '纯文本'], ['markdown', 'Markdown'], ['pdf-text', 'PDF 提取文本']];
@@ -460,6 +461,7 @@ const portalSettings = (() => {
     root.append(ui.panel('租户资料', info), ui.panel('套餐额度', quota),
       ui.panel('团队成员', members, invite, el('small', '所有者的变更由平台运营处理。')),
       ui.panel('API 令牌', tokens, create, once, feedback));
+    const loadBilling = billingView(root);
     const loadUsage = usageView(root);
 
     async function loadTenant() {
@@ -533,7 +535,73 @@ const portalSettings = (() => {
         }, feedback),
       ]), '暂无 API 令牌。');
     }
-    return () => Promise.all([loadTenant(), loadMembers(), loadTokens(), loadUsage()]);
+    return () => Promise.all([loadTenant(), loadMembers(), loadTokens(), loadBilling(), loadUsage()]);
+  }
+
+  function subscriptionBadge(status) {
+    const labels = {
+      active: ['订阅有效', 'complete'], trialing: ['试用中', 'active'],
+      past_due: ['付款逾期', 'waiting'], unpaid: ['未付款', 'problem'],
+      canceled: ['已取消', ''], incomplete: ['待付款', 'waiting'],
+      incomplete_expired: ['付款已过期', ''], paused: ['已暂停', 'waiting'],
+    };
+    const [label, style] = Object.hasOwn(labels, status) ? labels[status] : [status || '未订阅', ''];
+    return el('span', label, 'badge ' + style);
+  }
+
+  function invoiceAmount(cents, currency) {
+    const format = new Intl.NumberFormat('zh-CN', {style: 'currency', currency});
+    return format.format(cents / 10 ** format.resolvedOptions().maximumFractionDigits);
+  }
+
+  function billingView(root) {
+    const summary = el('div', undefined, 'stack'), invoices = ui.scroll('最近发票'), feedback = message();
+    root.append(ui.panel('订阅与付款', summary, feedback, invoices));
+
+    async function redirect(path, body) {
+      const identity = portalIdentity;
+      const result = await data(path, body, 'POST');
+      if (identity !== portalIdentity || !location.hash.startsWith('#/team')) return;
+      const link = ui.externalLink('Stripe', result.url);
+      if (!link.href) throw Error('Stripe 未返回有效的付款链接。');
+      location.assign(link.href);
+    }
+
+    return async () => {
+      try {
+        const billing = await data(billingPath);
+        const status = el('p', '当前套餐 · ' + billing.plan + ' ');
+        status.append(subscriptionBadge(billing.subscription_status));
+        summary.replaceChildren(status);
+        if (billing.current_period_end) {
+          summary.append(el('p', '当前计费周期结束 · ' + ui.date(billing.current_period_end)));
+        }
+        if (billing.suspended_for_nonpayment) {
+          summary.append(el('p', billing.subscription_status === 'canceled'
+            ? '订阅已取消，任务提交已暂停。' : '付款逾期，任务提交已暂停。'));
+        }
+        if (!billing.enabled) summary.append(el('p', 'Stripe 支付尚未配置。'));
+        if (billing.enabled && billing.can_checkout && billing.plans.length) {
+          const choices = [['', '请选择套餐'], ...billing.plans.map(plan => [plan, plan])];
+          summary.append(ui.form([ui.field('订阅套餐', 'plan', {choices, required: true})], '前往结账',
+            form => redirect('/tenant/billing/checkout', {plan: ui.value(form, 'plan')})));
+        }
+        if (billing.enabled && billing.has_customer) {
+          summary.append(ui.actions(ui.action('管理付款方式', () => redirect('/tenant/billing/portal'), feedback)));
+        }
+        const labels = {draft: '草稿', open: '待付款', paid: '已付款', uncollectible: '无法收款', void: '已作废'};
+        ui.list(invoices, ['发票', '状态', '应付', '实付', '账期结束'], billing.invoices.map(invoice => [
+          ui.externalLink(invoice.number || invoice.id, invoice.hosted_invoice_url),
+          Object.hasOwn(labels, invoice.status) ? labels[invoice.status] : invoice.status,
+          invoiceAmount(invoice.amount_due, invoice.currency), invoiceAmount(invoice.amount_paid, invoice.currency),
+          ui.date(invoice.period_end),
+        ]), '暂无发票。');
+      } catch (e) {
+        if (e.status !== 404) throw e;
+        summary.replaceChildren(el('p', '租户建立后可查看付款信息。'));
+        invoices.replaceChildren();
+      }
+    };
   }
 
   function platformView(root) {
@@ -542,7 +610,10 @@ const portalSettings = (() => {
     const loadUsage = usageView(root, true);
     let planSignature = '', choices = [];
     async function loadTenants() {
-      const [list, plans] = await Promise.all([data(tenantsPath), data('/admin/plans')]);
+      const [list, plans, billing] = await Promise.all([
+        data(tenantsPath), data('/admin/plans'), data('/admin/billing'),
+      ]);
+      const subscriptions = new Map(billing.map(row => [row.tenant_id, row.subscription_status]));
       choices = plans.map(plan => [plan.name, plan.name]);
       ui.list(planList, ['套餐', '月度模型费用上限', '并发任务上限', '单任务模型费用上限'], plans.map(plan => [
         plan.name, plan.monthly_cost_limit_usd == null ? '不限额' : ui.cost(plan.monthly_cost_limit_usd),
@@ -564,14 +635,15 @@ const portalSettings = (() => {
           return '租户已创建。';
         }));
       }
-      ui.list(tenants, ['租户', '创建时间', '状态', '套餐', '操作'], list.map(row => {
+      ui.list(tenants, ['租户', '创建时间', '状态', '套餐', '订阅状态', '操作'], list.map(row => {
         const path = tenantsPath + '/' + enc(row.id), suspended = row.status === 'suspended';
         const plan = ui.form([ui.field('当前套餐', 'plan', {choices, value: row.plan})], '保存套餐', async form => {
           await data(path, {plan: ui.value(form, 'plan')}, 'PATCH');
           return '套餐已更新。';
         });
         return [row.display_name + ' · ' + row.id, ui.date(row.created_at),
-          suspended ? '已暂停提交' : '正常', plan, ui.action(suspended ? '恢复提交' : '暂停提交', async () => {
+          suspended ? '已暂停提交' : '正常', plan, subscriptionBadge(subscriptions.get(row.id)),
+          ui.action(suspended ? '恢复提交' : '暂停提交', async () => {
             if (!confirm((suspended ? '恢复' : '暂停') + '租户 ' + row.id + ' 的任务提交？')) return;
             await data(path + (suspended ? '/resume' : '/suspend'), {});
             await loadTenants();

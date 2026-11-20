@@ -2,7 +2,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import RowMapping, delete, func, insert, select, text, update
@@ -14,6 +14,10 @@ from sca.core.errors import ConflictError, NotFoundError, ScaError
 from sca.core.interfaces import ObjectStore
 from sca.core.models import TERMINAL_STATES, Artifact, Event, Task, TaskState, can_transition
 from sca.db.schema import api_tokens, artifacts, events, sessions, tasks, tenants
+
+if TYPE_CHECKING:
+    from sca.billing.payments import PaymentProvider, UsageInvoiceItem
+    from sca.billing.stripe_events import Invoice, StripeEvent
 
 
 def task_uuid(value: str | UUID) -> UUID:
@@ -1498,11 +1502,9 @@ class Store:
         async with self._transaction() as session:
             if "plan" in changes:
                 await self._plan(session, changes["plan"])
-            row = (await session.execute(update(tenants).where(
-                tenants.c.id == tenant_id, tenants.c.deleted_at.is_(None),
-            ).values(**changes).returning(tenants))).mappings().first()
-            if row is None:
-                raise NotFoundError("租户不存在")
+            row = await self._update_tenant_row(session, tenant_id, **changes)
+            if "status" in changes:
+                await self._clear_payment_suspension(session, tenant_id)
             return self._tenant_view(row)
 
     async def delete_tenant(self, tenant_id: str) -> None:
@@ -2131,3 +2133,347 @@ class Store:
                           candidates.c.document_id, candidates.c.ordinal)
                 .limit(limit), parameters)
             return [{k: v for k, v in row.items() if k != "hits"} for row in result.mappings()]
+
+    # Stripe payments
+
+    async def _update_tenant_row(
+        self, session: AsyncSession, tenant_id: str, **changes: Any,
+    ) -> RowMapping:
+        row = (await session.execute(update(tenants).where(
+            tenants.c.id == tenant_id, tenants.c.deleted_at.is_(None),
+        ).values(**changes).returning(tenants))).mappings().first()
+        if row is None:
+            raise NotFoundError("租户不存在")
+        return row
+
+    async def _clear_payment_suspension(self, session: AsyncSession, tenant_id: str) -> None:
+        from sca.db.schema import billing_customers
+
+        c = billing_customers.c
+        await session.execute(update(billing_customers).where(
+            c.tenant_id == tenant_id, c.suspended_for_nonpayment.is_(True),
+        ).values(suspended_for_nonpayment=False))
+
+    async def billing_summary(self) -> dict[str, Any]:
+        from sca.billing.payments import TERMINATED_SUBSCRIPTIONS
+        from sca.db.schema import billing_invoices, plans
+
+        tenant_id = self._billing_tenant()
+        async with self._transaction() as session:
+            tenant = await self._require_billing_tenant(session, tenant_id)
+            customer = await self._billing_customer(session, tenant_id) or {}
+            invoices = (await session.execute(select(billing_invoices).where(
+                billing_invoices.c.tenant_id == tenant_id,
+            ).order_by(billing_invoices.c.period_end.desc().nulls_last(),
+                       billing_invoices.c.id).limit(10))).mappings()
+            names = await session.scalars(select(plans.c.name).where(
+                plans.c.stripe_price_id.is_not(None),
+            ).order_by(plans.c.name))
+            status = customer.get("subscription_status")
+            return {
+                "plan": tenant["plan"], "has_customer": bool(customer),
+                "subscription_status": status, "current_period_end": customer.get("current_period_end"),
+                "suspended_for_nonpayment": customer.get("suspended_for_nonpayment", False),
+                "can_checkout": status is None or status in TERMINATED_SUBSCRIPTIONS,
+                "plans": list(names), "invoices": [dict(row) for row in invoices],
+            }
+
+    async def list_platform_billing(
+        self, view: str, tenant_id: str | None, limit: int, offset: int,
+    ) -> list[dict[str, Any]]:
+        from sca.db.schema import billing_customers, billing_events, billing_invoices
+
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        if view == "invoices":
+            c = billing_invoices.c
+            query = select(billing_invoices).order_by(c.period_end.desc().nulls_last(), c.id)
+            tenant_column = c.tenant_id
+        elif view == "events":
+            c = billing_events.c
+            query = select(c.id, c.tenant_id, c.type, c.received_at).order_by(c.received_at.desc(), c.id)
+            tenant_column = c.tenant_id
+        else:
+            c = billing_customers.c
+            query = select(
+                tenants.c.id.label("tenant_id"), tenants.c.plan,
+                c.stripe_customer_id, c.subscription_id, c.subscription_status, c.price_id,
+                c.current_period_end, c.suspended_for_nonpayment,
+            ).select_from(tenants.outerjoin(billing_customers)).order_by(tenants.c.id)
+            tenant_column = tenants.c.id
+        if tenant_id is not None:
+            query = query.where(tenant_column == tenant_id)
+        if view != "subscriptions":
+            query = query.limit(limit).offset(offset)
+        async with self._transaction() as session:
+            return [dict(row) for row in (await session.execute(query)).mappings()]
+
+    async def _billing_customer(
+        self, session: AsyncSession, tenant_id: str, *, lock: bool = False,
+    ) -> RowMapping | None:
+        from sca.db.schema import billing_customers
+
+        query = select(billing_customers).where(billing_customers.c.tenant_id == tenant_id)
+        if lock:
+            query = query.with_for_update()
+        return (await session.execute(query)).mappings().one_or_none()
+
+    async def _prepare_billing_checkout(self, plan: str, provider: "PaymentProvider") -> str:
+        from sca.db.schema import billing_customers
+
+        async with self._transaction() as session:
+            tenant_id = self._billing_tenant()
+            await self._require_billing_tenant(session, tenant_id, lock=True)
+            price_id = (await self._plan(session, plan))["stripe_price_id"]
+            if not price_id:
+                raise ConflictError("该套餐未开通 Stripe 订阅")
+            if await self._billing_customer(session, tenant_id) is None:
+                customer_id = await provider.create_customer(tenant_id)
+                await session.execute(insert(billing_customers).values(
+                    tenant_id=tenant_id, stripe_customer_id=customer_id,
+                ))
+            return price_id
+
+    def _billing_tenant(self) -> str:
+        if self.tenant_id is None:
+            raise ValueError("Billing requires a tenant")
+        return self.tenant_id
+
+    async def _require_billing_tenant(
+        self, session: AsyncSession, tenant_id: str, *, lock: bool = False,
+    ) -> RowMapping:
+        tenant = await self._find_tenant(session, tenant_id, lock=lock)
+        if tenant is None or tenant["deleted_at"] is not None:
+            raise NotFoundError("租户不存在")
+        return tenant
+
+    async def billing_checkout(self, plan: str, provider: "PaymentProvider") -> str:
+        from sca.billing.payments import TERMINATED_SUBSCRIPTIONS
+        from sca.db.schema import billing_customers
+
+        # Commit the customer binding before Stripe can send subscription or invoice events.
+        price_id = await self._prepare_billing_checkout(plan, provider)
+        tenant_id = self._billing_tenant()
+        async with self._transaction() as session:
+            await self._require_billing_tenant(session, tenant_id, lock=True)
+            customer = await self._billing_customer(session, tenant_id, lock=True)
+            assert customer is not None
+            if (customer["subscription_id"] is not None
+                    and customer["subscription_status"] not in TERMINATED_SUBSCRIPTIONS):
+                raise ConflictError("请在 Stripe 账单门户管理现有订阅")
+            if session_id := customer["checkout_session_id"]:
+                previous = await provider.get_checkout(session_id)
+                if previous.status == "open":
+                    if customer["checkout_price_id"] == price_id:
+                        return previous.checkout_url()
+                    await provider.expire_checkout(session_id)
+                elif previous.status == "complete" and (
+                    previous.subscription is None or previous.subscription != customer["subscription_id"]
+                ):
+                    raise ConflictError("订阅正在同步，请稍后查看")
+            checkout = await provider.create_checkout(customer["stripe_customer_id"], price_id)
+            url = checkout.checkout_url()
+            await session.execute(update(billing_customers).where(
+                billing_customers.c.tenant_id == tenant_id,
+            ).values(checkout_session_id=checkout.id, checkout_price_id=price_id))
+            return url
+
+    async def billing_portal(self, provider: "PaymentProvider") -> str:
+        tenant_id = self._billing_tenant()
+        async with self._transaction() as session:
+            await self._require_billing_tenant(session, tenant_id)
+            customer = await self._billing_customer(session, tenant_id)
+            if customer is None:
+                raise ConflictError("请先选择套餐并开始订阅")
+        return await provider.create_portal(customer["stripe_customer_id"])
+
+    async def apply_stripe_event(
+        self, event: "StripeEvent", payload: dict[str, Any], provider: "PaymentProvider",
+        attempt_limit: int,
+    ) -> None:
+        from sca.db.schema import billing_customers, billing_events
+
+        if self.tenant_id is not None:
+            raise ValueError("Stripe webhooks require platform scope")
+        if (customer_id := event.customer) is None:
+            return
+        async with self._transaction() as session:
+            tenant_id = await session.scalar(select(billing_customers.c.tenant_id).where(
+                billing_customers.c.stripe_customer_id == customer_id,
+            ))
+            if tenant_id is None:
+                return
+            tenant = await self._find_tenant(session, tenant_id, lock=True)
+            if tenant is None:
+                return
+            inserted = await session.scalar(pg_insert(billing_events).values(
+                id=event.id, type=event.type, tenant_id=tenant_id, payload=payload,
+            ).on_conflict_do_nothing().returning(billing_events.c.id))
+            if inserted is None or tenant["deleted_at"] is not None:
+                return
+            customer = await self._billing_customer(session, tenant_id, lock=True)
+            assert customer is not None
+            await self._project_stripe_event(session, tenant, customer, event, provider, attempt_limit)
+
+    async def _project_stripe_event(
+        self, session: AsyncSession, tenant: RowMapping, customer: RowMapping, event: "StripeEvent",
+        provider: "PaymentProvider", attempt_limit: int,
+    ) -> None:
+        from sca.billing.payments import TERMINATED_SUBSCRIPTIONS, PaymentError, Subscription
+        from sca.billing.stripe_events import (
+            INVOICE_EVENTS,
+            Invoice,
+            follows_subscription,
+            invoice_suspension,
+            payment_suspension,
+            plan_from_subscription,
+        )
+        from sca.db.schema import billing_customers, plans
+
+        tenant_id = tenant["id"]
+        invoice = Invoice.from_event(event) if event.type in INVOICE_EVENTS else None
+        if invoice is not None and not await self._record_billing_invoice(session, tenant_id, invoice):
+            return
+
+        subscription_id = event.subscription_id()
+        if (invoice is not None and invoice.subscription_id != customer["subscription_id"]
+                and (customer["subscription_id"] is None
+                     or customer["subscription_status"] in TERMINATED_SUBSCRIPTIONS)):
+            subscription_id = invoice.subscription_id
+
+        changes, tenant_changes = {}, {}
+        suspend = None
+        if subscription_id is not None:
+            if event.type == "customer.subscription.deleted":
+                subscription = Subscription.model_validate({**event.data.object, "status": "canceled"})
+            else:
+                # Snapshot events can arrive out of order, even with identical timestamps.
+                subscription = await provider.get_subscription(subscription_id)
+            if (subscription.customer != customer["stripe_customer_id"]
+                    or subscription.id != subscription_id):
+                raise PaymentError()
+            mapped_plan = await session.scalar(select(plans.c.name).where(
+                plans.c.stripe_price_id == subscription.price_id,
+            )) if subscription.price_id else None
+            if follows_subscription(customer["subscription_id"], customer["subscription_status"],
+                                    subscription, mapped_plan):
+                changes.update(
+                    subscription_id=subscription.id, subscription_status=subscription.status,
+                    price_id=subscription.price_id, current_period_end=subscription.renewal,
+                )
+                if plan := plan_from_subscription(subscription.status, mapped_plan):
+                    tenant_changes["plan"] = plan
+                if subscription.status in {"unpaid", "canceled"}:
+                    suspend = True
+
+        current_subscription = changes.get("subscription_id", customer["subscription_id"])
+        if invoice is not None and invoice.subscription_id in (None, current_subscription):
+            overdue = invoice.status == "paid" and await self._billing_invoice_overdue(
+                session, tenant_id, current_subscription, attempt_limit,
+            )
+            decision = invoice_suspension(
+                invoice, attempt_limit,
+                changes.get("subscription_status", customer["subscription_status"]), overdue,
+            )
+            if decision is not None:
+                suspend = decision
+        if suspend is not None:
+            status = payment_suspension(tenant["status"], customer["suspended_for_nonpayment"], suspend)
+            if status is not None:
+                tenant_changes["status"] = status
+                changes["suspended_for_nonpayment"] = suspend
+
+        if tenant_changes:
+            await self._update_tenant_row(session, tenant_id, **tenant_changes)
+        if changes:
+            await session.execute(update(billing_customers).where(
+                billing_customers.c.tenant_id == tenant_id,
+            ).values(**changes))
+
+    async def _record_billing_invoice(
+        self, session: AsyncSession, tenant_id: str, invoice: "Invoice",
+    ) -> bool:
+        from sca.db.schema import billing_invoices
+
+        c = billing_invoices.c
+        values = invoice.model_dump(exclude={"id"})
+        stmt = pg_insert(billing_invoices).values(id=invoice.id, tenant_id=tenant_id, **values)
+        updated = await session.scalar(stmt.on_conflict_do_update(
+            index_elements=[c.id], set_={key: stmt.excluded[key] for key in values},
+            where=(c.tenant_id == tenant_id) & (c.status != "paid")
+            & ((stmt.excluded.status == "paid") | (stmt.excluded.attempt_count >= c.attempt_count)),
+        ).returning(c.id))
+        return updated is not None
+
+    async def _billing_invoice_overdue(
+        self, session: AsyncSession, tenant_id: str, subscription_id: str | None, attempt_limit: int,
+    ) -> bool:
+        from sca.db.schema import billing_invoices
+
+        c = billing_invoices.c
+        invoice = await session.scalar(select(c.id).where(
+            c.tenant_id == tenant_id, (c.subscription_id == subscription_id) | c.subscription_id.is_(None),
+            c.status != "paid", c.attempt_count >= attempt_limit,
+        ).limit(1))
+        return invoice is not None
+
+    async def prepare_billing_usage_reports(self, month: date, markup: Decimal) -> list[str]:
+        from collections import defaultdict
+
+        from sca.billing.payments import BILLABLE_SUBSCRIPTIONS
+        from sca.billing.report import month_end, overage_cents
+        from sca.db.schema import billing_customers, billing_usage_reports, plans
+
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        c, report = billing_customers.c, billing_usage_reports.c
+        joined = billing_customers.join(tenants).join(plans, plans.c.stripe_price_id == c.price_id)
+        query = select(c.tenant_id, c.stripe_customer_id, c.subscription_id, func.coalesce(
+            plans.c.included_usage_usd, plans.c.monthly_cost_limit_usd, 0,
+        ).label("included")).select_from(joined).where(
+            tenants.c.deleted_at.is_(None), c.subscription_status.in_(BILLABLE_SUBSCRIPTIONS),
+            c.subscription_id.is_not(None), ~select(report.tenant_id).where(
+                report.tenant_id == c.tenant_id, report.month == month,
+            ).exists(),
+        ).order_by(c.tenant_id)
+        async with self._transaction() as session:
+            accounts = (await session.execute(query)).mappings().all()
+        usage_by_tenant = defaultdict(list)
+        if accounts:
+            for usage in await self.usage_rows(month, month_end(month)):
+                usage_by_tenant[usage["tenant_id"]].append(usage)
+        async with self._transaction() as session:
+            for account in accounts:
+                tenant_id = account["tenant_id"]
+                cents = overage_cents(month, usage_by_tenant[tenant_id], account["included"], markup)
+                if cents:
+                    await session.execute(pg_insert(billing_usage_reports).values(
+                        tenant_id=tenant_id, month=month, amount_cents=cents,
+                        stripe_customer_id=account["stripe_customer_id"],
+                        subscription_id=account["subscription_id"],
+                    ).on_conflict_do_nothing())
+            return list(await session.scalars(select(report.tenant_id).where(
+                report.month == month, report.stripe_invoice_item_id.is_(None),
+            ).order_by(report.tenant_id)))
+
+    async def send_billing_usage_report(
+        self, month: date, tenant_id: str, create_item: Callable[["UsageInvoiceItem"], Awaitable[str]],
+    ) -> bool:
+        from sca.billing.payments import UsageInvoiceItem
+        from sca.db.schema import billing_usage_reports
+
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        c = billing_usage_reports.c
+        matches = (c.month == month, c.tenant_id == tenant_id, c.stripe_invoice_item_id.is_(None))
+        async with self._transaction() as session:
+            report = (await session.execute(select(billing_usage_reports).where(
+                *matches,
+            ).with_for_update())).mappings().one_or_none()
+            if report is None:
+                return False
+            stripe_id = await create_item(UsageInvoiceItem.model_validate(dict(report)))
+            await session.execute(update(billing_usage_reports).where(
+                *matches,
+            ).values(stripe_invoice_item_id=stripe_id))
+            return True

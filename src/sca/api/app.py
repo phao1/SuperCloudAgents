@@ -233,6 +233,10 @@ def create_app(
 
     app.state.settings = settings
     app.include_router(impact_router)
+    # Stripe payments
+    from sca.api.payments import register_payments
+
+    register_payments(app, settings, default_store=store is None)
     return app
 
 
