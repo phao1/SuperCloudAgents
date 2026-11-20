@@ -260,9 +260,12 @@ class KernelActivities:
         overlay = getattr(spec, "agent_overlay", None)
         version = getattr(spec, "agent_version", None)
         model = spec.model or self.settings.default_model
-        if overlay is None and champion is not None:
+        # A champion is tuned for one version and model; an explicit different pin (for example a
+        # Best-of-N attempt on another model) runs without it.
+        if champion is not None and (version or champion["agent_version"]) == champion["agent_version"] \
+                and model == champion["model"] and overlay is None:
             overlay = AgentOverlay.model_validate(champion["overlay"])
-            version, model = champion["agent_version"], champion["model"]
+            version = champion["agent_version"]
         if overlay is not None and self._backend(spec).name != "opencode":
             raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode"))
         return AgentContext(

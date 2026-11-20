@@ -55,6 +55,12 @@ class FakeStore:
     def for_tenant(self, tenant_id: str):
         return self if tenant_id == self.task.tenant_id else MissingTenant()
 
+    async def get_task_champion(self, task_id) -> None:
+        return None
+
+    async def pin_task_champion(self, task_id, selection) -> None:
+        return None
+
     async def get_task(self, task_id, tenant_id=None) -> Task:
         if str(task_id) != str(self.task.id) or tenant_id not in (None, self.task.tenant_id):
             raise NotFoundError("Task not found")

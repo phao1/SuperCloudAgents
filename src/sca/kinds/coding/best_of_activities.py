@@ -94,8 +94,10 @@ class AttemptActivities(ChildActivities):
         super().__init__(coding, attempt.name)
         self.store = AttemptStore(self.store, attempt)
 
-    def _agent_ctx(self, task_id: str, spec: ExecutionSpec) -> AgentContext:
-        context = super()._agent_ctx(task_id, spec)
+    def _agent_ctx(
+        self, task_id: str, spec: ExecutionSpec, champion: dict | None = None,
+    ) -> AgentContext:
+        context = super()._agent_ctx(task_id, spec, champion)
         # The OpenCode brain pool uses this identity to route tools and session state.
         return context.model_copy(update={"task_id": f"{task_id}-{self.name}"})
 
