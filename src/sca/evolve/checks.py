@@ -45,7 +45,9 @@ def static_check(overlay: dict, texts: list[str], surfaces: list[str], parent: d
 
     def grams(value: str) -> set[tuple[str, ...]]:
         tokens = re.findall(r'\w+|[^\w\s]', value.casefold())
-        return {tuple(tokens[i:i + 6]) for i in range(len(tokens) - 5)}
+        # Punctuation-only runs (globs like `**/*.`, JSON escapes) are not benchmark content.
+        windows = (tuple(tokens[i:i + 6]) for i in range(len(tokens) - 5))
+        return {gram for gram in windows if sum(token[0].isalnum() for token in gram) >= 4}
 
     proposed = grams(content)
     if any(proposed & grams(value) for value in texts):

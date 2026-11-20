@@ -112,3 +112,9 @@ def test_migration_emits_tenant_policies_and_partial_unique_index():
     assert sql.count("WITH CHECK (tenant_id = current_setting('app.tenant_id', true))") == 3
     assert 'UNIQUE INDEX ix_champions_active' in sql
     assert 'WHERE active' in sql
+
+
+def test_punctuation_runs_are_not_benchmark_overlap():
+    overlay = {'tool_guidance': 'Use glob patterns such as **/*.py before editing files.'}
+    check = static_check(overlay, ['paths: ["src/**/*.py"]\n", "'], ['tool_guidance'])
+    assert check['valid'], check
