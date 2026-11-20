@@ -49,6 +49,8 @@ async def test_backup_restore(tmp_path):
             created_source = True
         async with source_engine.begin() as conn:
             await conn.run_sync(metadata.create_all)
+            # Migrations seed plans; create_all only builds tables.
+            await conn.execute(text("INSERT INTO plans (name) VALUES ('enterprise')"))
         store = Store(make_sessionmaker(source_engine))
         objects = LocalObjectStore(tmp_path / "source-objects")
         task, _ = await store.create_task(

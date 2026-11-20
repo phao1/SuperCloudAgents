@@ -85,8 +85,7 @@ async def test_champion_eval_lineage_and_paired_run_rows_are_tenant_scoped(store
         "suite_hash": "original-suite", "variant": original_variant,
     }
     other = api_store.for_tenant("customer")
-    with pytest.raises(NoResultFound):
-        await other.get_champion(champion_id)
+    assert await other.get_champion(champion_id) is None
     with pytest.raises(NoResultFound):
         await other.get_champion_eval(champion_id)
 
