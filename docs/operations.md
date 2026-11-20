@@ -133,3 +133,10 @@ sca admin report-usage-to-stripe --month 2026-10
 `SCA_CACHE_CLEANUP`。任务结束并销毁沙箱后会清理 `agent_home/.cache/opencode/bin`，
 定时维护也会补清终态任务的该缓存。Docker 工作目录遇到沙箱属主权限问题时，使用隔离的
 清理容器处理。回收字节数记录于 `maintenance.disk_reclaimed` 事件，已归档任务记入维护日志。
+
+### 现场验证（2026-11-21）
+
+本机以真实 API/Worker 进程对接本地假 Stripe 服务验证：结账返回付款链接；伪造签名的 webhook 返回 400，
+合法签名的 `checkout.session.completed` 将套餐切到 `team` 并记录订阅；连续 3 次 `invoice.payment_failed`
+暂停提交（提交返回 403 `tenant_suspended`），`invoice.paid` 后自动恢复并记录发票；平台管理员视图正确。
+真实 Stripe 测试模式尚未接入。
