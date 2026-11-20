@@ -29,12 +29,13 @@
 从 SCA 项目根目录运行。完整参考仓库位于 Git 忽略的
 `.data/evolve-longhaul-solutions/<case-id>/`。每题还有两个 `partial-*/` 子目录，
 分别缺少历史迁移注册，以及报表接入或经理权限约束。自检在临时副本中编译、运行并核对
-预期的失败阶段。请在保留参考目录的原工作树运行自检。
+预期的失败阶段。在独立工作树中可通过 `LONGHAUL_SOLUTIONS_DIR` 指向已有参考目录。
 
 ```bash
 export PYTHONPATH="$PWD/src"
 V=/home/ubuntu/projects/SuperCLoudAgent/.venv/bin
-timeout 240 "$V/python" -B evals/opencode-evolve-longhaul/check_cases.py .data/evolve-longhaul-solutions
+timeout 240 "$V/python" -B evals/opencode-evolve-longhaul/check_cases.py \
+  "${LONGHAUL_SOLUTIONS_DIR:-.data/evolve-longhaul-solutions}"
 ```
 
 16/16 起始仓库通过既有回归并被验收拒绝，16/16 参考实现通过隐藏验收，32/32 部分
@@ -46,16 +47,24 @@ timeout 240 "$V/python" -B evals/opencode-evolve-longhaul/check_cases.py .data/e
 `973314dc` 中，公开验证通过 11/11，隐藏验收通过 1/11（`maintenance-windows`）。
 每题用一轮，平均花费 0.075 美元。
 
-本轮简化了 7 道开发题和 3 道留出题。新操作的审计为可选项，部分报表的待处理
-列表只看当前未结状态，工单明确了快照字段、报表键和业务错误码。隐藏验收仍覆盖
-角色权限、状态转换、历史升级及旧版兼容。开发集的 `crate-cycles`、
-`sampling-routes`、`shortfall-credits`、`venue-trades` 和留出集的
-`agreement-rollovers`、`sample-holds` 沿用原工单和验收。
+第一轮校准（HARD4B）简化了 7 道开发题和 3 道留出题，将部分新操作的审计设为可选，
+部分报表的待处理列表按当前状态统计，并明确了快照字段、报表键和业务错误码。用当时
+的验收回放 `973314dc` 保存的补丁，公开验证通过 11/11，隐藏验收通过 5/11
+（`maintenance-windows`、`performance-notices`、`purchase-rounds`、`rehearsal-calls`、
+`reservation-handoffs`）。
 
-用新版验收离线回放 `973314dc` 保存的 11 份补丁，公开验证通过 11/11，隐藏验收
-通过 5/11（45%）。通过的用例为 `maintenance-windows`、`performance-notices`、
-`purchase-rounds`、`rehearsal-calls` 和 `reservation-handoffs`。回放只衡量
-原提交在新版验收下的表现。新版 `dev` 和 `holdout` 的真实模型通过率仍待确认。
+2026-11-21，HARD4B 合并后的现场运行 `1a3bad75` 使用相同的 OpenCode 版本和模型，
+开发集隐藏验收通过 2/11（`calibration-campaigns`、`rehearsal-calls`）。补丁回放衡量
+了已有提交对新验收的兼容性。两次现场运行的通过用例不同，期望通过率需用多次独立运行估计。
+
+第二轮校准（HARD4C）明确了 5 道开发题（`maintenance-windows`、`reservation-handoffs`、
+`pool-substitutions`、`performance-notices`、`purchase-rounds`）和 2 道留出题
+（`attendance-corrections`、`return-disputes`）的命令注册、权限、双语消息、报表和升级约定。
+工单明确了升级回执与 `store.upgraded` 审计事件，以及各题何时跳过已导入的记录，何时由共享
+升级器拒绝同 ID 冲突。演出改期请求未改变日期和场地、采购批次混合供应商或市场等业务冲突
+明确返回 `409`。
+
+本轮目标是新运行开发集约 5/11、留出集约 2/5，实际通过率待现场验证。
 
 ## 平台运行
 

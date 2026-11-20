@@ -14,20 +14,29 @@ instruction: |
   - Add maintenance-windows to the desk report with blocked_units for the requested date and
     quarantined_units accumulated through that date at that depot. A completed allocation still
     counts as blocked during its original window before its completion day.
-  - Import completed paper service logs as completed windows keyed by the source ID. Map
-    result_day to completed, preserve outcome and use reason paper. Planned and void paper logs
-    stay in the legacy register. A done log without a valid outcome or result date makes the
-    conversion fail with bad_store.
-  - Persist version-two records and make the upgrade repeatable while retaining version-one
-    service logs and portable exports.
+  - Convert done service-logs to completed windows keyed by the log ID. Copy scope, tool,
+    units, day, end and outcome, map result_day to completed and set reason to paper. Leave
+    planned and void logs in the legacy register. A done log without a valid outcome or result
+    date makes the conversion fail with bad_store (422).
 
-  Ship the commands as maintenance-windows schedule, maintenance-windows complete and
-  maintenance-windows list, with the matching /v1/maintenance-windows/<action> routes.
-  The minimum roles are operator for schedule and manager for complete.
-  Readers can list by scope and optional status (scheduled, completed) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add maintenance-windows schedule (POST, operator), complete (POST, manager) and list
+  (GET, reader) to workyard/registry.py with /v1/maintenance-windows/<action> routes. Wire
+  permissions in workyard/policy.py. Use <group>.<action> keys with distinct en and fr success
+  messages in workyard/messages.py. Register Table("maintenance-windows", 2) in workyard/schema.py
+  and add the maintenance-windows section in workyard/reporting.py alongside existing sections.
+  List by depot scope and optional status (scheduled, completed) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request. Audits for the
+  new actions are optional.
+
+  Register a read-only converter under maintenance-windows in workyard/migrations.py for
+  the existing manager-only store upgrade --name maintenance-windows (POST /v1/store/upgrade).
+  Return all eligible log candidates even if their IDs already exist in version two.
+  deskcore/history.py compares the records and rejects any differing row with the same ID as
+  conflict (409), leaving the workspace byte-for-byte intact. On success the shared runner
+  returns the inserted count as imported, sets upgrades[name] to 2, and appends store.upgraded
+  with the upgrade name as record_id and version=2 and the imported count in details. A repeat
+  returns imported=0 without rewriting the workspace. Preserve format 1, unrelated extensions,
+  original service logs and portable exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -41,12 +50,12 @@ instruction: |
   version. The other workflow fields are tool, day, end, units, reason, completed, outcome.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
+  Scheduling a retired tool returns conflict. Accept workspaces where unrelated live windows
+  already exist and preserve them through the upgrade.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/maintenance-windows.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12
