@@ -7,6 +7,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     MetaData,
@@ -17,7 +18,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 
 metadata = MetaData()
 
@@ -363,4 +364,59 @@ platform_settings = Table(
     Column("tenant_id", Text, primary_key=True),
     Column("opencode_default_version", Text, nullable=False),
     CheckConstraint("tenant_id = 'eval'", name="ck_platform_settings_operator"),
+)
+
+# MCP tool registry and knowledge base
+tools = Table(
+    "tools", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("name", Text, primary_key=True),
+    Column("description", Text, nullable=False),
+    Column("kind", Text, nullable=False),
+    Column("url", Text),
+    Column("headers", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("enabled", Boolean, nullable=False, server_default="true"),
+    Column("version", Integer, nullable=False, server_default="1"),
+    Column("created_by", Text, nullable=False), timestamp("created_at"),
+    CheckConstraint("(kind = 'remote' AND name <> 'knowledge' AND url IS NOT NULL) OR "
+                    "(kind = 'builtin' AND tenant_id = 'platform' AND name = 'knowledge' "
+                    "AND url IS NULL AND headers = '{}'::jsonb)"),
+)
+tool_grants = Table(
+    "tool_grants", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("tool_tenant_id", Text, primary_key=True),
+    Column("tool_name", Text, primary_key=True),
+    Column("subject_type", Text, primary_key=True),
+    Column("subject", Text, primary_key=True),
+    Column("granted_by", Text, nullable=False),
+    ForeignKeyConstraint(["tool_tenant_id", "tool_name"], ["tools.tenant_id", "tools.name"],
+                         ondelete="CASCADE"),
+    CheckConstraint("subject_type IN ('tenant', 'team', 'user')"),
+    CheckConstraint("tool_tenant_id IN (tenant_id, 'platform')"),
+    CheckConstraint("subject_type <> 'tenant' OR subject = tenant_id"),
+)
+kb_documents = Table(
+    "kb_documents", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("title", Text, nullable=False),
+    Column("format", Text, nullable=False),
+    Column("content", Text, nullable=False),
+    Column("allowed_teams", ARRAY(Text), nullable=False, server_default=text("'{}'")),
+    Column("chunk_count", Integer, nullable=False),
+    Column("created_by", Text, nullable=False), timestamp("created_at"),
+    CheckConstraint("format IN ('text', 'markdown', 'pdf-text')"),
+)
+# The optional pgvector column is installed by the migration, as with memories.
+kb_chunks = Table(
+    "kb_chunks", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("document_id", UUID(as_uuid=True), primary_key=True),
+    Column("ordinal", Integer, primary_key=True, autoincrement=False),
+    Column("heading", Text),
+    Column("content", Text, nullable=False),
+    Column("embedding_model", Text),
+    ForeignKeyConstraint(["tenant_id", "document_id"], ["kb_documents.tenant_id", "kb_documents.id"],
+                         ondelete="CASCADE"),
 )

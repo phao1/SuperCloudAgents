@@ -204,6 +204,21 @@ class OpenCodeBackend:
             # restricted anyway).
             "permission": {"websearch": "deny", "webfetch": "deny"},
         }
+        # MCP tool registry
+        from sca.tools.runtime import McpAgentContext, redact_mcp_output
+
+        secrets = set()
+        if isinstance(ctx, McpAgentContext):
+            servers = {}
+            for name, server in ctx.mcp_servers.items():
+                headers = {key: value.get_secret_value() for key, value in server.headers.items()}
+                secrets.update(headers.values())
+                for key, value in headers.items():
+                    if key.lower() == "authorization":
+                        secrets.add(value.partition(" ")[2].strip())
+                servers[name] = {"type": "remote", "url": server.url, "headers": headers,
+                                 "oauth": False}
+            config["mcp"] = {"servers": servers}
         argv = [
             "/opt/opencode/opencode",
             "run",
@@ -218,6 +233,20 @@ class OpenCodeBackend:
         if session_id:
             argv += ["--session", session_id]
         argv += ["--", prompt]
+        env = {**self._overlay_env(ctx), "HOME": ctx.agent_home, "SCA_MODEL_KEY": ctx.model_api_key}
+        serialized_config = json.dumps(config)
+        exec_input = {}
+        if secrets:
+            # Docker passes exec environment values on its command line.
+            read_config = (
+                "import os, sys\n"
+                "os.environ['OPENCODE_CONFIG_CONTENT'] = sys.stdin.read()\n"
+                "os.execv(sys.argv[1], sys.argv[1:])"
+            )
+            argv = ["python3", "-c", read_config, *argv]
+            exec_input["stdin"] = serialized_config.encode()
+        else:
+            env["OPENCODE_CONFIG_CONTENT"] = serialized_config
         final, seen_session, finished, failed = "", session_id, False, False
         result = None
         steps: dict[str, dict[str, int]] = {}
@@ -225,13 +254,9 @@ class OpenCodeBackend:
             sandbox_id,
             argv,
             workdir=ctx.workdir,
-            env={
-                **self._overlay_env(ctx),
-                "HOME": ctx.agent_home,
-                "OPENCODE_CONFIG_CONTENT": json.dumps(config),
-                "SCA_MODEL_KEY": ctx.model_api_key,
-            },
+            env=env,
             timeout_s=timeout_s,
+            **exec_input,
         ):
             if isinstance(output, ExecExit):
                 result = output
@@ -245,7 +270,10 @@ class OpenCodeBackend:
             if isinstance(raw, dict) and raw.get("sessionID") and not seen_session:
                 seen_session = raw["sessionID"]
                 yield AgentEvent(type="session_started", data={"session_id": seen_session})
-            for event in parse_opencode_line(output.text, steps):
+            line = output.text
+            if secrets:
+                line = json.dumps(redact_mcp_output(raw, secrets))
+            for event in parse_opencode_line(line, steps):
                 if event.type == "message":
                     final = event.data["text"]
                 if event.type == "error":

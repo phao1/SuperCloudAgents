@@ -9,7 +9,7 @@ import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -51,6 +51,9 @@ from sca.workspace.cache import PIP_CACHE_ENV, RepoCache, pip_cache_mount
 from sca.workspace.git import GitWorkspace
 from sca.workspace.state import TaskStateStore
 from sca.workspace.transport import MountTransport, SyncTransport
+
+if TYPE_CHECKING:
+    from sca.tools.runtime import ToolAttachment
 
 MAX_CAPTURED_OUTPUT = 5 * 1024 * 1024
 _NON_RETRYABLE = (InvalidTaskError, ConflictError, NotFoundError)
@@ -145,11 +148,13 @@ class KernelActivities:
         backends: dict[str, AgentBackend] | None = None,
         worker_identity: str | None = None,
     ) -> None:
+        from sca.tools.sandbox import with_tool_egress
+
         self.secrets = secrets or make_secret_provider(settings)
         self.gateway = gateway
         self.settings = settings
         self.store = store
-        self.sandbox = sandbox
+        self.sandbox = with_tool_egress(sandbox)
         self.agent = agent
         self.backends = backends or {agent.name: agent}
         self.objects = objects
@@ -319,7 +324,9 @@ class KernelActivities:
     @activity.defn
     async def load_task(self, task_id: str) -> dict:
         try:
-            spec = (await self._spec(task_id)).model_dump()
+            task_spec = await self._spec(task_id)
+            await self._tool_attachment_plan(task_id, task_spec)
+            spec = task_spec.model_dump()
             task = await self.store.get_task(task_id)
             await self._pin_champion(task, spec)
             if spec.get("auto_finish") and "plan_review" in spec:
@@ -737,6 +744,12 @@ class KernelActivities:
             runtime=self.settings.sandbox_runtime,
             labels={"sca.task_id": task_id, "sca.state_transport": self.settings.state_transport},
         )
+        attachments = await self._tool_attachment_plan(task_id, spec)
+        tool_hosts = sorted({tool.host for tool in attachments})
+        if tool_hosts:
+            from sca.tools.sandbox import McpSandboxSpec
+
+            sandbox_spec = McpSandboxSpec(**sandbox_spec.model_dump(), mcp_hosts=tool_hosts)
         started = time.monotonic()
         try:
             sandbox_id = await self.sandbox.create(sandbox_name(task_id), sandbox_spec)
@@ -745,12 +758,19 @@ class KernelActivities:
                 business_metrics.sandbox_create.labels(self.settings.sandbox_driver).observe(
                     time.monotonic() - started
                 )
-        await unpause_sandbox(self.sandbox, sandbox_id)
-        await self.transport.push(sandbox_id, self._task_dir(task_id))
-        task = await self.store.get_task(task_id)
-        opened = task.result.get("sandbox_opened_at") or time.time()
-        await self.store.update_result(task_id, {"sandbox_id": sandbox_id,
-                                                 "sandbox_opened_at": opened})
+        try:
+            await unpause_sandbox(self.sandbox, sandbox_id)
+            await self.transport.push(sandbox_id, self._task_dir(task_id))
+            task = await self.store.get_task(task_id)
+            opened = task.result.get("sandbox_opened_at") or time.time()
+            await self.store.update_result(task_id, {"sandbox_id": sandbox_id,
+                                                     "sandbox_opened_at": opened,
+                                                     **({"tool_hosts": tool_hosts} if tool_hosts else {})})
+        except BaseException:
+            if tool_hosts:
+                with contextlib.suppress(SandboxError):
+                    await self.sandbox.destroy(sandbox_id)
+            raise
         return sandbox_id, sandbox_spec.image
 
     async def _setup_command(self, task_id: str, spec: ExecutionSpec) -> str:
@@ -856,7 +876,7 @@ class KernelActivities:
                 return TurnResult(session_id=session_id, final_message="")
             turn_budget = min(turn_budget, remaining)
 
-        ctx = self._agent_ctx(task_id, spec, champion)
+        ctx = await self._attach_tools(task_id, spec, key, champion)
         overlay_metadata = ({"overlay_sha256": ctx.agent_overlay.sha256()}
                             if ctx.agent_overlay is not None else {})
         if overlay_metadata:
@@ -878,6 +898,12 @@ class KernelActivities:
             # The credential lives exactly as long as the turn and never enters the
             # workflow history.
             ctx.model_base_url = self.gateway.sandbox_url
+            if getattr(spec, "tools", []):
+                from sca.tools.sandbox import ToolSandboxProvider
+
+                ctx.model_base_url = await cast(ToolSandboxProvider, self.sandbox).mcp_model_url(
+                    sandbox_id, ctx.model_base_url, self.settings.model_gateway_container,
+                )
             ctx.model_api_key = await self.gateway.issue_key(
                 key_alias,
                 models=[ctx.model or self.settings.default_model],
@@ -1162,3 +1188,51 @@ class KernelActivities:
                 "model": champion["model"],
             }
         await self.store.pin_task_champion(str(task.id), selection)
+
+    # MCP tool attachments
+
+    async def _tool_attachment_plan(self, task_id: str, spec: ExecutionSpec) -> list[ToolAttachment]:
+        names = getattr(spec, "tools", [])
+        if not names:
+            return []
+        from sca.tools.runtime import plan_attachments
+        from sca.tools.settings import get_tool_settings
+
+        try:
+            backend = self._backend(spec)
+            if backend.name != "opencode":
+                raise InvalidTaskError(f"后端 {backend.name} 不支持 tools，请选择 opencode")
+            if (getattr(backend, "sandbox_network", self.settings.sandbox_network) != "restricted"
+                    or not hasattr(self.sandbox, "mcp_model_url")):
+                raise InvalidTaskError("tools 需要启用受限出口的 Docker 沙箱")
+            task = await self.store.get_task(task_id)
+            return await plan_attachments(self.store.for_tenant(task.tenant_id), get_tool_settings(),
+                                          task.id, names)
+        except _NON_RETRYABLE as exc:
+            raise _non_retryable(exc) from exc
+
+    async def _attach_tools(
+        self, task_id: str, spec: ExecutionSpec, key: str, champion: dict | None = None,
+    ) -> AgentContext:
+        ctx = self._agent_ctx(task_id, spec, champion)
+        attachments = await self._tool_attachment_plan(task_id, spec)
+        if not attachments:
+            return ctx
+        from sca.tools.runtime import McpAgentContext, resolve_servers
+        from sca.tools.settings import get_tool_settings
+
+        task = await self.store.get_task(task_id)
+        try:
+            if sorted({tool.host for tool in attachments}) != task.result.get("tool_hosts"):
+                raise InvalidTaskError("MCP 主机配置已更新，请重新提交任务以应用出口规则")
+            servers = await resolve_servers(
+                attachments, self.secrets, get_tool_settings(), task.id, task.tenant_id,
+                spec.turn_timeout_s + 120,
+            )
+        except _NON_RETRYABLE as exc:
+            raise _non_retryable(exc) from exc
+        await self.store.append_event(task_id, "tools.attached", {"tools": [
+            {"name": attachment.tool.name, "version": attachment.tool.version}
+            for attachment in attachments
+        ]}, dedup_key=f"{key}.tools_attached")
+        return McpAgentContext(**ctx.model_dump(), mcp_servers=servers)

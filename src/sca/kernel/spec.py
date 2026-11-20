@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, model_validator
 from sca.core.models import AgentOverlay
 from sca.intents.base import MAX_SOURCES, IntentSource
 from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
+from sca.tools.models import ToolName
 
 
 class CommonSpec(BaseModel):
@@ -32,6 +33,8 @@ class CommonSpec(BaseModel):
 
     # Evolution productization
     use_champion: bool | None = None
+    # MCP tool registry
+    tools: list[ToolName] = Field(default_factory=list, max_length=32)
 
     @model_validator(mode="after")
     def acceptance_pair(self) -> "CommonSpec":

@@ -218,6 +218,14 @@ def create_app(
     app.include_router(tenancy_router)
     app.include_router(usage_router)
     _register_scm(app, settings)
+    # MCP tool registry and knowledge base
+    from sca.api.knowledge import router as knowledge_router
+    from sca.api.mcp import router as mcp_router
+    from sca.api.tools import router as tools_router
+
+    app.include_router(tools_router)
+    app.include_router(knowledge_router)
+    app.include_router(mcp_router)
     return app
 
 
