@@ -11,9 +11,15 @@ GroupBy = Literal["day", "model"]
 USAGE_FIELDS = ("tasks", "turns", "tokens_in", "tokens_out", "sandbox_seconds", "cost_usd")
 
 
+def _json_numbers(row: dict[str, Any]) -> dict[str, Any]:
+    # JSON clients expect numbers; Decimal would otherwise serialize as a string.
+    return {key: float(value) if isinstance(value, Decimal) else value for key, value in row.items()}
+
+
 def aggregate(rows: list[dict[str, Any]], group_by: GroupBy) -> list[dict[str, Any]]:
     if group_by == "day":
-        return [{key: value for key, value in row.items() if key != "by_model"} for row in rows]
+        return [_json_numbers({key: value for key, value in row.items() if key != "by_model"})
+                for row in rows]
 
     grouped: dict[tuple[str, str], dict[str, Any]] = {}
     for row in rows:
@@ -23,7 +29,7 @@ def aggregate(rows: list[dict[str, Any]], group_by: GroupBy) -> list[dict[str, A
             for metric in USAGE_FIELDS[:-1]:
                 total[metric] += usage[metric]
             total["cost_usd"] += Decimal(usage["cost_micro_usd"]) / MICRO_USD
-    return [{"tenant_id": tenant, "model": model, **total}
+    return [_json_numbers({"tenant_id": tenant, "model": model, **total})
             for (tenant, model), total in sorted(grouped.items())]
 
 
