@@ -93,3 +93,6 @@ curl -fsS -X POST "${SCA_API_URL}/v1/evals/runs" \
 用响应中的 ID 查询 `GET /v1/evals/runs/<run_id>`，记录逐题的隐藏验收、轮次、
 成本及套件哈希。固定版本、模型、预算和哈希后比较结果。候选确定后以相同参数将
 `split` 改为 `holdout`，单独验证留出集。
+
+第三次现场校准（HARD4C 调整后，运行 `055ed0ae`，2026-11-21）：开发集 **4/11（36%）**，合计 $0.887，
+进入 30–60% 目标区间。通过：calibration-campaigns、performance-notices、purchase-rounds、rehearsal-calls。
