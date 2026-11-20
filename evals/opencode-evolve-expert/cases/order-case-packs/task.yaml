@@ -1,0 +1,10 @@
+split: holdout
+category: vertical-feature
+instruction: |
+  Can the dispatch desk get the boxed-order preview from the pilot?
+          Their current picks sometimes make one carton out of units from
+          different buildings. The normal unit-based preview is still in use.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Keep stockroom/schema.sql unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

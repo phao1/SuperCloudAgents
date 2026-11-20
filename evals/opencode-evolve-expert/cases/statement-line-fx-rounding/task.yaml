@@ -1,0 +1,10 @@
+split: dev
+category: scattered-spec
+instruction: |
+  The converted statement disagrees by cents with the clearing
+          desk. Please use the carrier reconciliation note for that statement.
+          The indicative quote screen is already getting the right answer.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

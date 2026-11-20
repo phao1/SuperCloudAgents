@@ -1,0 +1,10 @@
+split: dev
+category: scattered-spec
+instruction: |
+  The receiving team can't find the bad record when a supplier file
+          has notes spread across lines. Follow the importer handoff so the file
+          can be corrected and submitted again as one batch.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Keep stockroom/schema.sql unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

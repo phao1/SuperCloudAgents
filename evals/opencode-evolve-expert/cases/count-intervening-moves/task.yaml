@@ -1,0 +1,10 @@
+split: dev
+category: state-debug
+instruction: |
+  The bay count closed even after two corrections to the same pallet
+          cancelled each other out while it was open. Can you make closing use the
+          count handoff? This needs to work on the existing depot files.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Keep stockroom/schema.sql unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

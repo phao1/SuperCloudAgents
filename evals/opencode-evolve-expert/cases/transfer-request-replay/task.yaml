@@ -1,0 +1,10 @@
+split: dev
+category: vertical-feature
+instruction: |
+  The depot uploader now resends moves after it loses the reply. Please
+          wire the dispatch receipt agreement into Stockroom so one physical
+          transfer isn't booked twice, including after a depot restart.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Keep stockroom/schema.sql unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12
