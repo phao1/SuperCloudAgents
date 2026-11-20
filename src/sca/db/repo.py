@@ -972,13 +972,16 @@ class Store:
                 eval_runs.c.status == 'queued',
             ).values(status='running'))
 
-    async def finish_eval_run(self, run_id: str, status: str) -> None:
+    async def finish_eval_run(self, run_id: str, status: str, *, reason: str | None = None) -> None:
         from sca.db.schema import eval_runs
 
+        values = {"status": status, "finished_at": func.now()}
+        if reason is not None:
+            values["variant"] = eval_runs.c.variant.concat({"reason": reason})
         async with self._transaction() as session:
             await session.execute(update(eval_runs).where(
                 eval_runs.c.id == task_uuid(run_id), eval_runs.c.tenant_id == 'eval',
-            ).values(status=status, finished_at=func.now()))
+            ).values(**values))
 
     async def record_eval_result(self, result: dict) -> None:
         from sca.db.schema import eval_results
@@ -1008,7 +1011,8 @@ class Store:
             ).order_by(eval_results.c.case_id, eval_results.c.repeat))).mappings().all()
             from sca.eval.trajectory import overall_passed
 
-            return {**run, 'results': [{**row, 'passed': overall_passed(dict(row))} for row in results]}
+            return {**run, 'reason': run['variant'].get('reason'),
+                    'results': [{**row, 'passed': overall_passed(dict(row))} for row in results]}
 
     async def complete_acceptance(self, task_id: str, passed: bool,
                                   exit_code: int, output_tail: str) -> None:
@@ -1062,7 +1066,7 @@ class Store:
                 journal.append({'type': 'evaluation', 'id': run['id'], 'status': run['status'],
                                 'split': run['variant'].get('split'), 'cost_usd': float(cost),
                                 'overlay': run['variant'].get('variant', {}).get('agent_overlay', {})})
-            return {**row, 'candidates': candidates, 'journal': journal}
+            return {**row, 'reason': row['config'].get('reason'), 'candidates': candidates, 'journal': journal}
 
     async def update_evolution(self, evolution_id: str, values: dict) -> None:
         from sca.db.schema import evolutions
@@ -2477,3 +2481,13 @@ class Store:
                 *matches,
             ).values(stripe_invoice_item_id=stripe_id))
             return True
+
+    # Evaluation failure reasons
+
+    async def fail_evolution(self, evolution_id: str, spent_usd: float, reason: str) -> None:
+        from sca.db.schema import evolutions
+
+        await self.update_evolution(evolution_id, {
+            "status": "failed", "spent_usd": spent_usd,
+            "config": evolutions.c.config.concat({"reason": reason}),
+        })

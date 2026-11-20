@@ -25,6 +25,29 @@ async def test_eval_persistence_idempotent(store):
     assert saved['results'][0]['acceptance_passed'] is False
 
 
+async def test_failure_reasons_preserve_eval_and_evolution_parameters(store):
+    scoped = store.for_tenant('eval')
+    run_id, evolution_id = uuid4(), uuid4()
+    await scoped.create_eval_run({
+        'id': run_id, 'tenant_id': 'eval', 'suite': 'test', 'suite_hash': 'abc',
+        'variant': {'split': 'dev'}, 'created_by': 'test', 'status': 'running',
+    })
+    await scoped.create_evolution({
+        'id': evolution_id, 'status': 'running', 'config': {'suite': 'test'}, 'created_by': 'test',
+    })
+    await scoped.finish_eval_run(str(run_id), 'failed', reason='Suite changed')
+    await scoped.finish_eval_run(str(run_id), 'failed')
+    await scoped.fail_evolution(str(evolution_id), .1, 'Evaluation failed')
+    run = await scoped.get_eval_run(str(run_id))
+    assert run['status'] == 'failed'
+    assert run['reason'] == 'Suite changed'
+    assert run['variant']['split'] == 'dev'
+    evolution = await scoped.get_evolution(str(evolution_id))
+    assert evolution['status'] == 'failed'
+    assert evolution['reason'] == 'Evaluation failed'
+    assert evolution['config']['suite'] == 'test'
+
+
 async def test_acceptance_result_and_event_are_idempotent(store):
     task, _ = await store.create_task(tenant_id='eval', kind='coding', spec={}, idempotency_key=None)
     await store.complete_acceptance(str(task.id), False, 1, 'failed')
@@ -74,6 +97,7 @@ async def test_cli_persists_before_start(store, monkeypatch):
     async def start_workflow(workflow, request, **kwargs):
         saved = await store.get_eval_run(request['id'])
         assert saved['status'] == 'queued'
+        assert request['suite_hash'] == saved['suite_hash']
         started.append(saved)
         return SimpleNamespace(result=AsyncMock())
 

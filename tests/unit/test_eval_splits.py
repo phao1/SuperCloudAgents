@@ -1,5 +1,6 @@
 """Split scheduling and metadata use a durable snapshot, independent of suite edits."""
 
+import hashlib
 import json
 from collections import Counter
 from pathlib import Path
@@ -11,11 +12,13 @@ import httpx
 import pytest
 from fastapi import FastAPI
 from pydantic import ValidationError
+from temporalio.exceptions import ApplicationError
 from temporalio.testing import ActivityEnvironment
 
 from sca.api import evals
 from sca.api.auth import StaticTokenAuthenticator
 from sca.config import Settings
+from sca.core.models import Principal
 from sca.eval.activities import EvalActivities
 from sca.eval.compare import compare
 from sca.eval.suites import case_metadata, load_suite, select_cases
@@ -60,6 +63,39 @@ def test_suite_split_metadata_and_full_hash(split_suite):
     original = suite['hash']
     (split_suite / 'cases/b/repo/app.py').write_text('value = 2\n')
     assert load_suite(split_suite)['hash'] != original
+
+
+def test_suite_hash_excludes_only_root_readme(split_suite):
+    original = load_suite(split_suite)['hash']
+    readme = split_suite / 'README.md'
+    readme.write_text('Suite documentation')
+    expected_legacy_hash = hashlib.sha256(b''.join(
+        path.relative_to(split_suite).as_posix().encode() + b'\0' + path.read_bytes()
+        for path in sorted(split_suite.rglob('*')) if path.is_file()
+    )).hexdigest()
+    suite = load_suite(split_suite)
+    assert suite['hash'] == original
+    assert suite['legacy_hash'] == expected_legacy_hash != original
+    readme.write_text('Edited documentation')
+    assert load_suite(split_suite)['hash'] == original
+    readme.unlink()
+    assert load_suite(split_suite)['hash'] == original
+    (split_suite / 'cases/a/repo/README.md').write_text('Fixture documentation')
+    assert load_suite(split_suite)['hash'] != original
+
+
+@pytest.mark.parametrize('relative', ['cases/a/task.yaml', 'cases/a/acceptance/hidden.py'])
+def test_suite_hash_includes_case_and_hidden_acceptance(split_suite, relative):
+    original = load_suite(split_suite)['hash']
+    path = split_suite / relative
+    path.write_text(path.read_text() + '\n# fixture edit\n')
+    assert load_suite(split_suite)['hash'] != original
+
+
+def test_suite_readme_symlink_is_rejected(split_suite):
+    (split_suite / 'README.md').symlink_to(split_suite / 'suite.yaml')
+    with pytest.raises(ValueError, match='symlinks'):
+        load_suite(split_suite)
 
 
 @pytest.mark.parametrize('metadata', ['split: test', 'split: null', 'category: []', 'category: ""'])
@@ -113,10 +149,44 @@ async def test_prepare_filters_and_snapshots(split_suite, tmp_path, split, count
 async def test_prepare_rejects_suite_changes(split_suite, tmp_path):
     store = SimpleNamespace(finish_eval_run=AsyncMock(),create_eval_run=AsyncMock())
     acts = EvalActivities(Settings(_env_file=None,data_dir=tmp_path),store)
-    from temporalio.exceptions import ApplicationError
-    with pytest.raises(ApplicationError,match='Suite changed'):
+    with pytest.raises(ApplicationError, match='Suite changed') as exc:
         await ActivityEnvironment().run(acts.prepare,{'id':str(uuid4()),'suite':str(split_suite),'suite_hash':'old','split':'dev'})
+    assert exc.value.type == 'SuiteChanged'
+    assert exc.value.non_retryable
     store.create_eval_run.assert_not_called()
+    store.finish_eval_run.assert_not_called()
+
+
+async def test_prepare_accepts_legacy_hash_without_rewriting_lineage(split_suite, tmp_path):
+    (split_suite / 'README.md').write_text('Legacy suite documentation')
+    suite = load_suite(split_suite)
+    store = SimpleNamespace(create_eval_run=AsyncMock(), start_eval_run=AsyncMock())
+    acts = EvalActivities(Settings(_env_file=None, data_dir=tmp_path), store)
+    plan = await acts.prepare({'id': str(uuid4()), 'suite': str(split_suite),
+                               'suite_hash': suite['legacy_hash']})
+    assert store.create_eval_run.call_args.args[0]['suite_hash'] == suite['legacy_hash']
+    assert all(case['suite_hash'] == suite['hash'] for case in plan['cases'])
+
+
+@pytest.mark.parametrize('change,error_type', [
+    ('fixture', 'SuiteChanged'), ('unknown_case', 'InvalidEvalInput'),
+    ('malformed_yaml', 'InvalidEvalInput'),
+])
+async def test_submit_validation_fails_before_api_calls(split_suite, tmp_path, change, error_type):
+    store = SimpleNamespace(create_eval_run=AsyncMock(), start_eval_run=AsyncMock())
+    acts = EvalActivities(Settings(_env_file=None, data_dir=tmp_path), store)
+    request = {'id': str(uuid4()), 'suite': str(split_suite)}
+    case = (await acts.prepare(request))['cases'][0]
+    if change == 'fixture':
+        (split_suite / 'cases/a/acceptance/hidden.py').write_text('assert False\n')
+    elif change == 'unknown_case':
+        case['id'] = 'unknown'
+    else:
+        (split_suite / 'suite.yaml').write_text('name: [\n')
+    with pytest.raises(ApplicationError) as exc:
+        await acts.submit({**request, 'case': case})
+    assert exc.value.type == error_type
+    assert exc.value.non_retryable
 
 
 @pytest.mark.parametrize('overlay', [{}, {'system_prompt':'中文 {{tools}}', 'tool_descriptions':{'read':'exact\ntext'}, 'nested':{'opaque':[1,False,None]}}])
@@ -133,10 +203,25 @@ async def test_submit_passes_overlay_unchanged(split_suite, tmp_path, monkeypatc
     monkeypatch.setattr(acts,'http',lambda: httpx.AsyncClient(transport=httpx.MockTransport(handle),base_url='http://test'))
     suite = load_suite(split_suite)
     case = {**suite['cases'][0], 'kind':'coding','suite_hash':suite['hash']}
+    (split_suite / 'README.md').write_text('New suite documentation')
     request = {'id':str(uuid4()), 'suite':str(split_suite), 'case':case, 'variant':{'agent_overlay':overlay}, 'case_budget':.1,'iteration':0}
     assert await ActivityEnvironment().run(acts.submit,request) == task_id
     assert posted[0]['spec']['agent_overlay'] == overlay
     assert 'split' not in posted[0]['spec'] and 'category' not in posted[0]['spec']
+
+
+@pytest.mark.parametrize('status_code,expected_error', [
+    (422, ApplicationError), (429, httpx.HTTPStatusError), (503, httpx.HTTPStatusError),
+])
+async def test_collect_http_failure_classification(tmp_path, monkeypatch, status_code, expected_error):
+    acts = EvalActivities(Settings(_env_file=None, data_dir=tmp_path), None)
+    transport = httpx.MockTransport(lambda _: httpx.Response(status_code))
+    monkeypatch.setattr(acts, 'http', lambda: httpx.AsyncClient(transport=transport, base_url='http://test'))
+    with pytest.raises(expected_error) as exc:
+        await acts.collect({'task_id': str(uuid4())})
+    if status_code == 422:
+        assert exc.value.type == 'InvalidEvalInput'
+        assert exc.value.non_retryable
 
 
 @pytest.mark.parametrize('split', ['dev','holdout',None])
@@ -151,6 +236,25 @@ def test_request_accepts_split_and_overlay(split):
 def test_request_rejects_invalid_fields(fields):
     with pytest.raises(ValidationError):
         evals.RunRequest(suite='suite',budget=1,case_budget=.1,**fields)
+
+
+async def test_retest_preserves_verified_legacy_baseline_hash(split_suite, monkeypatch):
+    (split_suite / 'README.md').write_text('Legacy documentation')
+    suite = load_suite(split_suite)
+    monkeypatch.setattr(evals, 'suite_path', lambda _: split_suite)
+    monkeypatch.setattr(evals, 'get_settings', lambda: Settings(_env_file=None))
+    store = SimpleNamespace(create_eval_run=AsyncMock())
+    store.for_tenant = lambda _: store
+    client = SimpleNamespace(start_workflow=AsyncMock())
+    state = SimpleNamespace(store=store, orchestrator=SimpleNamespace(client=client))
+    request = SimpleNamespace(app=SimpleNamespace(state=state))
+    body = evals.RunRequest(suite='suite', budget=1, case_budget=.1)
+    user = Principal(tenant_id='eval', subject='test')
+
+    await evals.enqueue_run(body, request, user, expected_suite_hash=suite['legacy_hash'])
+
+    assert store.create_eval_run.call_args.args[0]['suite_hash'] == suite['legacy_hash']
+    assert client.start_workflow.call_args.args[1]['suite_hash'] == suite['hash']
 
 
 async def test_api_stores_snapshot_and_returns_metadata(split_suite, monkeypatch):

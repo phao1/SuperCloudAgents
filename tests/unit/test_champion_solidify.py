@@ -1,3 +1,4 @@
+import asyncio
 import json
 import runpy
 import subprocess
@@ -114,6 +115,7 @@ def solidification(source_repo):
             "variant": {"suite": str(suite), "repeat": 2, "concurrency": 1, "case_budget": .05},
         }),
         create_solidify_eval_runs=AsyncMock(),
+        get_eval_run=AsyncMock(return_value={"status": "running"}),
         finish_eval_run=AsyncMock(),
     )
     labels = {"kind": solidify.SOLIDIFY_KIND, "champion_id": str(champion["id"]),
@@ -127,12 +129,13 @@ def solidification(source_repo):
     return acts, store, record, bare, base, main
 
 
-@pytest.mark.parametrize("outcome", ["completed", "eval_failed", "build_failed"])
+@pytest.mark.parametrize("outcome", ["completed", "eval_failed", "legacy_eval_error", "build_failed"])
 async def test_workflow_builds_from_pinned_base_then_runs_full_suite(solidification, monkeypatch, outcome):
     acts, store, record, bare, base, main = solidification
     settings = acts.settings
     (settings.opencode_src_cache / "node_modules").mkdir(parents=True)
     evals = {}
+    sibling_started, release_sibling, sibling_finished = (asyncio.Event() for _ in range(3))
 
     async def command(argv, log):
         if argv[0] == "git":
@@ -174,13 +177,23 @@ async def test_workflow_builds_from_pinned_base_then_runs_full_suite(solidificat
         assert request["budget"] == .30
         version = request["variant"]["agent_version"]
         evals[version] = request
-        if outcome == "eval_failed" and version == VERSION:
+        if outcome == "legacy_eval_error" and version == VERSION:
             raise RuntimeError("Eval failed")
+        if outcome == "eval_failed":
+            assert kwargs["parent_close_policy"] == solidify.workflow.ParentClosePolicy.ABANDON
+            if version == VERSION:
+                await sibling_started.wait()
+                store.get_eval_run.return_value = {"status": "failed", "reason": "Suite changed"}
+                return "failed"
+            sibling_started.set()
+            await release_sibling.wait()
+            sibling_finished.set()
         return "completed"
 
     monkeypatch.setattr(solidify.workflow, "execute_activity", execute_activity)
     monkeypatch.setattr(solidify.workflow, "execute_child_workflow", execute_child)
     monkeypatch.setattr(solidify.workflow, "uuid4", uuid4)
+    monkeypatch.setattr(solidify.workflow, "patched", lambda _: outcome != "legacy_eval_error")
     workflow_input = {"record": record, "created_by": "operator"}
     path = records_dir(settings) / f"{record['id']}.json"
     if outcome == "build_failed":
@@ -191,7 +204,14 @@ async def test_workflow_builds_from_pinned_base_then_runs_full_suite(solidificat
         assert not evals
         return
 
-    result = await solidify.ChampionSolidifyWorkflow().run(workflow_input)
+    async with asyncio.timeout(10):
+        try:
+            result = await solidify.ChampionSolidifyWorkflow().run(workflow_input)
+            assert not sibling_finished.is_set()
+        finally:
+            release_sibling.set()
+        if outcome == "eval_failed":
+            await sibling_finished.wait()
     version = record["version"]
     meta = json.loads((settings.opencode_versions_dir / version / "meta.json").read_text())
     assert result["status"] == "succeeded"
@@ -206,10 +226,28 @@ async def test_workflow_builds_from_pinned_base_then_runs_full_suite(solidificat
     assert meta["labels"] == record["labels"]
     assert git(bare, "rev-parse", "main") == main
     assert json.loads(path.read_text()) == result
-    if outcome == "eval_failed":
+    if outcome == "legacy_eval_error":
         store.finish_eval_run.assert_awaited_once_with(evals[VERSION]["id"], "failed")
+        assert evals[VERSION]["id"] in result["regression_reason"]
     else:
         store.finish_eval_run.assert_not_called()
+    if outcome == "eval_failed":
+        assert result["regression_reason"] == f"覆盖版评测 {evals[VERSION]['id']} 失败：Suite changed"
+        store.get_eval_run.assert_awaited_once_with(evals[VERSION]["id"])
+
+
+def test_regression_accepts_verified_legacy_suite_hash(solidification):
+    acts, store, record, _, _, _ = solidification
+    readme = acts.settings.eval_suites_dir / "suite" / "README.md"
+    readme.write_text("Original documentation")
+    suite = load_suite(readme.parent)
+    champion = store.get_champion.return_value
+    evidence = {**store.get_champion_eval.return_value, "suite_hash": suite["legacy_hash"]}
+    plan = solidify.regression_plan(acts.settings, record, champion, {}, evidence)
+    assert {run["suite_hash"] for run in plan["runs"].values()} == {suite["hash"]}
+    readme.write_text("The original digest cannot be verified after this edit")
+    with pytest.raises(ValueError, match="suite has changed"):
+        solidify.regression_plan(acts.settings, record, champion, {}, evidence)
 
 
 async def test_changed_suite_fails_before_publishing(solidification):

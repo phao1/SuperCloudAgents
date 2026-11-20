@@ -41,6 +41,7 @@ async def start(suite: Path, model: str | None, prompt_version: str | None, repe
                "repeat": repeat, "concurrency": concurrency, "budget": budget,
                "case_budget": case_budget}
     loaded = await asyncio.to_thread(load_suite, suite)
+    request["suite_hash"] = loaded["hash"]
     engine = make_engine(settings.database_url)
     try:
         await Store(make_sessionmaker(engine)).for_tenant("eval").create_eval_run({
