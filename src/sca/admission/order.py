@@ -10,3 +10,7 @@ def grant_order(candidate: dict, held: dict[str, int], weights: dict[str, int]) 
     return (PRIORITIES[candidate["spec"].get("priority", "interactive")],
             Fraction(held.get(tenant, 0), weights[tenant]),
             candidate["slot_requested_at"], str(candidate["id"]))
+
+
+def tenant_slot_limit(tenant_limit: int, plan_limit: int | None) -> int:
+    return tenant_limit if plan_limit is None else min(tenant_limit, plan_limit)

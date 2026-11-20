@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 import platform
+from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Containers run natively on the host's architecture (Apple silicon gets arm64 images).
@@ -233,6 +234,15 @@ class Settings(BaseSettings):
             if candidate.exists():
                 return candidate.resolve().parent
         raise FileNotFoundError("codex binary not found; set SCA_CODEX_BIN_DIR")
+
+    # Tenant operations, billing and local retention.
+    platform_admin_token: SecretStr | None = None
+    billing_markup: Decimal = Field(default=Decimal(1), ge=0, allow_inf_nan=False)
+    billing_base_fees_usd: dict[
+        str, Annotated[Decimal, Field(ge=0, allow_inf_nan=False)]
+    ] = Field(default_factory=dict)
+    task_retention_days: int = Field(default=14, ge=0)
+    cache_cleanup: bool = True
 
 
 @lru_cache

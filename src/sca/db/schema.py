@@ -3,6 +3,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -226,3 +227,52 @@ champions = Table(
 )
 Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
       unique=True, postgresql_where=champions.c.active)
+
+# Tenant operations and billing
+plans = Table(
+    "plans", metadata,
+    Column("name", Text, primary_key=True),
+    Column("monthly_cost_limit_usd", Numeric),
+    Column("max_concurrent_tasks", Integer),
+    Column("max_task_cost_usd", Numeric),
+    Column("features", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    CheckConstraint("monthly_cost_limit_usd >= 0 AND monthly_cost_limit_usd < 'Infinity'::numeric"),
+    CheckConstraint("max_concurrent_tasks > 0"),
+    CheckConstraint("max_task_cost_usd >= 0 AND max_task_cost_usd < 'Infinity'::numeric"),
+)
+
+tenants.append_column(Column("display_name", Text, nullable=False))
+tenants.append_column(Column("plan", Text, ForeignKey("plans.name"), nullable=False,
+                             server_default="enterprise"))
+tenants.append_column(Column("status", Text, nullable=False, server_default="active"))
+tenants.append_column(Column("membership_required", Boolean, nullable=False, server_default="false"))
+tenants.append_column(Column("deleted_at", DateTime(timezone=True)))
+tenants.append_constraint(CheckConstraint("status IN ('active', 'suspended')", name="tenants_status"))
+
+tenant_members = Table(
+    "tenant_members", metadata,
+    Column("tenant_id", Text, ForeignKey("tenants.id"), primary_key=True),
+    Column("email", Text, primary_key=True),
+    Column("subject", Text),
+    Column("role", Text, nullable=False),
+    timestamp("created_at"),
+    Column("activated_at", DateTime(timezone=True)),
+    UniqueConstraint("tenant_id", "subject"),
+    CheckConstraint("role IN ('owner', 'admin', 'member', 'viewer')"),
+)
+
+usage_daily = Table(
+    "usage_daily", metadata,
+    Column("tenant_id", Text, ForeignKey("tenants.id"), primary_key=True),
+    Column("day", Date, primary_key=True),
+    Column("tasks", BigInteger, nullable=False, server_default="0"),
+    Column("turns", BigInteger, nullable=False, server_default="0"),
+    Column("tokens_in", BigInteger, nullable=False, server_default="0"),
+    Column("tokens_out", BigInteger, nullable=False, server_default="0"),
+    Column("cost_usd", Numeric, nullable=False, server_default="0"),
+    Column("sandbox_seconds", BigInteger, nullable=False, server_default="0"),
+    Column("by_model", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+)
+
+tasks.append_column(Column("finished_at", DateTime(timezone=True)))
+tasks.append_column(Column("billing_usage", JSONB))

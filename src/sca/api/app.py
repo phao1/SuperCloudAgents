@@ -17,6 +17,7 @@ from sca.api.auth import (
 from sca.api.authz import ForbiddenError
 from sca.api.routes import router
 from sca.api.tasks_admission import router as admission_router
+from sca.billing.quota import PlanQuotaExceededError
 from sca.config import get_settings
 from sca.core.errors import AuthError, ConflictError, InvalidTaskError, NotFoundError
 from sca.core.interfaces import Authenticator, ObjectStore, Orchestrator
@@ -24,6 +25,7 @@ from sca.db.engine import EventListener, make_engine, make_sessionmaker
 from sca.db.repo import QuotaExceededError, Store
 from sca.observability import Metrics, instrument_app, setup_tracing
 from sca.storage import make_object_store
+from sca.tenancy.models import TenantSuspendedError
 
 
 def create_app(
@@ -32,6 +34,7 @@ def create_app(
     orchestrator: Orchestrator | None = None,
     authenticator: Authenticator | None = None,
     object_store: ObjectStore | None = None,
+    platform_store: Store | None = None,
 ) -> FastAPI:
     settings = get_settings()
     setup_tracing("sca-api", settings)
@@ -68,7 +71,7 @@ def create_app(
     instrument_app(app, app.state.metrics)
     app.state.orchestrator = orchestrator
     authenticators: list[Authenticator] = [
-        StaticTokenAuthenticator(settings.token_table()),
+        StaticTokenAuthenticator(settings.token_table(), app.state.store),
         DatabaseTokenAuthenticator(app.state.store),
     ]
     issuer = getattr(settings, "oidc_issuer", None)
@@ -84,6 +87,7 @@ def create_app(
                 getattr(settings, "oidc_tenant_claim", "tenant"),
                 settings.oidc_role_claim,
                 settings.oidc_default_role,
+                store=app.state.store,
             )
         )
     app.state.authenticator = authenticator or ChainAuthenticator(authenticators)
@@ -102,6 +106,8 @@ def create_app(
     async def domain_error(request: Request, exc: Exception) -> JSONResponse:
         status, code = {
             QuotaExceededError: (429, "quota_exceeded"),
+            PlanQuotaExceededError: (402, "quota_exceeded"),
+            TenantSuspendedError: (403, "tenant_suspended"),
             AuthError: (401, "unauthorized"),
             ForbiddenError: (403, "forbidden"),
             NotFoundError: (404, "not_found"),
@@ -113,6 +119,8 @@ def create_app(
     for error in (
         ForbiddenError,
         QuotaExceededError,
+        PlanQuotaExceededError,
+        TenantSuspendedError,
         AuthError,
         NotFoundError,
         ConflictError,
@@ -187,4 +195,19 @@ def create_app(
                 and "POST" in getattr(route, "methods", set()))
     )
     app.include_router(task_routes)
+
+    # Tenant administration and billing
+    from sca.api.tenants import router as tenancy_router
+    from sca.api.usage import router as usage_router
+
+    app.state.check_tenant_submission = app.state.store.check_tenant_submission
+    app.state.platform_admin_token = settings.platform_admin_token
+    if platform_store is None and store is None and settings.platform_admin_token and (
+        settings.api_database_url and settings.api_database_url != settings.database_url
+    ):
+        platform_store = Store(make_sessionmaker(make_engine(settings.database_url)),
+                               settings.default_max_active_tasks)
+    app.state.platform_store = platform_store or app.state.store
+    app.include_router(tenancy_router)
+    app.include_router(usage_router)
     return app
