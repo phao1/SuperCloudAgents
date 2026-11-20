@@ -187,4 +187,10 @@ def create_app(
                 and "POST" in getattr(route, "methods", set()))
     )
     app.include_router(task_routes)
+
+    # Phase 6 decoupling
+    from sca.api.impact import router as impact_router
+
+    app.state.settings = settings
+    app.include_router(impact_router)
     return app
