@@ -1,0 +1,401 @@
+{
+  "audit": [
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "venues.added",
+      "record_id": "north",
+      "seq": 1,
+      "version": 1
+    },
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "venues.added",
+      "record_id": "south",
+      "seq": 2,
+      "version": 1
+    }
+  ],
+  "format": 1,
+  "members": {
+    "clerk": {
+      "active": true,
+      "name": "Desk clerk",
+      "role": "operator"
+    },
+    "lead": {
+      "active": true,
+      "name": "Desk lead",
+      "role": "manager"
+    },
+    "ridge": {
+      "active": true,
+      "name": "Ridge operator",
+      "role": "operator"
+    },
+    "viewer": {
+      "active": true,
+      "name": "Read-only visitor",
+      "role": "reader"
+    }
+  },
+  "tables": {
+    "attendance": {
+      "mark-a": {
+        "day": "2025-04-10",
+        "id": "mark-a",
+        "minutes": 180,
+        "original": null,
+        "person": "ana",
+        "production": "blue",
+        "reason": null,
+        "reviewed": null,
+        "scope": "north",
+        "status": "recorded",
+        "version": 1
+      },
+      "mark-b": {
+        "day": "2025-04-10",
+        "id": "mark-b",
+        "minutes": 95,
+        "original": null,
+        "person": "chi",
+        "production": "moss",
+        "reason": null,
+        "reviewed": null,
+        "scope": "south",
+        "status": "recorded",
+        "version": 1
+      },
+      "paper-mark-a": {
+        "day": "2025-04-05",
+        "id": "paper-mark-a",
+        "minutes": 145,
+        "original": 120,
+        "person": "bilal",
+        "production": "blue",
+        "reason": "Handover",
+        "reviewed": "2025-04-06",
+        "scope": "north",
+        "status": "corrected",
+        "version": 1
+      },
+      "paper-mark-b": {
+        "day": "2025-04-06",
+        "id": "paper-mark-b",
+        "minutes": 100,
+        "original": 140,
+        "person": "dev",
+        "production": "moss",
+        "reason": "Late start",
+        "reviewed": "2025-04-08",
+        "scope": "south",
+        "status": "corrected",
+        "version": 1
+      }
+    },
+    "bookings": {
+      "big-block": {
+        "day": "2025-04-19",
+        "end": "2025-04-20",
+        "former_scope": null,
+        "id": "big-block",
+        "production": "wharf",
+        "scope": "south",
+        "status": "confirmed",
+        "swapped": null,
+        "trade": null,
+        "version": 1
+      },
+      "block-a": {
+        "day": "2025-04-13",
+        "end": "2025-04-14",
+        "former_scope": null,
+        "id": "block-a",
+        "production": "blue",
+        "scope": "north",
+        "status": "confirmed",
+        "swapped": null,
+        "trade": null,
+        "version": 1
+      },
+      "block-b": {
+        "day": "2025-04-15",
+        "end": "2025-04-16",
+        "former_scope": null,
+        "id": "block-b",
+        "production": "moss",
+        "scope": "south",
+        "status": "confirmed",
+        "swapped": null,
+        "trade": null,
+        "version": 1
+      },
+      "paper-block-a": {
+        "day": "2025-04-03",
+        "end": "2025-04-03",
+        "former_scope": "north",
+        "id": "paper-block-a",
+        "production": "blue",
+        "scope": "south",
+        "status": "confirmed",
+        "swapped": "2025-04-01",
+        "trade": "paper-trade",
+        "version": 1
+      },
+      "paper-block-b": {
+        "day": "2025-04-04",
+        "end": "2025-04-04",
+        "former_scope": "south",
+        "id": "paper-block-b",
+        "production": "moss",
+        "scope": "north",
+        "status": "confirmed",
+        "swapped": "2025-04-01",
+        "trade": "paper-trade",
+        "version": 1
+      }
+    },
+    "calls": {
+      "call-draft": {
+        "announced": null,
+        "crew": [
+          "ana"
+        ],
+        "day": "2025-04-10",
+        "id": "call-draft",
+        "production": "blue",
+        "scope": "north",
+        "status": "draft",
+        "version": 1
+      },
+      "called-off": {
+        "announced": null,
+        "crew": [
+          "ana"
+        ],
+        "day": "2025-04-05",
+        "id": "called-off",
+        "production": "blue",
+        "scope": "north",
+        "status": "cancelled",
+        "version": 1
+      },
+      "paper-call-a": {
+        "announced": "2025-04-02",
+        "crew": [
+          "bilal",
+          "ana"
+        ],
+        "day": "2025-04-04",
+        "id": "paper-call-a",
+        "production": "blue",
+        "scope": "north",
+        "status": "announced",
+        "version": 1
+      },
+      "paper-call-b": {
+        "announced": "2025-04-02",
+        "crew": [
+          "chi"
+        ],
+        "day": "2025-04-05",
+        "id": "paper-call-b",
+        "production": "moss",
+        "scope": "south",
+        "status": "announced",
+        "version": 1
+      }
+    },
+    "crew": {
+      "ana": {
+        "duty": "lighting",
+        "id": "ana",
+        "name": "Ana Vélez",
+        "scope": "north",
+        "status": "active",
+        "version": 1
+      },
+      "bilal": {
+        "duty": "sound",
+        "id": "bilal",
+        "name": "Bilal Noor",
+        "scope": "north",
+        "status": "active",
+        "version": 1
+      },
+      "chi": {
+        "duty": "stage",
+        "id": "chi",
+        "name": "Chi Lin",
+        "scope": "south",
+        "status": "active",
+        "version": 1
+      },
+      "dev": {
+        "duty": "sound",
+        "id": "dev",
+        "name": "Dev Álvarez",
+        "scope": "south",
+        "status": "active",
+        "version": 1
+      },
+      "eko": {
+        "duty": "stage",
+        "id": "eko",
+        "name": "Eko Quinn",
+        "scope": "north",
+        "status": "inactive",
+        "version": 1
+      }
+    },
+    "desk-memos": {
+      "memo-north": {
+        "author": "Léa",
+        "day": "2025-04-01",
+        "id": "memo-north",
+        "message": "Keep a copy at the main desk.",
+        "scope": "north",
+        "version": 1
+      },
+      "memo-south": {
+        "author": "Karl",
+        "day": "2025-04-01",
+        "id": "memo-south",
+        "message": "Use the side entrance.",
+        "scope": "south",
+        "version": 1
+      }
+    },
+    "performances": {
+      "no-show": {
+        "audience": [
+          "members"
+        ],
+        "day": "2025-04-05",
+        "id": "no-show",
+        "prior_day": null,
+        "prior_scope": null,
+        "production": "blue",
+        "reason": null,
+        "scope": "north",
+        "sent": null,
+        "status": "cancelled",
+        "version": 1
+      },
+      "paper-notice-a": {
+        "audience": [
+          "schools",
+          "members"
+        ],
+        "day": "2025-04-08",
+        "id": "paper-notice-a",
+        "prior_day": "2025-04-07",
+        "prior_scope": "north",
+        "production": "blue",
+        "reason": "Floor repairs",
+        "scope": "south",
+        "sent": "2025-04-04",
+        "status": "moved",
+        "version": 1
+      },
+      "paper-notice-b": {
+        "audience": [
+          "press"
+        ],
+        "day": "2025-04-09",
+        "id": "paper-notice-b",
+        "prior_day": "2025-04-08",
+        "prior_scope": "south",
+        "production": "moss",
+        "reason": "Lighting focus",
+        "scope": "north",
+        "sent": "2025-04-06",
+        "status": "moved",
+        "version": 1
+      },
+      "show-a": {
+        "audience": [
+          "members",
+          "season"
+        ],
+        "day": "2025-04-16",
+        "id": "show-a",
+        "prior_day": null,
+        "prior_scope": null,
+        "production": "blue",
+        "reason": null,
+        "scope": "north",
+        "sent": null,
+        "status": "scheduled",
+        "version": 1
+      },
+      "show-b": {
+        "audience": [
+          "members"
+        ],
+        "day": "2025-04-17",
+        "id": "show-b",
+        "prior_day": null,
+        "prior_scope": null,
+        "production": "wharf",
+        "reason": null,
+        "scope": "south",
+        "sent": null,
+        "status": "scheduled",
+        "version": 1
+      }
+    },
+    "productions": {
+      "blue": {
+        "id": "blue",
+        "name": "Blue Hour",
+        "scope": "north",
+        "seats": 48,
+        "status": "active",
+        "version": 1
+      },
+      "moss": {
+        "id": "moss",
+        "name": "Moss Choir",
+        "scope": "south",
+        "seats": 56,
+        "status": "active",
+        "version": 1
+      },
+      "paper": {
+        "id": "paper",
+        "name": "Paper Houses",
+        "scope": "north",
+        "seats": 20,
+        "status": "archived",
+        "version": 1
+      },
+      "wharf": {
+        "id": "wharf",
+        "name": "Wharf Scenes",
+        "scope": "south",
+        "seats": 91,
+        "status": "active",
+        "version": 1
+      }
+    },
+    "venues": {
+      "north": {
+        "capacity": 60,
+        "district": "North district",
+        "id": "north",
+        "name": "North Studio",
+        "version": 1
+      },
+      "south": {
+        "capacity": 120,
+        "district": "South district",
+        "id": "south",
+        "name": "South Playhouse",
+        "version": 1
+      }
+    }
+  }
+}

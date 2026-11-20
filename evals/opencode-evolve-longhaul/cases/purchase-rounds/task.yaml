@@ -1,0 +1,54 @@
+split: dev
+category: batch-commit
+instruction: |
+  Buyers want to review a combined order from several drafts before releasing the order to a
+  supplier. The supplier totals must stay attached to the exact drafts that were reviewed.
+
+  - Assemble at least two distinct drafts for the same supplier and market. The round date
+    cannot precede an order. An order already in a pending round is unavailable. Freeze the
+    selected order IDs and per-order quantities and unit prices.
+  - Return orders sorted by ID, lines grouped by product (product, summed units, extended cents)
+    in product order and total_cents. The assembled workflow starts with no released date.
+  - A manager releases once at or after assembly with the expected total. Any change to a source
+    order's status, quantity or price invalidates the review, even if the aggregate total still
+    matches. In one write mark every version-one order released with round and released
+    populated, and save the round's release date.
+  - Expose purchase-rounds in the market report with awaiting_release (sorted IDs as of that
+    date) and released_cents accumulated through the date.
+  - Upgrade legacy released orders with a round ID. Group by that ID, require a common supplier,
+    scope and release date, and use the latest order day as the assembly day. A group with
+    inconsistent entries aborts the whole conversion as bad_store. Ignore standalone releases
+    and already represented rounds, preserving old readers.
+  - Use the desk's registered commands, permission map, audit and bilingual catalogs on both
+    interfaces, and make the version-two migration idempotent.
+
+  Ship the commands as purchase-rounds assemble, purchase-rounds release and
+  purchase-rounds list, with the matching /v1/purchase-rounds/<action> routes.
+  The minimum roles are operator for assemble and manager for release.
+  Readers can list by scope and optional status (assembled, released) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register purchase-rounds.assembled and purchase-rounds.released.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | assemble | id (new workflow identifier), orders (JSON array of draft order IDs), day (effective calendar day) |
+  | release | id (existing workflow identifier), expected_cents (reviewed round total in cents), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are supplier, day, orders, lines, total_cents, released.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/purchase-rounds.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

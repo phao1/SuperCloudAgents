@@ -1,0 +1,55 @@
+split: holdout
+category: batch-commit
+instruction: |
+  When sample labels or handling conditions need review, the field desk holds a batch together.
+  A manager should clear or discard every sample in one decision so no sample is left in limbo.
+
+  - Place a hold against at least two distinct logged samples at the same station and of the
+    same water type. Reject samples already in an active hold or collected after the hold day.
+    Store sorted sample IDs, reason, water type, station and hold day; dispositions start empty.
+  - Resolve once at or after placement with exactly one cleared or discarded value for every
+    sample. Recheck all original samples are still logged and still eligible before writing any
+    decision.
+  - Atomically save the workflow dispositions and resolution date, and update the original
+    samples' statuses, hold ID, held and resolved dates and note. Keep the version-one sample
+    register readable.
+  - Add sample-holds to the station report with blocked_samples at that date and
+    discarded_samples accumulated by that date. While a batch is pending, count every held
+    sample once.
+  - Migrate paper samples grouped by hold ID. Require common station, water type, hold date,
+    resolution and reason, with a cleared or discarded final status for every member. Convert
+    each complete group into one resolved record, reject corrupt groups as bad_store and skip
+    existing live holds already represented.
+  - Provide CLI and API actions with the scoped list, role checks, translations and audit
+    entries. Use the version-two format and make the upgrade safe to repeat.
+
+  Ship the commands as sample-holds place, sample-holds resolve and
+  sample-holds list, with the matching /v1/sample-holds/<action> routes.
+  The minimum roles are operator for place and manager for resolve.
+  Readers can list by scope and optional status (held, resolved) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register sample-holds.placed and sample-holds.resolved.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | place | id (new workflow identifier), samples (JSON array of sample IDs), day (effective calendar day), reason (hold reason) |
+  | resolve | id (existing workflow identifier), dispositions (JSON object mapping sample IDs to cleared or discarded), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are samples, water, day, reason, dispositions, resolved.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/sample-holds.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

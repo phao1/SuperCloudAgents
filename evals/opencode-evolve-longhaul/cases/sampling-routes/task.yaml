@@ -1,0 +1,57 @@
+split: dev
+category: batch-commit
+instruction: |
+  Field staff work across stations and need to agree on a stop order before a route is
+  dispatched. Stations should see the same stop positions in their old registers and day
+  overview.
+
+  - Plan a route for an active crew by giving the ordered list of at least two distinct
+    scheduled visits for that crew and day. Visits can span stations. Reject visits already
+    assigned to a planned route. Use the crew's home station as scope and save stops with visit,
+    station and one-based position in input order.
+  - Dispatch once on or before the visit day. Recheck the crew and every visit's station, date
+    and scheduled status before changing anything. Update the old visits to dispatched with
+    their new positions, route ID and dispatch date. Keep the route day and persist the dispatch
+    date.
+  - In station reports, sampling-routes shows planned_stops for that station on the requested
+    visit day and arrivals of dispatched routes as route, position and visit, ordered by route
+    ID then position. Stops at another station belong in that station's report too.
+  - Migrate dispatched or done paper visits grouped by route ID as dispatched records. The group
+    must share a crew, visit day and dispatch date and have consecutive unique positions
+    starting at one. Use the crew's home station for scope. Abort an invalid group as bad_store
+    and skip routes already represented.
+  - Write version-two records under the existing extension format and make the upgrade
+    repeatable. Keep the version-one itinerary and original reader usable.
+  - Expose plan, dispatch and list with the standard permissions, bilingual responses and audit
+    trail.
+
+  Ship the commands as sampling-routes plan, sampling-routes dispatch and
+  sampling-routes list, with the matching /v1/sampling-routes/<action> routes.
+  The minimum roles are operator for plan and manager for dispatch.
+  Readers can list by scope and optional status (planned, dispatched) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register sampling-routes.planned and sampling-routes.dispatched.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | plan | id (new workflow identifier), crew (field crew), day (effective calendar day), visits (JSON array in intended stop order) |
+  | dispatch | id (existing workflow identifier), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are crew, day, dispatched, stops.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/sampling-routes.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

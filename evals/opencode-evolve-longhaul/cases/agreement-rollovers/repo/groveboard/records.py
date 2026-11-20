@@ -1,0 +1,125 @@
+"""Legacy registers and their validated fields, in dependency order."""
+
+from deskcore.fields import (
+    date_field,
+    enum_field,
+    id_field,
+    int_field,
+    optional_date,
+    optional_id,
+    optional_int,
+    text_field,
+)
+from deskcore.records import Entity
+
+from . import validation
+
+ENTITIES = (
+    Entity(
+        "markets",
+        "market",
+        "marché",
+        (
+            text_field("name", "public name"),
+            text_field("region", "district name"),
+            int_field("capacity", "crate storage capacity", 1, 10000000),
+        ),
+    ),
+    Entity(
+        "suppliers",
+        "supplier",
+        "fournisseur",
+        (
+            id_field("scope", "desk scope"),
+            text_field("name", "public name"),
+            int_field("terms", "invoice terms in days", 0, 180),
+            enum_field("status", "register status", "active", "inactive"),
+        ),
+        validation.require_scope,
+        ("scope",),
+    ),
+    Entity(
+        "products",
+        "produce SKU",
+        "article",
+        (
+            id_field("scope", "desk scope"),
+            text_field("name", "public name"),
+            id_field("supplier", "preferred supplier"),
+            int_field("cents", "catalog price", 0, 10000000),
+            enum_field("status", "register status", "active", "retired"),
+        ),
+        validation.product,
+        ("scope", "supplier"),
+    ),
+    Entity(
+        "purchase-orders",
+        "purchase order",
+        "commande",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "draft", "released", "cancelled"),
+            id_field("supplier", "supplier"),
+            id_field("product", "produce SKU"),
+            int_field("units", "ordered units", 1, 10000000),
+            int_field("cents", "price per unit", 0, 10000000),
+            optional_id("round", "paper release round"),
+            optional_date("released", "release day"),
+        ),
+        validation.purchase,
+        ("scope", "supplier", "product"),
+    ),
+    Entity(
+        "delivery-lines",
+        "delivery line",
+        "ligne livrée",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "logged", "credited"),
+            id_field("product", "delivered SKU"),
+            int_field("ordered", "ordered units", 1, 10000000),
+            int_field("received", "received units", 0, 10000000),
+            int_field("cents", "settlement price per unit", 0, 10000000),
+            optional_int("credit", "credited units", 0),
+            optional_date("credited", "credit issued on"),
+        ),
+        validation.delivery,
+        ("scope", "product"),
+    ),
+    Entity(
+        "crate-moves",
+        "crate movement",
+        "mouvement de cagettes",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "posted", "void"),
+            id_field("supplier", "crate partner"),
+            enum_field("kind", "movement direction", "out", "in"),
+            int_field("units", "crate count", 1, 10000000),
+            int_field("rate", "deposit per crate", 0, 10000000),
+            optional_id("cycle", "paper loan cycle"),
+        ),
+        validation.supplier_scope,
+        ("scope", "supplier", "kind"),
+    ),
+    Entity(
+        "agreements",
+        "supplier agreement",
+        "contrat",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            date_field("end", "last calendar day"),
+            enum_field("status", "register status", "active", "replaced", "expired"),
+            id_field("supplier", "supplier"),
+            int_field("cents", "case price under this agreement", 0, 10000000),
+            optional_id("previous", "preceding contract"),
+            optional_date("activated", "activation day"),
+        ),
+        validation.agreement,
+        ("scope", "supplier"),
+    ),
+)

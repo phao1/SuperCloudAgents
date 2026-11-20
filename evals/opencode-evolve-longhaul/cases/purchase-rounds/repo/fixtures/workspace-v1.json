@@ -1,0 +1,465 @@
+{
+  "audit": [
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "markets.added",
+      "record_id": "north",
+      "seq": 1,
+      "version": 1
+    },
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "markets.added",
+      "record_id": "south",
+      "seq": 2,
+      "version": 1
+    }
+  ],
+  "format": 1,
+  "members": {
+    "clerk": {
+      "active": true,
+      "name": "Desk clerk",
+      "role": "operator"
+    },
+    "lead": {
+      "active": true,
+      "name": "Desk lead",
+      "role": "manager"
+    },
+    "ridge": {
+      "active": true,
+      "name": "Ridge operator",
+      "role": "operator"
+    },
+    "viewer": {
+      "active": true,
+      "name": "Read-only visitor",
+      "role": "reader"
+    }
+  },
+  "tables": {
+    "agreements": {
+      "future-a": {
+        "activated": null,
+        "cents": 460,
+        "day": "2025-06-15",
+        "end": "2025-06-30",
+        "id": "future-a",
+        "previous": null,
+        "scope": "north",
+        "status": "active",
+        "supplier": "orchard",
+        "version": 1
+      },
+      "paper-spring": {
+        "activated": "2025-02-25",
+        "cents": 340,
+        "day": "2025-03-01",
+        "end": "2025-05-31",
+        "id": "paper-spring",
+        "previous": "paper-winter",
+        "scope": "north",
+        "status": "active",
+        "supplier": "garden",
+        "version": 1
+      },
+      "paper-winter": {
+        "activated": null,
+        "cents": 310,
+        "day": "2025-01-01",
+        "end": "2025-02-28",
+        "id": "paper-winter",
+        "previous": null,
+        "scope": "north",
+        "status": "replaced",
+        "supplier": "garden",
+        "version": 1
+      },
+      "spring-a": {
+        "activated": null,
+        "cents": 405,
+        "day": "2025-04-01",
+        "end": "2025-04-30",
+        "id": "spring-a",
+        "previous": null,
+        "scope": "north",
+        "status": "active",
+        "supplier": "orchard",
+        "version": 1
+      },
+      "spring-s": {
+        "activated": null,
+        "cents": 500,
+        "day": "2025-04-01",
+        "end": "2025-04-30",
+        "id": "spring-s",
+        "previous": null,
+        "scope": "south",
+        "status": "active",
+        "supplier": "farm",
+        "version": 1
+      }
+    },
+    "crate-moves": {
+      "loose-crates": {
+        "cycle": null,
+        "day": "2025-04-02",
+        "id": "loose-crates",
+        "kind": "out",
+        "rate": 125,
+        "scope": "north",
+        "status": "posted",
+        "supplier": "garden",
+        "units": 4,
+        "version": 1
+      },
+      "paper-crate-a": {
+        "cycle": "paper-crates",
+        "day": "2025-04-02",
+        "id": "paper-crate-a",
+        "kind": "out",
+        "rate": 150,
+        "scope": "north",
+        "status": "posted",
+        "supplier": "orchard",
+        "units": 8,
+        "version": 1
+      },
+      "paper-crate-b": {
+        "cycle": "paper-crates",
+        "day": "2025-04-04",
+        "id": "paper-crate-b",
+        "kind": "in",
+        "rate": 150,
+        "scope": "north",
+        "status": "posted",
+        "supplier": "orchard",
+        "units": 3,
+        "version": 1
+      },
+      "paper-crate-c": {
+        "cycle": "paper-south",
+        "day": "2025-04-01",
+        "id": "paper-crate-c",
+        "kind": "out",
+        "rate": 200,
+        "scope": "south",
+        "status": "posted",
+        "supplier": "farm",
+        "units": 5,
+        "version": 1
+      },
+      "paper-crate-d": {
+        "cycle": "paper-south",
+        "day": "2025-04-05",
+        "id": "paper-crate-d",
+        "kind": "in",
+        "rate": 200,
+        "scope": "south",
+        "status": "posted",
+        "supplier": "farm",
+        "units": 5,
+        "version": 1
+      },
+      "void-slip": {
+        "cycle": "paper-crates",
+        "day": "2025-04-04",
+        "id": "void-slip",
+        "kind": "in",
+        "rate": 150,
+        "scope": "north",
+        "status": "void",
+        "supplier": "orchard",
+        "units": 20,
+        "version": 1
+      }
+    },
+    "delivery-lines": {
+      "drop-a": {
+        "cents": 425,
+        "credit": null,
+        "credited": null,
+        "day": "2025-04-10",
+        "id": "drop-a",
+        "ordered": 20,
+        "product": "apple",
+        "received": 12,
+        "scope": "north",
+        "status": "logged",
+        "version": 1
+      },
+      "drop-full": {
+        "cents": 312,
+        "credit": null,
+        "credited": null,
+        "day": "2025-04-10",
+        "id": "drop-full",
+        "ordered": 14,
+        "product": "leek",
+        "received": 14,
+        "scope": "north",
+        "status": "logged",
+        "version": 1
+      },
+      "drop-s": {
+        "cents": 500,
+        "credit": null,
+        "credited": null,
+        "day": "2025-04-10",
+        "id": "drop-s",
+        "ordered": 9,
+        "product": "plum",
+        "received": 5,
+        "scope": "south",
+        "status": "logged",
+        "version": 1
+      },
+      "paper-drop-a": {
+        "cents": 410,
+        "credit": 2,
+        "credited": "2025-04-03",
+        "day": "2025-04-02",
+        "id": "paper-drop-a",
+        "ordered": 12,
+        "product": "apple",
+        "received": 9,
+        "scope": "north",
+        "status": "credited",
+        "version": 1
+      },
+      "paper-drop-b": {
+        "cents": 540,
+        "credit": 7,
+        "credited": "2025-04-06",
+        "day": "2025-04-02",
+        "id": "paper-drop-b",
+        "ordered": 8,
+        "product": "plum",
+        "received": 1,
+        "scope": "south",
+        "status": "credited",
+        "version": 1
+      }
+    },
+    "desk-memos": {
+      "memo-north": {
+        "author": "Léa",
+        "day": "2025-04-01",
+        "id": "memo-north",
+        "message": "Keep a copy at the main desk.",
+        "scope": "north",
+        "version": 1
+      },
+      "memo-south": {
+        "author": "Karl",
+        "day": "2025-04-01",
+        "id": "memo-south",
+        "message": "Use the side entrance.",
+        "scope": "south",
+        "version": 1
+      }
+    },
+    "markets": {
+      "north": {
+        "capacity": 60,
+        "id": "north",
+        "name": "North Arcade",
+        "region": "North district",
+        "version": 1
+      },
+      "south": {
+        "capacity": 120,
+        "id": "south",
+        "name": "South Market",
+        "region": "South district",
+        "version": 1
+      }
+    },
+    "products": {
+      "apple": {
+        "cents": 440,
+        "id": "apple",
+        "name": "Bramley apples",
+        "scope": "north",
+        "status": "active",
+        "supplier": "orchard",
+        "version": 1
+      },
+      "leek": {
+        "cents": 305,
+        "id": "leek",
+        "name": "Field leeks",
+        "scope": "north",
+        "status": "active",
+        "supplier": "garden",
+        "version": 1
+      },
+      "pear": {
+        "cents": 610,
+        "id": "pear",
+        "name": "Conference pears",
+        "scope": "north",
+        "status": "active",
+        "supplier": "orchard",
+        "version": 1
+      },
+      "plum": {
+        "cents": 540,
+        "id": "plum",
+        "name": "Damson plums",
+        "scope": "south",
+        "status": "active",
+        "supplier": "farm",
+        "version": 1
+      }
+    },
+    "purchase-orders": {
+      "paper-po-a": {
+        "cents": 410,
+        "day": "2025-04-01",
+        "id": "paper-po-a",
+        "product": "apple",
+        "released": "2025-04-03",
+        "round": "paper-round",
+        "scope": "north",
+        "status": "released",
+        "supplier": "orchard",
+        "units": 3,
+        "version": 1
+      },
+      "paper-po-b": {
+        "cents": 630,
+        "day": "2025-04-02",
+        "id": "paper-po-b",
+        "product": "pear",
+        "released": "2025-04-03",
+        "round": "paper-round",
+        "scope": "north",
+        "status": "released",
+        "supplier": "orchard",
+        "units": 7,
+        "version": 1
+      },
+      "paper-po-s": {
+        "cents": 530,
+        "day": "2025-04-01",
+        "id": "paper-po-s",
+        "product": "plum",
+        "released": "2025-04-02",
+        "round": "paper-south",
+        "scope": "south",
+        "status": "released",
+        "supplier": "farm",
+        "units": 2,
+        "version": 1
+      },
+      "po-a": {
+        "cents": 425,
+        "day": "2025-04-10",
+        "id": "po-a",
+        "product": "apple",
+        "released": null,
+        "round": null,
+        "scope": "north",
+        "status": "draft",
+        "supplier": "orchard",
+        "units": 10,
+        "version": 1
+      },
+      "po-b": {
+        "cents": 430,
+        "day": "2025-04-10",
+        "id": "po-b",
+        "product": "apple",
+        "released": null,
+        "round": null,
+        "scope": "north",
+        "status": "draft",
+        "supplier": "orchard",
+        "units": 6,
+        "version": 1
+      },
+      "po-c": {
+        "cents": 600,
+        "day": "2025-04-10",
+        "id": "po-c",
+        "product": "pear",
+        "released": null,
+        "round": null,
+        "scope": "north",
+        "status": "draft",
+        "supplier": "orchard",
+        "units": 5,
+        "version": 1
+      },
+      "po-g": {
+        "cents": 300,
+        "day": "2025-04-10",
+        "id": "po-g",
+        "product": "leek",
+        "released": null,
+        "round": null,
+        "scope": "north",
+        "status": "draft",
+        "supplier": "garden",
+        "units": 3,
+        "version": 1
+      },
+      "po-s": {
+        "cents": 515,
+        "day": "2025-04-10",
+        "id": "po-s",
+        "product": "plum",
+        "released": null,
+        "round": null,
+        "scope": "south",
+        "status": "draft",
+        "supplier": "farm",
+        "units": 8,
+        "version": 1
+      },
+      "solo-po": {
+        "cents": 305,
+        "day": "2025-04-02",
+        "id": "solo-po",
+        "product": "leek",
+        "released": "2025-04-03",
+        "round": null,
+        "scope": "north",
+        "status": "released",
+        "supplier": "garden",
+        "units": 1,
+        "version": 1
+      }
+    },
+    "suppliers": {
+      "farm": {
+        "id": "farm",
+        "name": "Marsh Farm",
+        "scope": "south",
+        "status": "active",
+        "terms": 10,
+        "version": 1
+      },
+      "garden": {
+        "id": "garden",
+        "name": "Briar Garden",
+        "scope": "north",
+        "status": "active",
+        "terms": 30,
+        "version": 1
+      },
+      "orchard": {
+        "id": "orchard",
+        "name": "June Orchard",
+        "scope": "north",
+        "status": "active",
+        "terms": 15,
+        "version": 1
+      }
+    }
+  }
+}

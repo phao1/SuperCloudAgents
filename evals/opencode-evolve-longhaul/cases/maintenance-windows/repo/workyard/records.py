@@ -1,0 +1,126 @@
+"""Legacy registers and their validated fields, in dependency order."""
+
+from deskcore.fields import (
+    date_field,
+    enum_field,
+    id_field,
+    int_field,
+    optional_date,
+    optional_id,
+    optional_int,
+    optional_text,
+    text_field,
+)
+from deskcore.records import Entity
+
+from . import validation
+
+ENTITIES = (
+    Entity(
+        "depots",
+        "depot",
+        "dépôt",
+        (
+            text_field("name", "public name"),
+            text_field("region", "district name"),
+            int_field("capacity", "workbench capacity", 1, 10000000),
+        ),
+    ),
+    Entity(
+        "tools",
+        "tool model",
+        "outil",
+        (
+            id_field("scope", "desk scope"),
+            text_field("name", "public name"),
+            id_field("kind", "tool category"),
+            int_field("units", "units on hand", 0, 10000000),
+            int_field("cents", "replacement cost", 0, 10000000),
+            enum_field("status", "register status", "ready", "retired"),
+        ),
+        validation.require_scope,
+        ("scope", "kind"),
+    ),
+    Entity(
+        "borrowers",
+        "borrower",
+        "emprunteur",
+        (
+            id_field("scope", "desk scope"),
+            text_field("name", "public name"),
+            enum_field("tier", "membership category", "member", "guest"),
+            enum_field("status", "register status", "active", "inactive"),
+        ),
+        validation.require_scope,
+        ("scope",),
+    ),
+    Entity(
+        "reservations",
+        "reservation",
+        "réservation",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "open", "collected", "cancelled"),
+            id_field("tool", "requested tool"),
+            id_field("borrower", "borrower"),
+            int_field("units", "reserved units", 1, 10000000),
+            optional_id("pickup", "other pickup depot"),
+            optional_date("closed", "collection or cancellation date"),
+        ),
+        validation.reservation,
+        ("scope", "tool", "borrower"),
+    ),
+    Entity(
+        "service-logs",
+        "service log",
+        "entretien",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            date_field("end", "last calendar day"),
+            enum_field("status", "register status", "planned", "done", "void"),
+            id_field("tool", "serviced tool"),
+            int_field("units", "affected units", 1, 10000000),
+            optional_text("outcome", "workshop disposition"),
+            optional_date("result_day", "workshop completion date"),
+        ),
+        validation.service,
+        ("scope", "tool"),
+    ),
+    Entity(
+        "pool-orders",
+        "pool order",
+        "commande mutualisée",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "open", "fulfilled", "cancelled"),
+            id_field("tool", "requested model"),
+            int_field("units", "requested units", 1, 10000000),
+            optional_id("substitute", "fulfilled with this tool"),
+            optional_date("closed", "fulfillment date"),
+        ),
+        validation.pool_order,
+        ("scope", "tool"),
+    ),
+    Entity(
+        "returns",
+        "return intake",
+        "retour",
+        (
+            id_field("scope", "desk scope"),
+            date_field("day", "entry day"),
+            enum_field("status", "register status", "logged", "closed"),
+            id_field("tool", "returned tool"),
+            id_field("borrower", "borrower"),
+            int_field("units", "returned units", 1, 10000000),
+            int_field("damaged", "damaged or missing units", 0, 10000000),
+            int_field("rate", "charge in cents per damaged unit", 0, 10000000),
+            optional_int("allowed", "accepted damaged units", 0),
+            optional_date("settled", "charge review date"),
+        ),
+        validation.return_record,
+        ("scope", "tool", "borrower"),
+    ),
+)

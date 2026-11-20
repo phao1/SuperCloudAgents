@@ -1,0 +1,58 @@
+split: holdout
+category: scheduling
+instruction: |
+  A buyer needs to prepare the next priced period against the exact terms of an active supplier
+  agreement. Managers should see the renewed terms in the market report while existing register
+  readers continue to see both periods.
+
+  - Draft a renewal against an active agreement and supplier, beginning the day after the
+    existing period ends. Check that the new window is ordered and does not overlap any other
+    active agreement for the supplier. Save agreement, supplier, scope, new day/end/cents, and
+    snapshot previous_end and previous_cents. Allow one pending renewal per agreement.
+  - Activate once on or before the effective day with the reviewed supplier ID. Revalidate the
+    old agreement, the supplier, any overlapping agreement and whether the old price or end
+    changed.
+  - Activation sets the old agreement to replaced and adds the new version-one agreement with
+    the renewal ID and previous and activated fields. The original price query continues to
+    return old terms within their original period. The renewal row becomes active with its
+    activation date.
+  - The market report section agreement-rollovers gives awaiting (IDs of draft terms covering
+    the report day) and terms (id, supplier, cents for activated renewals whose dates cover it),
+    each ordered by ID.
+  - Convert old agreements with a predecessor and activation date to active rollovers, looking
+    up the old price and end rather than guessing them. Require linked records for the same
+    supplier and scope with contiguous periods. A broken link aborts conversion as bad_store.
+    Retain version-one data and support a repeatable named upgrade.
+  - Deliver both commands and a scoped list on the shared interfaces with permission checks,
+    translated messages and audit entries.
+
+  Ship the commands as agreement-rollovers draft, agreement-rollovers activate and
+  agreement-rollovers list, with the matching /v1/agreement-rollovers/<action> routes.
+  The minimum roles are operator for draft and manager for activate.
+  Readers can list by scope and optional status (draft, active) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register agreement-rollovers.drafted and agreement-rollovers.activated.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | draft | id (new workflow identifier), agreement (currently active agreement), day (effective calendar day), end (last day of new period), cents (new case price in cents) |
+  | activate | id (existing workflow identifier), supplier (supplier on the reviewed agreement), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are agreement, supplier, day, end, cents, previous_cents, previous_end, activated.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/agreement-rollovers.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

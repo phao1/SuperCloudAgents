@@ -1,0 +1,55 @@
+split: dev
+category: allocation
+instruction: |
+  Workshop coordinators need to take part of a tool model's stock out of circulation while
+  repairs are underway and keep a dated record of the disposition.
+
+  - Schedule units from a ready tool at its home depot. Save tool, units, reason, day and end,
+    with status scheduled and completed and outcome initially unset. Reject reversed intervals.
+    Inclusive scheduled windows for a model may share dates only if the total units blocked on
+    each date fits the model's stock.
+  - Complete a scheduled window once, on or after its start, with outcome ready or quarantined.
+    Keep the planned dates, record the completion day in completed and free its scheduled
+    capacity for future scheduling.
+  - Add maintenance-windows to the desk report with blocked_units for the requested date and
+    quarantined_units accumulated through that date at that depot. A completed allocation still
+    counts as blocked during its original window before its completion day.
+  - Import completed paper service logs as completed windows keyed by the source ID. Map
+    result_day to completed, preserve outcome and use reason paper. Planned and void paper logs
+    stay in the legacy register. A done log without a valid outcome or result date makes the
+    conversion fail with bad_store.
+  - Persist version-two records and make the upgrade repeatable while retaining version-one
+    service logs and portable exports.
+  - Expose both actions and a filtered list on the two interfaces, with workshop role checks,
+    audit and translations.
+
+  Ship the commands as maintenance-windows schedule, maintenance-windows complete and
+  maintenance-windows list, with the matching /v1/maintenance-windows/<action> routes.
+  The minimum roles are operator for schedule and manager for complete.
+  Readers can list by scope and optional status (scheduled, completed) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register maintenance-windows.scheduled and maintenance-windows.completed.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | schedule | id (new workflow identifier), tool (ready tool model), day (effective calendar day), reason (workshop reason code), units (units to block), end (last blocked day) |
+  | complete | id (existing workflow identifier), day (effective calendar day), outcome (workshop result) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are tool, day, end, units, reason, completed, outcome.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/maintenance-windows.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12
