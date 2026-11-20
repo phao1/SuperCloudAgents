@@ -67,8 +67,10 @@ async def read_run(request: Request, run_id: UUID) -> dict:
     try:
         run = await request.app.state.store.for_tenant("eval").get_eval_run(str(run_id))
         metadata = run["variant"].get("case_metadata", {})
+        # NUMERIC columns arrive as Decimal, which JSON would render as long strings.
         return {**run, "split": run["variant"].get("split"),
-                "results": [{**row, **metadata.get(row["case_id"], {})}
+                "results": [{**row, **metadata.get(row["case_id"], {}),
+                             "cost_usd": float(row["cost_usd"] or 0)}
                             for row in run["results"]]}
     except NoResultFound:
         raise HTTPException(404, "Evaluation run not found") from None

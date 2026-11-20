@@ -176,6 +176,8 @@ settings = dict(
     SCA_EGRESS_ALLOW="pypi.org,files.pythonhosted.org",
     SCA_API_TOKENS=f"dev-token:default,{token}:eval:admin",
     SCA_EVAL_API_TOKEN=token, SCA_API_URL="http://127.0.0.1:8000",
+    # Operator token for /v1/admin/* (tenants, plans, cross-tenant usage); kept across setups.
+    SCA_PLATFORM_ADMIN_TOKEN=previous.get("SCA_PLATFORM_ADMIN_TOKEN") or secrets.token_hex(32),
     SCA_PORTAL_LOCAL_CONFIG=str(Path('.env').resolve()),
     SCA_WORKER_METRICS_PORT="9464", SCA_OPENCODE_BUILD_MEMORY="2500m",
     # The brain backend runs `docker exec` itself; reuse the wrapper that falls back to `sg docker`.

@@ -130,9 +130,10 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
-        return JSONResponse(
-            {"error": {"code": "validation_error", "message": str(exc)}}, status_code=422
-        )
+        # str(exc) appends the endpoint's source file and line; keep only field paths and messages.
+        message = "; ".join(".".join(str(part) for part in error.get("loc", ())) + ": " + error.get("msg", "")
+                            for error in exc.errors())
+        return JSONResponse({"error": {"code": "validation_error", "message": message}}, status_code=422)
 
     @app.exception_handler(HTTPException)
     async def http_error(request: Request, exc: HTTPException) -> JSONResponse:
