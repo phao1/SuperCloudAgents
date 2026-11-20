@@ -26,7 +26,7 @@ async def test_default_is_used_by_sandbox_and_turn(tmp_path, monkeypatch, pin):
         get_task=AsyncMock(return_value=task),
         resolve_task_opencode_version=AsyncMock(return_value="2.3.0-sca.2"),
         update_result=AsyncMock(), get_session_id=AsyncMock(return_value=None),
-        append_event=AsyncMock(),
+        append_event=AsyncMock(), get_task_champion=AsyncMock(return_value=None),
     )
     sandbox = SimpleNamespace(create=AsyncMock(return_value="sandbox"))
     for version in ("2.3.0-sca.1", "2.3.0-sca.2", "2.3.0-sca.3"):

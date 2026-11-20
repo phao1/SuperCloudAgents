@@ -92,6 +92,7 @@ async def test_load_task_pins_selection_used_by_sandbox_and_turn(tmp_path):
         get_task=AsyncMock(return_value=task), update_result=update,
         for_tenant=lambda name: platform, pin_task_champion=AsyncMock(side_effect=update),
         get_task_champion=get_pinned,
+        resolve_task_opencode_version=AsyncMock(side_effect=lambda task_id, default: default),
     )
     sandbox = SimpleNamespace(create=AsyncMock(return_value="sandbox"))
     acts = KernelActivities(settings=settings, store=store, sandbox=sandbox, agent=agent,
