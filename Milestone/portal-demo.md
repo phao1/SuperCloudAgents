@@ -149,3 +149,54 @@ make portal-down
 | pi 1.5.2 | 6/6 | 17–39 秒 | 0.0007–0.0047 美元 |
 
 pi 的 chinese-greeting 能通过，是因为预埋缺陷只在 OpenCode 里。pi 跑 bug-clamp 时总时长 752 秒，其中 728 秒是排队，不是 pi 本身慢（原因见 `docs/design-phase4.md` 的负责人验证一节）。在 Portal 的“版本对比”里选两次运行即可对比。
+
+## 9 六期工作台
+
+打开 `/portal`，在「概览」输入租户令牌或 OIDC 访问令牌。成员可提交和审核任务，只读用户可查看任务、分析报告和知识库。租户管理员可以配置工具授权、集成、成员邀请和 API 令牌。连接独立的 `SCA_PLATFORM_ADMIN_TOKEN` 会进入平台管理员身份，该令牌仅保留在当前页面会话中。
+
+### 提交与审核
+
+1. 在「提交任务」填写仓库、基线、指令及准备/验证命令。可以选择模型和 Agent 后端、设置工作区复用及拆分、启用 Best-of-N，或在推送分支后创建 PR。
+2. 展开「设计意图与工单」添加 OpenAPI、项目规则、截图基准、Design Tokens、Figma、GitHub、Jira 或 Linear。文件来源可上传、引用仓库相对路径或填写已上传文件 ID。Figma 和工单使用运维配置的凭证引用。
+3. 在「任务进度」查看 PR 和来源工单、工具和冠军、范围越界事件及已发布补丁的影响。Best-of-N 的人工模式先查看并选择候选补丁，发布后再审核任务。配置了 handd 的 OpenCode 脑手分离任务可观看实时终端输出。
+4. 「数据分析」列出最近的分析任务。打开已发布的报告可看标题、列表、表格、代码和链接，也可从任务详情复制 Markdown 源文。
+
+```text
+POST /v1/tasks  {"kind":"coding","spec":{"repo_url":"https://git.example.org/team/app.git","instruction":"补齐测试","verify_commands":["pytest -q"],"best_of":{"n":2,"select":"human"}}}
+GET  /v1/tasks/{id}/best-of
+POST /v1/tasks/{id}/best-of/select  {"attempt":2}
+GET  /v1/tasks/{id}/impact
+GET  /v1/tasks/{id}/terminal
+```
+
+### 自动演进
+
+使用 `eval` 租户管理员令牌，在「自动演进」选择含开发集和留出集的套件及支持运行时覆盖的 OpenCode 版本。运行详情显示当代冠军与候选的开发集通过率、费用和逐行覆盖差异。启用人工审批时，可用开发集和留出集成绩批准或拒绝晋升，也可以停止运行。
+
+「定期计划」支持新增、编辑、删除和立即运行。「冠军谱系与固化」可回滚到父冠军，提交固化构建并检查相同套件中每个配对样本的验收判定。租户管理员在「租户灰度」填写由评测空间提供的冠军 ID、版本、模型和百分比。在「采集候选」可提交本租户的失败任务，`eval` 管理员可按来源租户筛选并批准发布。
+
+```text
+POST /v1/evolutions  {"suite":"opencode-evolve","agent_version":"2.3.0-sca.1","model":"deepseek-flash","require_approval":true}
+POST /v1/evolution-schedules/{id}/run-now
+PUT  /v1/champions/rollouts  {"agent_version":"2.3.0-sca.1","model":"deepseek-flash","champion_id":"<冠军 UUID>","percent":20}
+POST /v1/champions/{id}/solidify  {}
+POST /v1/evals/harvest/{id}/approve?tenant_id=team-a
+```
+
+### 工具、集成和租户运营
+
+- **工具与知识库**可登记和编辑 MCP 工具，按租户、团队或用户授权。上传文本、Markdown 或从 PDF 提取的文本后，可按关键词搜索并查看文档分块引用。请求头字段填写 OpenBao 引用名称。
+- **集成**可管理 GitHub/Gitea 仓库、工单任务的默认规格及触发标签。复制 webhook 地址后，在代码平台配置 JSON webhook 和签名密钥。该页也列出设计与工单所需的部署凭证名称。
+- **团队与用量**显示租户套餐、月度模型费用、运行和排队额度。成员接受邀请时需使用带已验证邮箱的 OIDC 身份。成员列表显示现有角色，角色变更及移除需要后端接口。新 API 令牌只显示一次，可在列表中吊销。用量按天或按模型查询，CSV 按自然月导出。
+- **平台管理**可创建租户并邀请首位所有者、更新套餐、暂停或恢复新任务提交，并按租户查看平台用量。
+
+```text
+POST /v1/knowledge/search  {"query":"部署流程","k":5}
+GET  /v1/integrations/scm
+POST /v1/tenant/members  {"email":"reader@example.org","role":"viewer"}
+GET  /v1/usage?from=2026-11-01&to=2026-11-30&group_by=model
+GET  /v1/usage/export.csv
+GET  /v1/admin/usage
+```
+
+浏览器使用 `GET /v1/portal/whoami` 决定导航权限，租户管理员使用 `GET /v1/portal/tenant-quota` 读取当前额度。以上请求使用当前工作空间的 Bearer 令牌，平台管理使用独立的管理员令牌。此工作台无需额外数据库迁移。

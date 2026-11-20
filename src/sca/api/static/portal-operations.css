@@ -1,0 +1,50 @@
+.portal-check {
+  display: flex; align-items: center; gap: 8px; width: fit-content;
+}
+.portal-check input { width: auto; min-height: 0; accent-color: var(--accent); }
+.portal-actions { gap: 6px; }
+.portal-actions button { min-height: 32px; padding: 4px 9px; }
+.portal-message, .portal-reason { white-space: pre-wrap; overflow-wrap: anywhere; }
+.portal-problem { color: var(--bad); }
+.portal-wrap, .portal-preline { overflow-wrap: anywhere; }
+.portal-preline { white-space: pre-wrap; }
+.portal-disclosure { padding: 10px 13px; border: 1px solid var(--line); border-radius: 8px; }
+.portal-disclosure > .stack, .portal-disclosure > .fields { padding: 2px 0; }
+.portal-tabs { display: flex; flex-wrap: wrap; gap: 8px; }
+.portal-tabs [aria-current=page] { background: var(--accent-bg); border-color: var(--accent); color: var(--accent); }
+.portal-paths { margin: 0; padding-inline-start: 24px; overflow-wrap: anywhere; }
+.portal-chart { display: block; width: 100%; min-width: 360px; max-width: 760px; }
+.portal-chart text { fill: var(--muted); font: 12px system-ui, sans-serif; }
+.portal-chart .axis { stroke: var(--line); }
+.portal-chart .champion { fill: var(--accent); }
+.portal-chart polyline.champion { fill: none; stroke: var(--accent); stroke-width: 2; }
+.portal-chart .candidate { fill: var(--good); stroke: var(--panel); }
+.portal-chart .cost-bar { fill: var(--accent); }
+.portal-usage-chart { max-height: 360px; }
+.portal-chart-note { display: flex; gap: 14px; flex-wrap: wrap; }
+.portal-chart-note > span::before {
+  content: ''; display: inline-block; width: 8px; height: 8px; margin-inline-end: 4px;
+  border-radius: 50%; background: var(--accent);
+}
+.portal-chart-note > span.candidate::before { background: var(--good); }
+.portal-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(400px, 100%), 1fr)); gap: 12px; }
+.portal-quota { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); gap: 10px; }
+.portal-quota progress { width: 100%; accent-color: var(--accent); }
+.portal-terminal { height: clamp(160px, 34vh, 380px); }
+.markdown { display: grid; gap: 12px; min-width: 0; overflow-wrap: anywhere; }
+.markdown p { color: var(--ink); }
+.markdown ul, .markdown ol { margin: 0; padding-inline-start: 24px; }
+.markdown code { white-space: pre-wrap; background: var(--subtle); padding: 0 .2em; border-radius: 3px; }
+.markdown pre code { padding: 0; }
+.markdown table { min-width: 0; }
+.portal-token-once {
+  padding: 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--accent-bg);
+}
+#task-best-of table, #evolution-runs table, #evolution-candidates table { min-width: 700px; }
+#task-best-of td:nth-child(2), #evolution-candidates td:nth-child(2) { min-width: 155px; }
+#evolution-candidates td:nth-child(4) { min-width: 150px; }
+#evolution-candidates .diff { max-width: min(50vw, 46rem); }
+@media (max-width: 550px) {
+  .portal-form > .fields.two, .portal-disclosure .fields.two { grid-template-columns: minmax(0, 1fr); }
+  #evolution-candidates .diff { max-width: 65vw; }
+}
