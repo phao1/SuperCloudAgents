@@ -156,6 +156,7 @@ class Store:
         spec: dict,
         idempotency_key: str | None,
         actor: str | None = None,
+        initial_result: dict | None = None,  # SCM issue link is committed with the task.
     ) -> tuple[Task, bool]:
         async with self._transaction() as session:
             if self.tenant_id is not None and tenant_id != self.tenant_id:
@@ -205,6 +206,7 @@ class Store:
                 spec=spec,
                 state=TaskState.QUEUED,
                 idempotency_key=idempotency_key,
+                result=initial_result or {},
             )
             stmt = stmt.on_conflict_do_nothing(
                 index_elements=[tasks.c.tenant_id, tasks.c.idempotency_key]
@@ -1644,3 +1646,111 @@ class Store:
                     await self._meter_finished_task(session, row)
                 processed += 1
             last_id = batch[-1]
+    # SCM
+    async def create_scm_integration(self, values: dict) -> dict:
+        from sca.db.schema import scm_integrations
+
+        if self.tenant_id is None:
+            raise ValueError("SCM integration requires a tenant")
+        async with self._transaction() as session:
+            stmt = pg_insert(scm_integrations).values(id=uuid4(), tenant_id=self.tenant_id, **values)
+            row = (await session.execute(
+                stmt.on_conflict_do_nothing().returning(scm_integrations)
+            )).mappings().one_or_none()
+            if row is None:
+                raise ConflictError("仓库或 webhook 密钥引用已用于该租户的 SCM 集成")
+            return dict(row)
+
+    async def list_scm_integrations(self) -> list[dict]:
+        from sca.db.schema import scm_integrations
+
+        async with self._transaction() as session:
+            rows = await session.execute(select(scm_integrations).where(
+                scm_integrations.c.tenant_id == self.tenant_id,
+            ).order_by(scm_integrations.c.created_at, scm_integrations.c.id))
+            return [dict(row) for row in rows.mappings()]
+
+    async def get_scm_integration(self, integration_id: UUID) -> dict:
+        from sca.db.schema import scm_integrations
+
+        async with self._transaction() as session:
+            row = (await session.execute(select(scm_integrations).where(
+                scm_integrations.c.id == integration_id,
+                scm_integrations.c.tenant_id == self.tenant_id,
+            ))).mappings().one_or_none()
+            if row is None:
+                raise NotFoundError("SCM 集成不存在")
+            return dict(row)
+
+    async def replace_scm_integration(self, integration_id: UUID, values: dict) -> dict:
+        from sqlalchemy.exc import IntegrityError
+
+        from sca.db.schema import scm_integrations
+
+        try:
+            async with self._transaction() as session:
+                stmt = update(scm_integrations).where(
+                    scm_integrations.c.id == integration_id,
+                    scm_integrations.c.tenant_id == self.tenant_id,
+                ).values(**values, updated_at=func.now()).returning(scm_integrations)
+                row = (await session.execute(stmt)).mappings().one_or_none()
+                if row is None:
+                    raise NotFoundError("SCM 集成不存在")
+                return dict(row)
+        except IntegrityError:
+            raise ConflictError("仓库或 webhook 密钥引用已用于该租户的 SCM 集成") from None
+
+    async def delete_scm_integration(self, integration_id: UUID) -> None:
+        from sqlalchemy import delete
+
+        from sca.db.schema import scm_integrations
+
+        async with self._transaction() as session:
+            deleted = await session.scalar(delete(scm_integrations).where(
+                scm_integrations.c.id == integration_id,
+                scm_integrations.c.tenant_id == self.tenant_id,
+            ).returning(scm_integrations.c.id))
+            if deleted is None:
+                raise NotFoundError("SCM 集成不存在")
+
+    async def find_scm_integration(
+        self, provider: str, host: str, repo_full_name: str, secret_ref: str,
+    ) -> dict | None:
+        from sca.db.schema import scm_integrations
+
+        async with self._transaction() as session:
+            row = (await session.execute(select(scm_integrations).where(
+                scm_integrations.c.tenant_id == self.tenant_id,
+                scm_integrations.c.provider == provider,
+                scm_integrations.c.host == host,
+                scm_integrations.c.repo_full_name == repo_full_name,
+                scm_integrations.c.webhook_secret_ref == secret_ref,
+                scm_integrations.c.enabled,
+            ))).mappings().one_or_none()
+            return dict(row) if row is not None else None
+
+    async def record_scm_pull_request(
+        self, task_id: str | UUID, pr: dict, *, opened: bool = False,
+    ) -> dict:
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            previous = task["result"].get("pr")
+            if previous and previous["state"] == "merged":
+                return previous
+            if pr != previous:
+                await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+                    result={**task["result"], "pr": pr}, updated_at=func.now(),
+                ))
+            if opened:
+                await self._event(session, task["id"], "pr.opened", pr, "pr.opened")
+            return pr
+
+    async def scm_check_results(self, task_id: str | UUID, turn: int) -> dict[str, dict]:
+        async with self._transaction() as session:
+            task = await self._task(session, task_id)
+            rows = await session.execute(select(events.c.type, events.c.payload).where(
+                events.c.task_id == task["id"],
+                events.c.type.in_(("verification.completed", "ci.completed")),
+                events.c.payload["turn"].astext == str(turn),
+            ).order_by(events.c.seq))
+            return dict(rows.tuples().all())

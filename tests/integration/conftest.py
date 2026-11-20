@@ -43,6 +43,7 @@ async def store():
                     "0015_evolution",
                     "0016_evolution_product",
                     "0020_tenancy_billing",
+                    "0018_scm",
                 ):
                     import_module(f"sca.db.migrations.versions.{revision}").upgrade()
 

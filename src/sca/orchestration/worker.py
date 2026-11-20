@@ -145,7 +145,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         await ensure_maintenance_schedule(client, settings)
     if settings.sandbox_driver == "k8s" and settings.k8s_pool_size:
         await maintenance.replenish_sandbox_pool()  # do not wait an hour for a warm pool
-    kernel = KernelActivities(**{f: getattr(deps, f) for f in deps.__dataclass_fields__})
+    kernel = _kernel_activities(deps)
     backends = {settings.agent_backend: deps.agent}
     for name in ("fake", "codex", "opencode", "opencode-brain", "pi"):
         if name not in backends:
@@ -183,6 +183,13 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + evolution.all() + [builds.build] + evolution_scheduler.all(),
         max_concurrent_activities=8,
     )
+
+
+# SCM
+def _kernel_activities(deps: KindDeps) -> KernelActivities:
+    from sca.kinds.coding.activities import ScmStateActivities
+
+    return ScmStateActivities(**{f: getattr(deps, f) for f in deps.__dataclass_fields__})
 
 
 async def ensure_maintenance_schedule(client: Client, settings: Settings) -> None:

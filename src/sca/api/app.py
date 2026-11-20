@@ -18,7 +18,7 @@ from sca.api.authz import ForbiddenError
 from sca.api.routes import router
 from sca.api.tasks_admission import router as admission_router
 from sca.billing.quota import PlanQuotaExceededError
-from sca.config import get_settings
+from sca.config import Settings, get_settings
 from sca.core.errors import AuthError, ConflictError, InvalidTaskError, NotFoundError
 from sca.core.interfaces import Authenticator, ObjectStore, Orchestrator
 from sca.db.engine import EventListener, make_engine, make_sessionmaker
@@ -214,4 +214,18 @@ def create_app(
     app.state.platform_store = platform_store or app.state.store
     app.include_router(tenancy_router)
     app.include_router(usage_router)
+    _register_scm(app, settings)
     return app
+
+
+# SCM
+def _register_scm(app: FastAPI, settings: Settings) -> None:
+    from sca.api.integrations import router as integrations_router
+    from sca.api.webhooks import router as webhooks_router
+    from sca.scm.service import ScmService
+    from sca.secrets import make_secret_provider
+
+    app.state.scm_settings = settings
+    app.state.scm_service = ScmService(settings, make_secret_provider(settings))
+    app.include_router(integrations_router)
+    app.include_router(webhooks_router)

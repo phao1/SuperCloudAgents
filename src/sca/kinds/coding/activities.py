@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from dataclasses import asdict, dataclass
+from typing import Literal
 
 from temporalio import activity
 from temporalio.exceptions import ApplicationError
@@ -14,12 +15,14 @@ from sca.config import Settings
 from sca.core.errors import InvalidTaskError
 from sca.core.interfaces import AgentBackend
 from sca.core.models import (
+    TERMINAL_STATES,
     AgentContext,
     EventType,
     ExecExit,
     RepoCredential,
     SandboxAdditions,
     Task,
+    TaskState,
     tail,
 )
 from sca.kernel.activities import (
@@ -84,6 +87,17 @@ class CiOutcome:
     summary: str | None = None
     url: str | None = None
     timed_out: bool = False
+
+
+# SCM
+SCM_ATTEMPTS = 3
+ScmPhase = Literal["review", "approve", "reject", "terminal"]
+
+
+@dataclass
+class ScmInput:
+    task_id: str
+    phase: ScmPhase
 
 
 def commit_message(subject: str, task_id: str) -> str:
@@ -157,6 +171,7 @@ class CodingActivities(KernelActivities):
             self.publish,
             self.request_ci,
             self.record_ci,
+            self.sync_scm,
         ]
 
     @activity.defn(name="coding.prepare_mirror")
@@ -564,7 +579,7 @@ class CodingActivities(KernelActivities):
         patch = (await ws.diff(task.result["base_sha"])).encode("utf-8", "replace")
         await self._publish_artifact(task_id, PATCH_ARTIFACT, patch, "text/x-diff")
         pushed = False
-        if spec.push and patch:
+        if spec.push and (patch or task.result.get("pr")):
             await ws.push(spec.repo_url, await self._repo_credential(task.tenant_id, spec.repo_url))
             pushed = True
         await self.store.update_result(
@@ -614,6 +629,45 @@ class CodingActivities(KernelActivities):
                 ):
                     if isinstance(ev, ExecExit) and ev.exit_code:
                         raise ApplicationError(f"could not install {name} in sandbox")
+
+    # SCM
+    @activity.defn(name="coding.sync_scm")
+    async def sync_scm(self, inp: ScmInput) -> None:
+        from sca.scm.provider import ScmError
+        from sca.scm.service import ScmService
+
+        task = await self.store.get_task(inp.task_id)
+        store = self.store.for_tenant(task.tenant_id)
+        service = ScmService(self.settings, self.secrets)
+        try:
+            if inp.phase == "review":
+                await service.open_for_review(store, task)
+            elif inp.phase == "terminal":
+                await service.comment_outcome(task)
+            else:
+                await service.record_review(store, task, inp.phase)
+        except ScmError as exc:
+            retryable = exc.status is None or exc.status in {405, 408, 429} or exc.status >= 500
+            if retryable and activity.in_activity() and activity.info().attempt < SCM_ATTEMPTS:
+                raise ApplicationError(str(exc)) from None
+            await store.append_event(
+                task.id, "scm.failed", {"phase": inp.phase, "message": str(exc)},
+                dedup_key=f"scm.{inp.phase}.{task.result.get('turns', 0)}.failed",
+            )
+
+
+class ScmStateActivities(KernelActivities):
+    @activity.defn(name="set_state")
+    async def set_state(self, inp: SetStateInput) -> bool | None:
+        await super().set_state(inp)
+        if inp.state not in TERMINAL_STATES and inp.state != TaskState.AWAITING_REVIEW:
+            return None
+        task = await self.store.get_task(inp.task_id)
+        if task.kind != "coding":
+            return None
+        if inp.state == TaskState.AWAITING_REVIEW:
+            return True if task.spec.get("pull_request") is not None else None
+        return True if "issue" in task.result else None
 
 
 __all__ = [
