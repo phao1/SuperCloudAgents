@@ -1,0 +1,7 @@
+name: opencode-evolve-expert
+kind: coding
+description: 专家级工程演进基准，14 个开发用例与 6 个留出用例，覆盖跨层修复、协议兼容、状态一致性和数据边界。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 900
+  memory_enabled: false

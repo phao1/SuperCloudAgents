@@ -1,0 +1,10 @@
+split: holdout
+category: data-build
+instruction: |
+  The settlement partner sends decimals now and we have desks on
+          both sides of the archive cutover. Implement the exchange handoff so
+          they can transfer funds recorded in the non-cent currencies too.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

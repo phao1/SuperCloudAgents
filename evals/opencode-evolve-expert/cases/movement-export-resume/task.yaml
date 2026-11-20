@@ -1,0 +1,10 @@
+split: dev
+category: pipeline-debug
+instruction: |
+  Finance wants to resume an activity export if a shift changes
+          while it's running. Add the handoff from the export memo. The old
+          activity command is in several unattended scripts.
+
+  Keep README.md, docs/, the existing tests/, and verify.py unchanged. Keep stockroom/schema.sql unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12
