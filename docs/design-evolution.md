@@ -86,3 +86,88 @@
    - 至少有一次真实的晋升或拒绝决定，并且有留出集证据；
    - 全程没有构建 OpenCode。
 3. 已有回归全部通过；默认行为不变（不传覆盖内容时，任务与现在完全相同）。
+
+## 6 产品化
+
+部署时应用迁移 `0016`，再重启 API 和 Worker。令牌通过环境变量提供。下列示例用
+`$TOKEN` 表示租户管理员令牌，用 `$EVAL_ADMIN_TOKEN` 表示 `eval` 租户管理员令牌。
+
+### 6.1 任务使用冠军与灰度回滚
+
+任务规格中的 `agent_overlay` 优先。普通 OpenCode 任务省略 `use_champion` 或传
+`null` 时，按任务 ID 的 SHA-256 值取模 100 进行灰度分桶。系统先查租户在该版本和
+模型上的灰度，再查 `eval` 租户的平台默认值。没有配置或分桶未命中时使用基线。
+`use_champion: true` 使用当前活跃冠军，`false` 跳过冠军。未选择冠军的常规评测默认
+测量基线。任务启动时固定选择，`task.result` 和 `champion.applied` 事件记录冠军 ID
+与覆盖内容的 SHA-256。
+
+```bash
+curl -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"coding","spec":{"repo_url":"https://example.com/repo.git","instruction":"修复解析边界",
+       "agent_backend":"opencode","model":"deepseek-flash","verify_command":"pytest -q","use_champion":true}}' \
+  "$API/v1/tasks"
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/champions/rollouts"
+curl -X PUT -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"agent_version\":\"2.3.0-sca.1\",\"model\":\"deepseek-flash\",\"champion_id\":\"$CHAMPION_ID\",\"percent\":20}" \
+  "$API/v1/champions/rollouts"
+curl -X POST -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" \
+  "$API/v1/champions/$CHAMPION_ID/rollback"
+```
+
+灰度接口的范围是令牌所在租户。使用 `eval` 管理员令牌设置平台默认值，使用
+`GET /v1/champions` 查看冠军 ID。回滚会激活父冠军，并逐条把指向原冠军的所有租户
+灰度改为指向父冠军，保留各自百分比。操作记录在 `evolution_events`。
+
+### 6.2 定期评测与自动演进
+
+Worker 启动时注册 Temporal 定时任务，每 5 分钟检查到期计划。Worker 使用
+`SCA_EVAL_API_TOKEN` 提交评测任务。计划要求套件同时包含 `dev` 和 `holdout`，
+并在 `dev` 集评测当前活跃冠军，首个冠军晋升前测量基线。评测完成后，通过率低于
+`threshold`、上次同一套件和版本模型的样本本次从通过变为失败（按用例和重复序号
+配对），或启用 `always`，任一条件满足就启动演进。演进单独使用计划中的预算，
+并沿用留出集门禁和可选的人工审批。配置 `auto_rollout_percent` 时，每次晋升都会
+更新平台默认灰度。
+
+```bash
+curl -X POST -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"suite":"opencode-evolve","split":"dev","agent_version":"2.3.0-sca.1","model":"deepseek-flash",
+       "interval_hours":24,"threshold":0.8,"enabled":true,"always":false,
+       "config":{"generations":2,"budget_usd":3},"auto_rollout_percent":20}' \
+  "$API/v1/evolution-schedules"
+curl -X POST -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" \
+  "$API/v1/evolution-schedules/$SCHEDULE_ID/run-now"
+curl -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" "$API/v1/evolution-schedules/$SCHEDULE_ID"
+```
+
+`GET /v1/evolution-schedules` 列出计划，`PUT /v1/evolution-schedules/{id}` 提交完整
+配置，`DELETE /v1/evolution-schedules/{id}` 删除计划。计划详情记录最近一次启动时间、
+评测 ID 和触发的演进 ID。`run-now` 可手动执行已停用的计划，同一计划正在评测时返回
+`409`。
+
+### 6.3 从失败任务采集评测用例
+
+租户管理员可提交本租户失败或被人工拒绝的真实编码任务。系统优先从可信镜像读取
+任务的基线提交，镜像不可用时按原仓库和基线重新获取。候选暂存在
+`SCA_DATA_DIR/harvest/<id>/`。可提供独立的 `acceptance_command`，省略时验收会执行
+任务中的全部验证命令。选择 `holdout` 的用例只用于留出集，提议模型只接收开发集证据。
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d "{\"task_id\":\"$TASK_ID\",\"suite\":\"opencode-harvested\",\"split\":\"holdout\",\"notes\":\"边界条件回归\"}" \
+  "$API/v1/evals/harvest"
+curl -H "Authorization: Bearer $TOKEN" "$API/v1/evals/harvest"
+curl -X POST -H "Authorization: Bearer $EVAL_ADMIN_TOKEN" \
+  "$API/v1/evals/harvest/$CANDIDATE_ID/approve?tenant_id=team-a"
+```
+
+`eval` 管理员可用 `?tenant_id=team-a` 查看指定租户提交的待审候选，并检查暂存目录。
+审批通过后写入 `evals/<suite>/cases/<case-id>/`（根目录可由 `SCA_EVAL_SUITES_DIR`
+配置），包含 `task.yaml`、`repo/`、
+`acceptance.yaml` 和 `acceptance/`，新套件会同时生成 `suite.yaml`。提交租户的
+管理员或 `eval` 管理员可调用 `POST /v1/evals/harvest/{id}/reject` 拒绝待审候选。
+
+### 6.4 验证
+
+单测覆盖任务启动时固定冠军、灰度分桶、定时评测触发条件、采集文件布局和留出集
+隔离。迁移 `0016` 已离线生成 SQL。开发沙箱拒绝 Postgres 和 Temporal 连接，真实
+数据库的行级安全与定时工作流尚待集成环境验证。

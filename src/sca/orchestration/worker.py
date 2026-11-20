@@ -32,6 +32,11 @@ from sca.db.repo import Store
 from sca.eval.activities import EvalActivities
 from sca.eval.workflow import EvalRunWorkflow
 from sca.evolve.activities import EvolutionActivities
+from sca.evolve.scheduler import (
+    EvolutionSchedulerActivities,
+    EvolutionSchedulerWorkflow,
+    ensure_evolution_scheduler,
+)
 from sca.evolve.workflow import EvolutionWorkflow
 from sca.kernel.activities import KernelActivities
 from sca.kernel.kind import KindDeps
@@ -168,12 +173,14 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
     builds = OpenCodeBuildActivities(settings)
     evaluation = EvalActivities(settings, store)
     evolution = EvolutionActivities(settings, store, deps.gateway)
+    # Evolution productization
+    evolution_scheduler = EvolutionSchedulerActivities(settings, store)
     return Worker(
         client,
         identity=deps.worker_identity,
         task_queue=settings.task_queue,
-        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow, EvolutionWorkflow],
-        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + evolution.all() + [builds.build],
+        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow, EvolutionWorkflow, EvolutionSchedulerWorkflow],
+        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + evolution.all() + [builds.build] + evolution_scheduler.all(),
         max_concurrent_activities=8,
     )
 
@@ -232,6 +239,7 @@ async def main() -> None:
     assert main_task is not None
     loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
     try:
+        await ensure_evolution_scheduler(client, settings)
         await (await build_worker(client, settings)).run()
     finally:
         try:

@@ -1,4 +1,4 @@
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -1045,7 +1045,10 @@ class Store:
             return [dict(r) for r in (await session.execute(query.order_by(
                 champions.c.created_at.desc()))).mappings()]
 
-    async def activate_champion(self, champion_id: str, values: dict | None = None) -> dict:
+    async def activate_champion(
+        self, champion_id: str, values: dict | None = None, *,
+        rollout: tuple[int, str] | None = None,
+    ) -> dict:
         from sca.db.schema import champions
 
         async with self._transaction() as session:
@@ -1055,19 +1058,20 @@ class Store:
                     champions.c.tenant_id == self.tenant_id))).mappings().one())
             else:
                 target = {**values, 'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
-            # Serialize even the first promotion, where there is no active row to lock.
-            lock_key = f"{self.tenant_id}:{target['agent_version']}:{target['model']}"
-            await session.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))'),
-                                  {'key': lock_key})
-            await session.execute(update(champions).where(
-                champions.c.tenant_id == self.tenant_id,
-                champions.c.agent_version == target['agent_version'],
-                champions.c.model == target['model'], champions.c.active).values(active=False))
+            await self._lock_champion(session, self.tenant_id, target)
             if values is not None:
-                await session.execute(pg_insert(champions).values(**target, active=False).on_conflict_do_nothing())
-            return dict((await session.execute(update(champions).where(
-                champions.c.id == task_uuid(champion_id), champions.c.tenant_id == self.tenant_id
-            ).values(active=True).returning(champions))).mappings().one())
+                inserted = await session.scalar(pg_insert(champions).values(
+                    **target, active=False).on_conflict_do_nothing().returning(champions.c.id))
+                if inserted is None:
+                    # A retry of a committed promotion must leave subsequent rollbacks intact.
+                    return dict((await session.execute(select(champions).where(
+                        champions.c.id == target['id'],
+                        champions.c.tenant_id == self.tenant_id))).mappings().one())
+            row = await self._switch_active_champion(session, target)
+            if rollout is not None:
+                percent, actor = rollout
+                await self._write_champion_rollout(session, row, percent, actor)
+            return row
 
     async def get_active_champion(self, agent_version: str, model: str) -> dict | None:
         rows = await self.list_champions(agent_version, model)
@@ -1082,3 +1086,271 @@ class Store:
             ).order_by(events.c.seq.desc()).limit(8))).scalars().all()
             return [{k: str(payload[k])[-1000:] for k in ('command', 'output_tail') if k in payload}
                     for payload in reversed(found)]
+
+    # Evolution productization
+
+    async def get_champion(self, champion_id: UUID | str) -> dict | None:
+        from sca.db.schema import champions
+
+        async with self._transaction() as session:
+            row = (await session.execute(select(champions).where(
+                champions.c.id == task_uuid(champion_id),
+                champions.c.tenant_id == self.tenant_id))).mappings().first()
+            return dict(row) if row is not None else None
+
+    async def pin_task_champion(self, task_id: str, selection: dict | None) -> None:
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, lock=True)
+            if "champion_id" in task["result"]:
+                return
+            chosen = selection or {"champion_id": None}
+            await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+                result={**task["result"], **chosen}, updated_at=func.now()))
+            if selection is not None:
+                await self._event(session, task["id"], "champion.applied", selection, "champion.applied")
+
+    async def get_task_champion(self, task_id: str) -> dict | None:
+        champion_id = (await self.get_task(task_id)).result.get("champion_id")
+        if champion_id is None:
+            return None
+        champion = await self.for_tenant("eval").get_champion(champion_id)
+        if champion is None:
+            raise NotFoundError("Pinned champion not found")
+        return champion
+
+    @staticmethod
+    async def _lock_champion(session: AsyncSession, tenant_id: str | None, target: dict) -> None:
+        # Serialize changes by version and model, including the first promotion.
+        key = f"{tenant_id}:{target['agent_version']}:{target['model']}"
+        await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                              {"key": key})
+
+    async def _switch_active_champion(self, session: AsyncSession, target: dict) -> dict:
+        from sca.db.schema import champions
+
+        await session.execute(update(champions).where(
+            champions.c.tenant_id == self.tenant_id, champions.c.active,
+            champions.c.agent_version == target["agent_version"], champions.c.model == target["model"],
+            champions.c.id != target["id"]).values(active=False))
+        return dict((await session.execute(update(champions).where(
+            champions.c.id == target["id"], champions.c.tenant_id == self.tenant_id
+        ).values(active=True).returning(champions))).mappings().one())
+
+    async def list_champion_rollouts(self) -> list[dict]:
+        from sca.db.schema import champion_rollouts
+
+        c = champion_rollouts.c
+        async with self._transaction() as session:
+            return [dict(row) for row in (await session.execute(select(champion_rollouts).where(
+                c.tenant_id == self.tenant_id).order_by(c.agent_version, c.model))).mappings()]
+
+    async def get_champion_rollout(self, agent_version: str, model: str) -> dict | None:
+        from sca.db.schema import champion_rollouts
+
+        c = champion_rollouts.c
+        async with self._transaction() as session:
+            row = (await session.execute(select(champion_rollouts).where(
+                c.tenant_id == self.tenant_id, c.agent_version == agent_version,
+                c.model == model))).mappings().first()
+            return dict(row) if row is not None else None
+
+    async def put_champion_rollout(
+        self, agent_version: str, model: str, champion_id: UUID, percent: int, actor: str,
+    ) -> dict:
+        champion = await self.for_tenant("eval").get_champion(champion_id)
+        if champion is None or (champion["agent_version"], champion["model"]) != (agent_version, model):
+            raise NotFoundError("该版本和模型的冠军不存在")
+        async with self._transaction() as session:
+            await self._lock_champion(session, "eval", champion)
+            return await self._write_champion_rollout(session, champion, percent, actor)
+
+    async def _write_champion_rollout(
+        self, session: AsyncSession, champion: dict, percent: int, actor: str,
+    ) -> dict:
+        from sca.db.schema import champion_rollouts, evolution_events
+
+        c = champion_rollouts.c
+        key = {"tenant_id": self.tenant_id, "agent_version": champion["agent_version"],
+               "model": champion["model"]}
+        values = {"champion_id": champion["id"], "percent": percent, "updated_by": actor}
+        statement = pg_insert(champion_rollouts).values(**key, **values).on_conflict_do_update(
+            index_elements=[c.tenant_id, c.agent_version, c.model],
+            set_={**values, "updated_at": func.now()},
+            where=(c.champion_id != champion["id"]) | (c.percent != percent))
+        row = (await session.execute(statement.returning(champion_rollouts))).mappings().first()
+        if row is None:
+            return dict((await session.execute(select(champion_rollouts).filter_by(**key))).mappings().one())
+        await session.execute(insert(evolution_events).values(
+            tenant_id=self.tenant_id, type="rollout.updated", actor=actor, payload={
+                "agent_version": key["agent_version"], "model": key["model"],
+                "champion_id": str(champion["id"]), "percent": percent,
+            }))
+        return dict(row)
+
+    async def rollback_champion(self, champion_id: UUID, actor: str) -> dict:
+        from sca.db.schema import evolution_events
+
+        if self.tenant_id != "eval":
+            raise NotFoundError("冠军记录不存在")
+        child = await self.get_champion(champion_id)
+        if child is None:
+            raise NotFoundError("冠军记录不存在")
+        parent_id = child["parent_champion_id"]
+        parent = await self.get_champion(parent_id) if parent_id is not None else None
+        if parent is None or (parent["agent_version"], parent["model"]) != (
+            child["agent_version"], child["model"]
+        ):
+            raise ConflictError("该冠军没有可回滚的父冠军")
+        async with self._transaction() as session:
+            await self._lock_champion(session, self.tenant_id, child)
+            row = await self._switch_active_champion(session, parent)
+            count = await session.scalar(text(
+                "SELECT retarget_champion_rollouts(:champion, :actor)"
+            ), {"champion": champion_id, "actor": actor})
+            await session.execute(insert(evolution_events).values(
+                tenant_id=self.tenant_id, type="champion.rolled_back", actor=actor, payload={
+                    "previous_champion_id": str(champion_id), "champion_id": str(parent_id),
+                    "rollouts_updated": count,
+                }))
+            return row
+
+    @staticmethod
+    def _schedule_due(now: datetime) -> Any:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        elapsed_hours = func.extract("epoch", now - c.last_run_at) / 3600
+        return c.enabled & (c.last_run_at.is_(None) | (elapsed_hours >= c.interval_hours))
+
+    async def due_evolution_schedules(self, now: datetime) -> list[UUID]:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            return list((await session.scalars(select(c.id).where(
+                c.tenant_id == self.tenant_id, self._schedule_due(now)).order_by(c.id))).all())
+
+    async def create_evolution_schedule(self, values: dict) -> dict:
+        from sca.db.schema import evolution_schedules
+
+        async with self._transaction() as session:
+            row = (await session.execute(insert(evolution_schedules).values(
+                **values, id=uuid4(), tenant_id=self.tenant_id,
+            ).returning(evolution_schedules))).mappings().one()
+            return dict(row)
+
+    async def list_evolution_schedules(self) -> list[dict]:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            return [dict(row) for row in (await session.execute(select(evolution_schedules).where(
+                c.tenant_id == self.tenant_id).order_by(c.suite, c.id))).mappings()]
+
+    async def get_evolution_schedule(self, schedule_id: UUID) -> dict:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            row = (await session.execute(select(evolution_schedules).where(
+                c.id == schedule_id, c.tenant_id == self.tenant_id))).mappings().first()
+            if row is None:
+                raise NotFoundError("演进计划不存在")
+            return dict(row)
+
+    async def update_evolution_schedule(self, schedule_id: UUID, values: dict) -> dict:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            row = (await session.execute(update(evolution_schedules).where(
+                c.id == schedule_id, c.tenant_id == self.tenant_id
+            ).values(**values).returning(evolution_schedules))).mappings().first()
+            if row is None:
+                raise NotFoundError("演进计划不存在")
+            return dict(row)
+
+    async def delete_evolution_schedule(self, schedule_id: UUID) -> None:
+        from sqlalchemy import delete
+
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            deleted = await session.scalar(delete(evolution_schedules).where(
+                c.id == schedule_id, c.tenant_id == self.tenant_id).returning(c.id))
+            if deleted is None:
+                raise NotFoundError("演进计划不存在")
+
+    async def claim_evolution_schedule(self, schedule_id: UUID, now: datetime, force: bool) -> dict | None:
+        from sca.db.schema import evolution_schedules
+
+        c = evolution_schedules.c
+        stmt = select(evolution_schedules).where(c.id == schedule_id, c.tenant_id == self.tenant_id)
+        if not force:
+            stmt = stmt.where((c.last_run_at == now) | self._schedule_due(now))
+        async with self._transaction() as session:
+            row = (await session.execute(stmt.with_for_update())).mappings().first()
+            if row is None:
+                return None
+            await session.execute(update(evolution_schedules).where(
+                c.id == schedule_id, c.tenant_id == self.tenant_id).values(last_run_at=now))
+            return dict(row)
+
+    async def record_evolution_schedule_run(
+        self, schedule_id: UUID, run_id: UUID, evolution: dict | None,
+    ) -> bool:
+        from sca.db.schema import evolution_schedules, evolutions
+
+        c = evolution_schedules.c
+        async with self._transaction() as session:
+            conditions = (c.id == schedule_id, c.tenant_id == self.tenant_id)
+            if await session.scalar(select(c.id).where(*conditions).with_for_update()) is None:
+                return False
+            values = {"last_eval_run_id": run_id}
+            if evolution is not None:
+                await session.execute(pg_insert(evolutions).values(
+                    **evolution, tenant_id=self.tenant_id).on_conflict_do_nothing())
+                values["last_evolution_id"] = evolution["id"]
+            await session.execute(update(evolution_schedules).where(*conditions).values(**values))
+            return True
+
+    async def create_harvest_candidate(self, values: dict) -> dict:
+        from sca.db.schema import harvest_candidates
+
+        async with self._transaction() as session:
+            await self._task(session, values["task_id"])
+            row = (await session.execute(insert(harvest_candidates).values(
+                **values, tenant_id=self.tenant_id).returning(harvest_candidates))).mappings().one()
+            return dict(row)
+
+    async def list_harvest_candidates(self) -> list[dict]:
+        from sca.db.schema import harvest_candidates
+
+        c = harvest_candidates.c
+        async with self._transaction() as session:
+            return [dict(row) for row in (await session.execute(select(harvest_candidates).where(
+                c.tenant_id == self.tenant_id).order_by(c.created_at.desc(), c.id))).mappings()]
+
+    async def review_harvest_candidate(
+        self, candidate_id: UUID, status: str, actor: str,
+        publish: Callable[[dict], Awaitable[None]] | None = None,
+    ) -> dict:
+        from sca.db.schema import harvest_candidates
+
+        c = harvest_candidates.c
+        async with self._transaction() as session:
+            conditions = (c.id == candidate_id, c.tenant_id == self.tenant_id)
+            row = (await session.execute(select(harvest_candidates).where(
+                *conditions).with_for_update())).mappings().first()
+            if row is None:
+                raise NotFoundError("采集候选不存在")
+            if row["status"] == status:
+                return dict(row)
+            if row["status"] != "pending":
+                raise ConflictError("采集候选已审核")
+            if publish is not None:
+                await publish(dict(row))
+            return dict((await session.execute(update(harvest_candidates).where(*conditions).values(
+                status=status, reviewed_by=actor, reviewed_at=func.now()
+            ).returning(harvest_candidates))).mappings().one())

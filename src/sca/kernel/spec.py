@@ -30,6 +30,9 @@ class CommonSpec(BaseModel):
     # Admission class (src/sca/admission); set by the API or the eval runner.
     priority: Literal["interactive", "eval", "batch"] = "interactive"
 
+    # Evolution productization
+    use_champion: bool | None = None
+
     @model_validator(mode="after")
     def acceptance_pair(self) -> "CommonSpec":
         if bool(self.acceptance_files) != bool(self.acceptance_command):
