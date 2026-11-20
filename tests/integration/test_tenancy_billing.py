@@ -270,3 +270,9 @@ async def test_operator_bootstraps_a_tenant_admin_token_without_oidc(commercial_
     member = await client.post("/v1/tenant/tokens", headers=owner, json={"name": "CI", "role": "member"})
     assert member.status_code == 201
     assert (await client.get("/v1/tenant/tokens", headers=TENANT)).json() == []
+
+
+async def test_plan_limits_are_json_numbers(commercial_api):
+    client, _, _ = commercial_api
+    plans = {p["name"]: p for p in (await client.get("/v1/admin/plans", headers=PLATFORM)).json()}
+    assert plans["free"]["monthly_cost_limit_usd"] == 10 and plans["enterprise"]["max_task_cost_usd"] is None

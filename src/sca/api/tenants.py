@@ -84,7 +84,9 @@ async def issue_tenant_token(
 
 @router.get("/admin/plans")
 async def list_plans(store: PlatformStore) -> list[dict[str, Any]]:
-    return await store.list_plans()
+    from sca.billing.report import _json_numbers
+
+    return [_json_numbers(plan) for plan in await store.list_plans()]
 
 
 @router.get("/tenant")
