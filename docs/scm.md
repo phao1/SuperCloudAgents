@@ -68,3 +68,8 @@ JSON
 管理员可用 `GET /v1/integrations/scm` 列出集成，并在 `/v1/integrations/scm/{id}` 使用 `GET` 查看、`PUT` 替换整条配置、`DELETE` 删除。将 `enabled` 设为 `false` 可暂停触发。工单任务使用仓库默认分支，也可通过 `default_spec.base_ref` 覆盖。`default_spec` 还支持 `verify_commands` 和 `image`。
 
 成功触发后，webhook 返回 HTTP 202 和 `task_id`。任务保存 `task.result.issue`。结束时，SCA 在原工单留言报告结果，已生成 PR 时附上链接。
+
+## 现场验证（2026-11-21）
+
+- GitHub：GitHub App + OpenBao 凭证，任务推送分支后自动建 PR（含验证结果、费用、Portal 链接），平台批准后在 PR 上留言。
+- Gitea 1.22（本机容器）：带 `sca` 标签的新工单经 webhook 自动建任务 → 验证通过 → 自动建 PR → 批准后在 PR 留言、在工单回写结果和 PR 链接；工单评论 `/sca run …` 再次触发任务，评论文字附加到指令。
