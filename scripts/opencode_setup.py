@@ -38,7 +38,7 @@ async def setup(execute_docker: bool) -> None:
     bare = Path(settings.opencode_repo_url)
     if not bare.exists():
         bare.parent.mkdir(parents=True, exist_ok=True)
-        # A fresh three-commit history (snapshot, planted defect, runtime overlay): the repo
+        # A fresh three-commit history (snapshot, planted defect, overlays): the repo
         # cache refuses shallow references, and the full upstream history is ~700 MB.
         with tempfile.TemporaryDirectory(dir=root) as temporary:
             work = Path(temporary) / "src"
@@ -76,8 +76,9 @@ async def setup(execute_docker: bool) -> None:
                 ],
                 log,
             )
-            overlay = Path(__file__).resolve().parents[1] / "deploy/opencode/sca-overlay.patch"
-            await run_command(["git", "-C", str(work), "apply", str(overlay)], log)
+            patches = Path(__file__).resolve().parents[1] / "deploy/opencode"
+            for name in ("sca-overlay.patch", "sca-overlay-default.patch"):
+                await run_command(["git", "-C", str(work), "apply", str(patches / name)], log)
             await run_command(["git", "-C", str(work), "add", "packages/core"], log)
             await run_command(
                 ["git", "-C", str(work), *identity, "commit", "-q", "-m",

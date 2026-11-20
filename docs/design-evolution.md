@@ -67,7 +67,46 @@
 
 - 冠军注册表记录：覆盖内容、所属基线版本、开发集和留出集成绩、谱系（父冠军、所在代）。
 - 普通任务可以选择使用冠军覆盖内容（选项 `use_champion`），默认不变。
-- 固化：慢通道把冠军的系统提示词写进 `system.txt`，构建成正式版本 `2.3.0-sca.N`，在全量基准上回归通过后成为默认版本（Phase 5b）。
+
+#### 固化与默认版本
+
+部署时执行数据库迁移 `0017`，更新 API 和 Worker。Worker 使用已配置的 `SCA_EVAL_API_TOKEN`
+提交评测任务。在已有的 OpenCode 裸仓库上，可运行
+`python scripts/opencode_overlay_upgrade.py` 为 `main` 添加编译时覆盖支持。新安装会应用两层补丁。
+
+使用 `eval` 租户的管理员令牌提交固化，接口返回 HTTP 202 和构建记录。Worker 从冠军基线版本
+的提交创建 `sca/champion-<短 ID>` 分支，把覆盖内容写入 `sca-default-overlay.json`，再通过常规
+构建流程注册新版本。运行时按字段选用环境变量所指文件中的覆盖、编译时覆盖、OpenCode 内置文本。
+工具描述按工具名选用，基线已有的编译时覆盖也按同一优先级继承。已支持运行时覆盖的旧基线会在
+固化提交中补上编译时覆盖支持。
+
+```bash
+curl -fsS -X POST "$SCA_API_URL/v1/champions/$CHAMPION_ID/solidify" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" \
+  -H "Content-Type: application/json" --data '{"notes":"固化冠军覆盖"}'
+curl -fsS "$SCA_API_URL/v1/champions/$CHAMPION_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+构建成功后会评测两次完整的原始套件，包含全部分组。两次都沿用原评测的模型、重复次数、
+并发度和单题预算，每次的总预算覆盖该套件的全部重复用例。套件变更时，恢复原内容后再提交。
+从 `solidify_builds` 中取得 `overlay_eval_run_id`（基线版本加运行时覆盖）和
+`solidified_eval_run_id`（新版本），等 `regression_status` 为 `completed` 后在评测对比接口查看
+逐题通过率、轮数和成本。管理员确认结果后，可将已构建的版本设为平台默认版本。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evals/compare?a=$OVERLAY_RUN_ID&b=$SOLIDIFIED_RUN_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS -X POST "$SCA_API_URL/v1/agents/opencode/versions/$VERSION/default" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+OpenCode 任务首次分配沙箱时，优先使用任务指定的 `agent_version`，其次使用平台默认版本，
+最后使用 `SCA_OPENCODE_DEFAULT_VERSION`。任务在后续轮次继续使用首次选定的版本。
+要切回上一版本，用同一接口指定该版本。
+
+本地测试使用临时裸仓库和模拟构建、评测，覆盖基线提交、评测配对及版本选择。Bun、实际构建和
+模型评测尚待现场验证。Postgres 集成测试在连接受限的沙箱中跳过。
 
 ## 3 分工（分支 `evolve`）
 

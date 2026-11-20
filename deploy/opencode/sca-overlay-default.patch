@@ -1,0 +1,129 @@
+diff --git a/packages/core/src/sca-default-overlay.json b/packages/core/src/sca-default-overlay.json
+new file mode 100644
+index 0000000..0967ef4
+--- /dev/null
++++ b/packages/core/src/sca-default-overlay.json
+@@ -0,0 +1 @@
++{}
+diff --git a/packages/core/src/sca-overlay.ts b/packages/core/src/sca-overlay.ts
+index 2915b83..b9eb5df 100644
+--- a/packages/core/src/sca-overlay.ts
++++ b/packages/core/src/sca-overlay.ts
+@@ -1,4 +1,5 @@
+ import { readFileSync } from "node:fs"
++import embedded from "./sca-default-overlay.json" with { type: "json" }
+
+ type Overlay = {
+   system_prompt?: string
+@@ -6,14 +7,14 @@ type Overlay = {
+   tool_descriptions?: Record<string, string>
+ }
+
+-export function load(): Overlay {
++export function load(defaults: Overlay = embedded): Overlay {
+   const path = process.env.SCA_AGENT_OVERLAY
+-  if (!path) return {}
++  if (!path) return { ...defaults }
+   let text: string
+   try {
+     text = readFileSync(path, "utf8")
+   } catch {
+-    return {}
++    return { ...defaults }
+   }
+   let value: unknown
+   try {
+@@ -33,10 +34,17 @@ export function load(): Overlay {
+       (typeof descriptions !== "object" || descriptions === null || Array.isArray(descriptions) ||
+        Object.values(descriptions).some((value) => typeof value !== "string")))
+     throw new Error("SCA_AGENT_OVERLAY: tool_descriptions must contain strings")
+-  return overlay
++  if (defaults.tool_descriptions && descriptions) {
++    return {
++      ...defaults,
++      ...overlay,
++      tool_descriptions: { ...defaults.tool_descriptions, ...descriptions },
++    }
++  }
++  return { ...defaults, ...overlay }
+ }
+
+-export function description(name: string, fallback: string): string {
+-  const descriptions = load().tool_descriptions
++export function description(name: string, fallback: string, overlay = load()): string {
++  const descriptions = overlay.tool_descriptions
+   return descriptions && Object.hasOwn(descriptions, name) ? descriptions[name]! : fallback
+ }
+diff --git a/packages/core/test/sca-overlay.test.ts b/packages/core/test/sca-overlay.test.ts
+index 0f7443e..c84990b 100644
+--- a/packages/core/test/sca-overlay.test.ts
++++ b/packages/core/test/sca-overlay.test.ts
+@@ -2,6 +2,8 @@ import { afterEach, expect, test } from "bun:test"
+ import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
+ import { tmpdir } from "node:os"
+ import { join } from "node:path"
++import embedded from "../src/sca-default-overlay.json" with { type: "json" }
++import PROMPT from "../src/session/runner/prompt/system.txt"
+ import { load, description } from "../src/sca-overlay.js"
+ import { make, render } from "../src/session/system-prompt.js"
+
+@@ -18,14 +20,45 @@ function overlay(value: unknown) {
+   process.env.SCA_AGENT_OVERLAY = path
+ }
+
+-test("absent and empty overlays preserve prompt bytes", () => {
++test("an empty embedded overlay preserves built-in prompt bytes and descriptions", () => {
++  const tools = ["shell", "edit"]
++  const original = render(PROMPT, tools, {})
+   delete process.env.SCA_AGENT_OVERLAY
+-  const original = make(["shell", "edit"])
++  expect(render(PROMPT, tools, load({}))).toBe(original)
+   process.env.SCA_AGENT_OVERLAY = join(directory, "missing")
+-  expect(make(["shell", "edit"])).toBe(original)
++  expect(render(PROMPT, tools, load({}))).toBe(original)
+   overlay({})
+-  expect(make(["shell", "edit"])).toBe(original)
+-  expect(description("read", "original")).toBe("original")
++  expect(render(PROMPT, tools, load({}))).toBe(original)
++  expect(description("read", "original", load({}))).toBe("original")
++})
++test("the renderer and descriptions use the imported defaults", () => {
++  delete process.env.SCA_AGENT_OVERLAY
++  const defaults: ReturnType<typeof load> = embedded
++  const tools = ["shell", "edit"]
++  expect(load()).toEqual(defaults)
++  expect(make(tools)).toBe(render(defaults.system_prompt ?? PROMPT, tools, defaults))
++  for (const [name, text] of Object.entries(defaults.tool_descriptions ?? {}))
++    expect(description(name, "original")).toBe(text)
++})
++test("runtime keys override embedded keys and missing keys fall through", () => {
++  const defaults = {
++    system_prompt: "Embedded ${OPENCODE_TOOL_GUIDANCE}",
++    tool_guidance: "embedded guidance",
++    tool_descriptions: { read: "embedded read", shell: "embedded shell" },
++  }
++  process.env.SCA_AGENT_OVERLAY = join(directory, "missing")
++  expect(load(defaults)).toEqual(defaults)
++  overlay({ tool_guidance: "", tool_descriptions: { read: "", edit: "runtime edit" } })
++  const resolved = load(defaults)
++  expect(render(resolved.system_prompt!, ["shell"], resolved)).toBe("Embedded ")
++  expect(description("read", "original", resolved)).toBe("")
++  expect(description("shell", "original", resolved)).toBe("embedded shell")
++  expect(description("edit", "original", resolved)).toBe("runtime edit")
++  expect(description("write", "original", resolved)).toBe("original")
++  overlay({ system_prompt: "Runtime ${OPENCODE_TOOL_GUIDANCE}", tool_descriptions: {} })
++  const updated = load(defaults)
++  expect(render(updated.system_prompt!, [], updated)).toBe("Runtime embedded guidance")
++  expect(updated.tool_descriptions).toEqual(defaults.tool_descriptions)
+ })
+ test("overrides prompt, guidance, and descriptions including empty strings", () => {
+   overlay({ system_prompt: "Custom ${OPENCODE_TOOL_GUIDANCE}", tool_guidance: "$& guidance",
+@@ -33,7 +66,7 @@ test("overrides prompt, guidance, and descriptions including empty strings", ()
+   expect(make(["shell"])).toBe("Custom $& guidance")
+   expect(description("read", "original")).toBe("")
+   expect(description("shell", "original")).toBe("Custom shell")
+-  expect(description("write", "original")).toBe("original")
++  expect(description("write", "original", load({}))).toBe("original")
+   overlay({ system_prompt: "Custom", tool_guidance: "guidance" })
+   expect(make([])).toBe("Custom\n\nguidance")
+   overlay({ tool_guidance: "" })

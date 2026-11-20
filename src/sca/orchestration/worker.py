@@ -168,12 +168,21 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
     builds = OpenCodeBuildActivities(settings)
     evaluation = EvalActivities(settings, store)
     evolution = EvolutionActivities(settings, store, deps.gateway)
+
+    # Champion solidification
+    from sca.evolve.solidify import ChampionSolidifyActivities, ChampionSolidifyWorkflow
+
+    solidification = ChampionSolidifyActivities(settings, store)
     return Worker(
         client,
         identity=deps.worker_identity,
         task_queue=settings.task_queue,
-        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow, EvolutionWorkflow],
-        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + evolution.all() + [builds.build],
+        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [
+            MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow, EvolutionWorkflow,
+            ChampionSolidifyWorkflow,
+        ],
+        activities=(kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all()
+                    + evolution.all() + [builds.build] + solidification.all()),
         max_concurrent_activities=8,
     )
 

@@ -264,6 +264,15 @@ class KernelActivities:
             model=spec.model or self.settings.default_model,
         )
 
+    # OpenCode platform default
+
+    async def _resolve_opencode_version(self, ctx: AgentContext, backend: AgentBackend) -> None:
+        name = getattr(backend, "name", None)
+        if ctx.agent_version is None and name in {"opencode", "opencode-brain"}:
+            ctx.agent_version = await self.store.resolve_task_opencode_version(
+                ctx.task_id, self.settings.opencode_default_version,
+            )
+
     async def _sandbox_id(self, task_id: str) -> str:
         task = await self.store.get_task(task_id)
         sandbox_id = task.result.get("sandbox_id")
@@ -660,7 +669,9 @@ class KernelActivities:
         # kernel instance that runs this activity must ask the kind's activities, not itself.
         owner = self.scenarios.get(task.kind, self) if self.scenarios else self
         backend = owner._backend(spec)
-        additions = backend.sandbox_additions(self._agent_ctx(task_id, spec))
+        ctx = self._agent_ctx(task_id, spec)
+        await self._resolve_opencode_version(ctx, backend)
+        additions = backend.sandbox_additions(ctx)
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -814,6 +825,7 @@ class KernelActivities:
              **overlay_metadata, **self._activity_route()},
             dedup_key=f"{key}.started",
         )
+        await self._resolve_opencode_version(ctx, agent)
 
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):

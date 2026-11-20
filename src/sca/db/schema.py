@@ -226,3 +226,11 @@ champions = Table(
 )
 Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
       unique=True, postgresql_where=champions.c.active)
+
+# Champion solidification and platform default
+platform_settings = Table(
+    "platform_settings", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("opencode_default_version", Text, nullable=False),
+    CheckConstraint("tenant_id = 'eval'", name="ck_platform_settings_operator"),
+)
