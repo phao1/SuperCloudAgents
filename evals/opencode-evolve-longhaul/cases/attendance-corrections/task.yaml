@@ -13,24 +13,22 @@ instruction: |
   - On signoff also update the original attendance minutes, marking it corrected with original
     minutes, reason and reviewed date. Workload reads keep using version-one marks and see the
     new minutes.
-  - In the venue desk report add attendance-corrections with awaiting_review (filed and not
-    signed by that date) and net_minutes (sum of signed deltas through the date). Negative
-    deltas count.
+  - In the attendance-corrections section of the venue report, awaiting_review counts the
+    corrections filed by the report day that are still in the filed state. net_minutes sums
+    signed deltas through that day, including negative deltas.
   - Convert historical corrected marks with original, reviewed and reason populated to signed
     rows with the original mark ID and attendance day. Unknown actors stay null. Skip marks
     already represented, preserve legacy rows and use the repeatable named upgrade.
-  - Ship the shared CLI and API actions and list with bilingual messages and an audit trail.
 
   Ship the commands as attendance-corrections file, attendance-corrections signoff and
   attendance-corrections list, with the matching /v1/attendance-corrections/<action> routes.
   The minimum roles are operator for file and manager for signoff.
   Readers can list by scope and optional status (filed, signed) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register attendance-corrections.filed and attendance-corrections.signed.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

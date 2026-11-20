@@ -5,33 +5,32 @@ instruction: |
   supplier. The supplier totals must stay attached to the exact drafts that were reviewed.
 
   - Assemble at least two distinct drafts for the same supplier and market. The round date
-    cannot precede an order. An order already in a pending round is unavailable. Freeze the
-    selected order IDs and per-order quantities and unit prices.
-  - Return orders sorted by ID, lines grouped by product (product, summed units, extended cents)
-    in product order and total_cents. The assembled workflow starts with no released date.
+    cannot precede an order. An order already in a pending round is unavailable. Save orders
+    as a list of snapshots with id, units and cents (unit price), sorted by order ID. Use the
+    same shape for live and imported rounds.
+  - Group lines by product in product ID order, each with product, summed units and extended
+    cents. Save the sum of extended cents as total_cents. The round starts with no released date.
   - A manager releases once at or after assembly with the expected total. Any change to a source
     order's status, quantity or price invalidates the review, even if the aggregate total still
     matches. In one write mark every version-one order released with round and released
     populated, and save the round's release date.
-  - Expose purchase-rounds in the market report with awaiting_release (sorted IDs as of that
-    date) and released_cents accumulated through the date.
-  - Upgrade legacy released orders with a round ID. Group by that ID, require a common supplier,
-    scope and release date, and use the latest order day as the assembly day. A group with
-    inconsistent entries aborts the whole conversion as bad_store. Ignore standalone releases
-    and already represented rounds, preserving old readers.
-  - Use the desk's registered commands, permission map, audit and bilingual catalogs on both
-    interfaces, and make the version-two migration idempotent.
+  - Expose purchase_rounds in the market report with awaiting_release (sorted IDs assembled by
+    the report day and released later or still unreleased) and released_cents through that day.
+  - Upgrade legacy released orders by round ID. Skip standalone releases and IDs already in
+    the version-two table. For each remaining group, require a common supplier, scope and release
+    date and use the latest order day as the assembly day. Inconsistent entries abort the whole
+    conversion as bad_store. Preserve saved rounds and paper orders and make repeat upgrades
+    a no-op.
 
   Ship the commands as purchase-rounds assemble, purchase-rounds release and
   purchase-rounds list, with the matching /v1/purchase-rounds/<action> routes.
   The minimum roles are operator for assemble and manager for release.
   Readers can list by scope and optional status (assembled, released) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register purchase-rounds.assembled and purchase-rounds.released.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

@@ -14,25 +14,22 @@ instruction: |
   - Store the acknowledgement date in received and set late if it exceeds the deadline. Move the
     original version-one incident to forwarded with its new crew, former crew, received date and
     due. Transfers after the deadline still go through.
-  - The station's incident-handoffs report gives awaiting IDs on that date and overdue IDs. A
-    pending offer is overdue after its deadline; a received offer is overdue if it arrived late.
-    Include only offers already made and return IDs in order.
+  - The station's incident-handoffs report gives awaiting, the sorted IDs of offers still
+    pending and made on or before the report day. overdue lists the IDs from that queue whose
+    deadlines are before the report day, in the same order.
   - Migrate forwarded legacy incidents with former, due and received values to acknowledged
     handoffs. Use the incident ID and day, derive lateness, preserve old readers and skip
     incidents already represented. Use the version-two named upgrade with no change on repeat.
-  - Register both actions and the list, with permissions, localized messages and audited
-    changes.
 
   Ship the commands as incident-handoffs offer, incident-handoffs acknowledge and
   incident-handoffs list, with the matching /v1/incident-handoffs/<action> routes.
   The minimum roles are operator for offer and operator for acknowledge.
   Readers can list by scope and optional status (offered, acknowledged) in ascending ID order.
   Unknown scopes return not_found and unknown statuses return bad_request.
-  Register incident-handoffs.offered and incident-handoffs.acknowledged.
-  Use the workflow ID as the audit record_id and put scope in the event details.
+  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
   Use English and French success messages through the existing response catalogs.
 
-  Use underscores in API field names and hyphens in CLI options.
+  Use hyphens for underscores in CLI option names.
 
   | Command | Arguments |
   | --- | --- |

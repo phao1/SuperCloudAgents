@@ -13,26 +13,30 @@ from tempfile import TemporaryDirectory
 
 PROGRAM = 'groveboard'
 GROUP = 'purchase-rounds'
+REPORT_KEY = "purchase_rounds"
 START = 'assemble'
 FINISH = 'release'
 FINISH_ACTOR = 'lead'
 FINISH_ROLE = 'manager'
-START_EVENT = 'purchase-rounds.assembled'
-FINISH_EVENT = 'purchase-rounds.released'
 FIRST = {'id': 'orchard-round', 'orders': ['po-c', 'po-b', 'po-a'], 'day': '2025-04-11'}
 SECOND = {'id': 'orchard-round', 'expected_cents': 9830, 'day': '2025-04-12'}
+ORDER_SNAPSHOTS = [
+    {"id": "po-a", "units": 10, "cents": 425},
+    {"id": "po-b", "units": 6, "cents": 430},
+    {"id": "po-c", "units": 5, "cents": 600},
+]
 STARTED = {'scope': 'north',
  'status': 'assembled',
  'supplier': 'orchard',
  'day': '2025-04-11',
- 'orders': ['po-a', 'po-b', 'po-c'],
+ 'orders': ORDER_SNAPSHOTS,
  'lines': [{'product': 'apple', 'units': 16, 'cents': 6830},
            {'product': 'pear', 'units': 5, 'cents': 3000}],
  'total_cents': 9830,
  'released': None}
 FINISHED = {'scope': 'north',
  'status': 'released',
- 'orders': ['po-a', 'po-b', 'po-c'],
+ 'orders': ORDER_SNAPSHOTS,
  'total_cents': 9830,
  'released': '2025-04-12'}
 HISTORY_TABLE = 'purchase-orders'
@@ -43,7 +47,8 @@ HISTORICAL = [{'id': 'paper-round',
   'supplier': 'orchard',
   'day': '2025-04-02',
   'released': '2025-04-03',
-  'orders': ['paper-po-a', 'paper-po-b'],
+  'orders': [{'id': 'paper-po-a', 'units': 3, 'cents': 410},
+             {'id': 'paper-po-b', 'units': 7, 'cents': 630}],
   'lines': [{'product': 'apple', 'units': 3, 'cents': 1230},
             {'product': 'pear', 'units': 7, 'cents': 4410}],
   'total_cents': 5640},
@@ -53,7 +58,7 @@ HISTORICAL = [{'id': 'paper-round',
   'supplier': 'farm',
   'day': '2025-04-01',
   'released': '2025-04-02',
-  'orders': ['paper-po-s'],
+  'orders': [{'id': 'paper-po-s', 'units': 2, 'cents': 530}],
   'lines': [{'product': 'plum', 'units': 2, 'cents': 1060}],
   'total_cents': 1060}]
 SECTIONS = [('north', '2025-04-10', {'awaiting_release': [], 'released_cents': 5640}),
@@ -160,8 +165,8 @@ def rows(path, scope, status=None, **options):
 
 def section(path, scope, day):
     report = read(path, "desk/report", {"scope": scope, "day": day}, actor="viewer")
-    assert GROUP in report, f"desk report is missing {GROUP}"
-    return report[GROUP]
+    assert REPORT_KEY in report, f"desk report is missing {REPORT_KEY}"
+    return report[REPORT_KEY]
 
 
 def legacy(path, table, record_id):
@@ -274,14 +279,13 @@ def history(root):
     expect(sorted(snapshot(live)["extensions"][GROUP]["records"]),
            sorted({final["id"], *(row["id"] for row in HISTORICAL)}))
 
-    conflict = fresh(root, "history-collision")
-    conflicting = snapshot(conflict)
-    record_id = HISTORICAL[0]["id"]
-    conflicting["extensions"] = {GROUP: {"schema": 2, "records": {
-        record_id: {"id": record_id, "version": 2, "status": "different"},
-    }}}
-    workspace_json(conflict, conflicting)
-    reject(conflict, "store/upgrade", {"name": GROUP})
+    existing = fresh(root, "existing-workflow-id")
+    saved = act(existing, START, {**FIRST, "id": HISTORICAL[0]["id"]}, actor="clerk")
+    legacy_bundle = read(existing, "bundle/export")
+    upgrade(existing, imported=len(HISTORICAL) - 1)
+    expect(snapshot(existing)["extensions"][GROUP]["records"][saved["id"]], saved)
+    history_rows(existing, [saved, *HISTORICAL[1:]])
+    expect(read(existing, "bundle/export"), legacy_bundle)
 
 
 def lifecycle(path):
@@ -320,7 +324,7 @@ def reports(root):
         expect(section(path, scope, day), expected)
     for scope in ("north", "south"):
         result = read(path, "desk/report", {"scope": scope, "day": "2025-04-20"})
-        assert {"title", "activity", "visible_bulletins", "followups", GROUP} <= result.keys()
+        assert {"title", "activity", "visible_bulletins", "followups", REPORT_KEY} <= result.keys()
     stable = path.read_bytes()
     upgrade(path, imported=0)
     expect(path.read_bytes(), stable)
@@ -369,12 +373,6 @@ def interfaces(root):
     invoke(path, "GET", GROUP + "/list", {"scope": "unknown"}, actor="viewer", status=404)
     invoke(path, "GET", GROUP + "/list", {"scope": "north", "status": "unknown"}, actor="viewer", status=400)
     expect(path.read_bytes(), before)
-    audit = [event for event in snapshot(path)["audit"] if event["event"].startswith(GROUP + ".")]
-    expect([(event["event"], event["actor"], event["record_id"], event["version"]) for event in audit],
-           [(START_EVENT, "clerk", FIRST["id"], 1), (FINISH_EVENT, FINISH_ACTOR, FIRST["id"], 1)])
-    for event in audit:
-        assert event["event"] in APP.events
-        expect(event["details"]["scope"], finished["data"]["scope"])
 
 
 def documents():

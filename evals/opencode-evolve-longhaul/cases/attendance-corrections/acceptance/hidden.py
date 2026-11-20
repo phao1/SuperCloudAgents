@@ -17,8 +17,6 @@ START = 'file'
 FINISH = 'signoff'
 FINISH_ACTOR = 'lead'
 FINISH_ROLE = 'manager'
-START_EVENT = 'attendance-corrections.filed'
-FINISH_EVENT = 'attendance-corrections.signed'
 FIRST = {'id': 'clock-fix',
  'mark': 'mark-a',
  'minutes': 130,
@@ -73,8 +71,7 @@ HISTORICAL = [{'id': 'paper-mark-a',
   'filed_by': None,
   'signed_by': None,
   'signed': '2025-04-08'}]
-SECTIONS = [('north', '2025-04-10', {'awaiting_review': 0, 'net_minutes': 25}),
- ('north', '2025-04-11', {'awaiting_review': 1, 'net_minutes': 25}),
+SECTIONS = [('north', '2025-04-11', {'awaiting_review': 0, 'net_minutes': 25}),
  ('north', '2025-04-12', {'awaiting_review': 0, 'net_minutes': -25}),
  ('south', '2025-04-20', {'awaiting_review': 0, 'net_minutes': -40})]
 PROTECTED = {'README.md': 'c7d41718b387c725c114599474c31aa4f6e3f494849a80b765ab3c04af22942a',
@@ -287,12 +284,7 @@ def history(root):
            sorted({final["id"], *(row["id"] for row in HISTORICAL)}))
 
     conflict = fresh(root, "history-collision")
-    conflicting = snapshot(conflict)
-    record_id = HISTORICAL[0]["id"]
-    conflicting["extensions"] = {GROUP: {"schema": 2, "records": {
-        record_id: {"id": record_id, "version": 2, "status": "different"},
-    }}}
-    workspace_json(conflict, conflicting)
+    act(conflict, START, {**FIRST, "id": HISTORICAL[0]["id"]}, actor="clerk")
     reject(conflict, "store/upgrade", {"name": GROUP})
 
 
@@ -327,7 +319,10 @@ def workflows(root):
 def reports(root):
     path = fresh(root, "report")
     upgrade(path, imported=len(HISTORICAL))
-    final = lifecycle(path)
+    act(path, START, FIRST, actor="clerk")
+    expect(section(path, "north", "2025-04-10"), {"awaiting_review": 0, "net_minutes": 25})
+    expect(section(path, "north", FIRST["day"]), {"awaiting_review": 1, "net_minutes": 25})
+    final = act(path, FINISH, SECOND, actor=FINISH_ACTOR)
     for scope, day, expected in SECTIONS:
         expect(section(path, scope, day), expected)
     for scope in ("north", "south"):
@@ -381,12 +376,6 @@ def interfaces(root):
     invoke(path, "GET", GROUP + "/list", {"scope": "unknown"}, actor="viewer", status=404)
     invoke(path, "GET", GROUP + "/list", {"scope": "north", "status": "unknown"}, actor="viewer", status=400)
     expect(path.read_bytes(), before)
-    audit = [event for event in snapshot(path)["audit"] if event["event"].startswith(GROUP + ".")]
-    expect([(event["event"], event["actor"], event["record_id"], event["version"]) for event in audit],
-           [(START_EVENT, "clerk", FIRST["id"], 1), (FINISH_EVENT, FINISH_ACTOR, FIRST["id"], 1)])
-    for event in audit:
-        assert event["event"] in APP.events
-        expect(event["details"]["scope"], finished["data"]["scope"])
 
 
 def documents():

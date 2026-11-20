@@ -17,8 +17,6 @@ START = 'schedule'
 FINISH = 'review'
 FINISH_ACTOR = 'lead'
 FINISH_ROLE = 'manager'
-START_EVENT = 'calibration-campaigns.scheduled'
-FINISH_EVENT = 'calibration-campaigns.reviewed'
 FIRST = {'id': 'spring-readings', 'scope': 'north', 'meters': ['temp', 'depth'], 'day': '2025-04-11'}
 SECOND = {'id': 'spring-readings', 'readings': {'depth': -4, 'temp': 3}, 'day': '2025-04-13'}
 STARTED = {'scope': 'north',
@@ -56,8 +54,7 @@ HISTORICAL = [{'id': 'paper-meters',
   'readings': {'cond': 1},
   'limits': {'cond': 8},
   'flags': []}]
-SECTIONS = [('north', '2025-04-10', {'pending': [], 'flagged_meters': ['depth']}),
- ('north', '2025-04-11', {'pending': ['spring-readings'], 'flagged_meters': ['depth']}),
+SECTIONS = [('north', '2025-04-11', {'pending': [], 'flagged_meters': ['depth']}),
  ('north', '2025-04-13', {'pending': [], 'flagged_meters': ['depth', 'temp']}),
  ('south', '2025-04-13', {'pending': [], 'flagged_meters': []})]
 PROTECTED = {'README.md': '962e9049f2840c4c0d59d79fbf68afe110f9e50a18bd8a89aebe925273734f35',
@@ -272,14 +269,13 @@ def history(root):
     expect(sorted(snapshot(live)["extensions"][GROUP]["records"]),
            sorted({final["id"], *(row["id"] for row in HISTORICAL)}))
 
-    conflict = fresh(root, "history-collision")
-    conflicting = snapshot(conflict)
-    record_id = HISTORICAL[0]["id"]
-    conflicting["extensions"] = {GROUP: {"schema": 2, "records": {
-        record_id: {"id": record_id, "version": 2, "status": "different"},
-    }}}
-    workspace_json(conflict, conflicting)
-    reject(conflict, "store/upgrade", {"name": GROUP})
+    existing = fresh(root, "existing-workflow-id")
+    saved = act(existing, START, {**FIRST, "id": HISTORICAL[0]["id"]}, actor="clerk")
+    legacy_bundle = read(existing, "bundle/export")
+    upgrade(existing, imported=len(HISTORICAL) - 1)
+    expect(snapshot(existing)["extensions"][GROUP]["records"][saved["id"]], saved)
+    history_rows(existing, [saved, *HISTORICAL[1:]])
+    expect(read(existing, "bundle/export"), legacy_bundle)
 
 
 def lifecycle(path):
@@ -313,7 +309,10 @@ def workflows(root):
 def reports(root):
     path = fresh(root, "report")
     upgrade(path, imported=len(HISTORICAL))
-    final = lifecycle(path)
+    act(path, START, FIRST, actor="clerk")
+    expect(section(path, "north", "2025-04-10"), {"pending": [], "flagged_meters": ["depth"]})
+    expect(section(path, "north", FIRST["day"]), {"pending": [FIRST["id"]], "flagged_meters": ["depth"]})
+    final = act(path, FINISH, SECOND, actor=FINISH_ACTOR)
     for scope, day, expected in SECTIONS:
         expect(section(path, scope, day), expected)
     for scope in ("north", "south"):
@@ -367,12 +366,6 @@ def interfaces(root):
     invoke(path, "GET", GROUP + "/list", {"scope": "unknown"}, actor="viewer", status=404)
     invoke(path, "GET", GROUP + "/list", {"scope": "north", "status": "unknown"}, actor="viewer", status=400)
     expect(path.read_bytes(), before)
-    audit = [event for event in snapshot(path)["audit"] if event["event"].startswith(GROUP + ".")]
-    expect([(event["event"], event["actor"], event["record_id"], event["version"]) for event in audit],
-           [(START_EVENT, "clerk", FIRST["id"], 1), (FINISH_EVENT, FINISH_ACTOR, FIRST["id"], 1)])
-    for event in audit:
-        assert event["event"] in APP.events
-        expect(event["details"]["scope"], finished["data"]["scope"])
 
 
 def documents():

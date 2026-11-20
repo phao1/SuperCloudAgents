@@ -17,8 +17,6 @@ START = 'stage'
 FINISH = 'collect'
 FINISH_ACTOR = 'lead'
 FINISH_ROLE = 'manager'
-START_EVENT = 'reservation-handoffs.staged'
-FINISH_EVENT = 'reservation-handoffs.collected'
 FIRST = {'id': 'relay-a', 'reservation': 'reserve-a', 'pickup': 'south', 'day': '2025-04-11'}
 SECOND = {'id': 'relay-a', 'borrower': 'alba', 'day': '2025-04-12'}
 STARTED = {'scope': 'south',
@@ -89,7 +87,7 @@ PROTECTED = {'README.md': 'c559029cb3a08dcfa510c71824cdf470e8e91518006c13c117134
 
 def workflow(root):
     path = fresh(root, "collect")
-    blocked(path, START, {**FIRST, "pickup": "north"})
+    blocked(path, START, {**FIRST, "pickup": "north"}, status=400, code="bad_request")
     blocked(path, START, {**FIRST, "pickup": "west"}, status=404, code="not_found")
     blocked(path, START, {**FIRST, "day": "2025-04-01"}, status=400, code="bad_request")
     act(path, START, FIRST, actor="clerk")
@@ -275,12 +273,7 @@ def history(root):
            sorted({final["id"], *(row["id"] for row in HISTORICAL)}))
 
     conflict = fresh(root, "history-collision")
-    conflicting = snapshot(conflict)
-    record_id = HISTORICAL[0]["id"]
-    conflicting["extensions"] = {GROUP: {"schema": 2, "records": {
-        record_id: {"id": record_id, "version": 2, "status": "different"},
-    }}}
-    workspace_json(conflict, conflicting)
+    act(conflict, START, {**FIRST, "id": HISTORICAL[0]["id"]}, actor="clerk")
     reject(conflict, "store/upgrade", {"name": GROUP})
 
 
@@ -369,12 +362,6 @@ def interfaces(root):
     invoke(path, "GET", GROUP + "/list", {"scope": "unknown"}, actor="viewer", status=404)
     invoke(path, "GET", GROUP + "/list", {"scope": "north", "status": "unknown"}, actor="viewer", status=400)
     expect(path.read_bytes(), before)
-    audit = [event for event in snapshot(path)["audit"] if event["event"].startswith(GROUP + ".")]
-    expect([(event["event"], event["actor"], event["record_id"], event["version"]) for event in audit],
-           [(START_EVENT, "clerk", FIRST["id"], 1), (FINISH_EVENT, FINISH_ACTOR, FIRST["id"], 1)])
-    for event in audit:
-        assert event["event"] in APP.events
-        expect(event["details"]["scope"], finished["data"]["scope"])
 
 
 def documents():

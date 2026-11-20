@@ -17,8 +17,6 @@ START = 'offer'
 FINISH = 'accept'
 FINISH_ACTOR = 'lead'
 FINISH_ROLE = 'manager'
-START_EVENT = 'pool-substitutions.offered'
-FINISH_EVENT = 'pool-substitutions.accepted'
 FIRST = {'id': 'swap-a', 'order': 'pool-a', 'alternate': 'driver-yard', 'day': '2025-04-11'}
 SECOND = {'id': 'swap-a', 'day': '2025-04-12'}
 STARTED = {'scope': 'north',
@@ -63,8 +61,7 @@ HISTORICAL = [{'id': 'paper-pool-a',
   'day': '2025-04-02',
   'accepted': '2025-04-05',
   'historical': True}]
-SECTIONS = [('north', '2025-04-10', {'offered': [], 'accepted_units': 3}),
- ('north', '2025-04-11', {'offered': ['swap-a'], 'accepted_units': 3}),
+SECTIONS = [('north', '2025-04-11', {'offered': [], 'accepted_units': 3}),
  ('north', '2025-04-12', {'offered': [], 'accepted_units': 7}),
  ('south', '2025-04-20', {'offered': [], 'accepted_units': 1})]
 PROTECTED = {'README.md': 'c559029cb3a08dcfa510c71824cdf470e8e91518006c13c1171347e33493af55',
@@ -92,8 +89,11 @@ PROTECTED = {'README.md': 'c559029cb3a08dcfa510c71824cdf470e8e91518006c13c117134
 def workflow(root):
     path = fresh(root, "substitute")
     upgrade(path, imported=2)
-    for alternate in ("driver", "saw", "saw-old"):
-        blocked(path, START, {**FIRST, "alternate": alternate})
+    for alternate in ("driver", "saw"):
+        blocked(path, START, {**FIRST, "alternate": alternate}, status=400, code="bad_request")
+    amend(path, "tools", "driver-yard", status="retired")
+    blocked(path, START, FIRST)
+    amend(path, "tools", "driver-yard", status="ready")
     act(path, START, FIRST, actor="clerk")
     blocked(path, START, {**FIRST, "id": "duplicate"})
     blocked(path, START, {**FIRST, "id": "too-late", "order": "pool-b"})
@@ -286,12 +286,7 @@ def history(root):
            sorted({final["id"], *(row["id"] for row in HISTORICAL)}))
 
     conflict = fresh(root, "history-collision")
-    conflicting = snapshot(conflict)
-    record_id = HISTORICAL[0]["id"]
-    conflicting["extensions"] = {GROUP: {"schema": 2, "records": {
-        record_id: {"id": record_id, "version": 2, "status": "different"},
-    }}}
-    workspace_json(conflict, conflicting)
+    act(conflict, START, {**FIRST, "id": HISTORICAL[0]["id"]}, actor="clerk")
     reject(conflict, "store/upgrade", {"name": GROUP})
 
 
@@ -326,7 +321,10 @@ def workflows(root):
 def reports(root):
     path = fresh(root, "report")
     upgrade(path, imported=len(HISTORICAL))
-    final = lifecycle(path)
+    act(path, START, FIRST, actor="clerk")
+    expect(section(path, "north", "2025-04-10"), {"offered": [], "accepted_units": 3})
+    expect(section(path, "north", FIRST["day"]), {"offered": [FIRST["id"]], "accepted_units": 3})
+    final = act(path, FINISH, SECOND, actor=FINISH_ACTOR)
     for scope, day, expected in SECTIONS:
         expect(section(path, scope, day), expected)
     for scope in ("north", "south"):
@@ -380,12 +378,6 @@ def interfaces(root):
     invoke(path, "GET", GROUP + "/list", {"scope": "unknown"}, actor="viewer", status=404)
     invoke(path, "GET", GROUP + "/list", {"scope": "north", "status": "unknown"}, actor="viewer", status=400)
     expect(path.read_bytes(), before)
-    audit = [event for event in snapshot(path)["audit"] if event["event"].startswith(GROUP + ".")]
-    expect([(event["event"], event["actor"], event["record_id"], event["version"]) for event in audit],
-           [(START_EVENT, "clerk", FIRST["id"], 1), (FINISH_EVENT, FINISH_ACTOR, FIRST["id"], 1)])
-    for event in audit:
-        assert event["event"] in APP.events
-        expect(event["details"]["scope"], finished["data"]["scope"])
 
 
 def documents():
