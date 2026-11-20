@@ -176,11 +176,14 @@ def create_app(
                             media_type="text/javascript")
 
     try:
+        from sca.api.agents import champions_router
         from sca.api.agents import router as agents_router
     except ImportError:
         pass
     else:
         app.include_router(agents_router)
+        # Champion solidification
+        app.include_router(champions_router)
 
     app.include_router(evals_router)
     app.include_router(evolutions_router)

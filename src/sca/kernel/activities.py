@@ -276,6 +276,18 @@ class KernelActivities:
             model=model,
         )
 
+    # OpenCode platform default
+
+    async def _resolve_opencode_version(
+        self, ctx: AgentContext, backend: AgentBackend, task_id: str,
+    ) -> None:
+        # task_id is the stored task: Best-of-N renames ctx.task_id per attempt.
+        name = getattr(backend, "name", None)
+        if ctx.agent_version is None and name in {"opencode", "opencode-brain"}:
+            ctx.agent_version = await self.store.resolve_task_opencode_version(
+                task_id, self.settings.opencode_default_version,
+            )
+
     async def _sandbox_id(self, task_id: str) -> str:
         task = await self.store.get_task(task_id)
         sandbox_id = task.result.get("sandbox_id")
@@ -701,7 +713,9 @@ class KernelActivities:
         backend = owner._backend(spec)
         champion = (await self.store.get_task_champion(task_id)
                     if getattr(backend, "name", None) == "opencode" else None)
-        additions = backend.sandbox_additions(self._agent_ctx(task_id, spec, champion))
+        ctx = self._agent_ctx(task_id, spec, champion)
+        await self._resolve_opencode_version(ctx, backend, task_id)
+        additions = backend.sandbox_additions(ctx)
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -855,6 +869,7 @@ class KernelActivities:
              **overlay_metadata, **self._activity_route()},
             dedup_key=f"{key}.started",
         )
+        await self._resolve_opencode_version(ctx, agent, task_id)
 
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):
@@ -1134,7 +1149,8 @@ class KernelActivities:
             return
         champion = await select_champion(
             self.store, task.id, task.tenant_id,
-            spec.get("agent_version") or self.settings.opencode_default_version,
+            spec.get("agent_version") or await self.store.resolve_task_opencode_version(
+                str(task.id), self.settings.opencode_default_version),
             spec.get("model") or self.settings.default_model, use_champion,
         )
         selection = None

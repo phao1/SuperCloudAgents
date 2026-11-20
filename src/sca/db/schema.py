@@ -356,3 +356,11 @@ scm_integrations = Table(
     UniqueConstraint("tenant_id", "provider", "host", "repo_full_name"),
     UniqueConstraint("tenant_id", "webhook_secret_ref"),
 )
+
+# Champion solidification and platform default
+platform_settings = Table(
+    "platform_settings", metadata,
+    Column("tenant_id", Text, primary_key=True),
+    Column("opencode_default_version", Text, nullable=False),
+    CheckConstraint("tenant_id = 'eval'", name="ck_platform_settings_operator"),
+)

@@ -1754,3 +1754,62 @@ class Store:
                 events.c.payload["turn"].astext == str(turn),
             ).order_by(events.c.seq))
             return dict(rows.tuples().all())
+    # Champion solidification and platform default
+
+    async def get_champion_eval(self, champion_id: UUID) -> dict:
+        from sca.db.schema import champions, eval_runs, evolution_candidates
+
+        candidate = evolution_candidates
+        run = eval_runs
+        async with self._transaction() as session:
+            row = (await session.execute(
+                select(run.c.suite_hash, run.c.variant)
+                .select_from(champions.join(candidate, champions.c.candidate_id == candidate.c.id)
+                             .join(run, candidate.c.dev_run_id == run.c.id))
+                .where(champions.c.id == champion_id, champions.c.tenant_id == self.tenant_id,
+                       candidate.c.tenant_id == self.tenant_id, run.c.tenant_id == self.tenant_id)
+            )).mappings().one()
+            return dict(row)
+
+    async def create_solidify_eval_runs(self, runs: list[dict]) -> None:
+        from sca.db.schema import eval_runs
+
+        async with self._transaction() as session:
+            await session.execute(pg_insert(eval_runs).values([
+                {**run, "tenant_id": self.tenant_id} for run in runs
+            ]).on_conflict_do_nothing())
+
+    async def set_default_opencode_version(self, version: str) -> None:
+        from sca.db.schema import platform_settings
+
+        if self.tenant_id != "eval":
+            raise ValueError("The platform default requires the eval operator tenant")
+        async with self._transaction() as session:
+            await session.execute(pg_insert(platform_settings).values(
+                tenant_id=self.tenant_id, opencode_default_version=version,
+            ).on_conflict_do_update(
+                index_elements=[platform_settings.c.tenant_id],
+                set_={"opencode_default_version": version},
+            ))
+
+    async def resolve_task_opencode_version(self, task_id: str, configured: str) -> str:
+        from sca.db.schema import platform_settings
+
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, lock=True)
+            result = task["result"]
+            if selected := result.get("agent_version"):
+                return selected
+            # A sandbox created by an older worker already mounted the configured default.
+            provisioned = result.get("sandbox_id") or any(
+                key.startswith("subtask.") and key.endswith(".sandbox_id") for key in result
+            )
+            version = configured
+            if not provisioned:
+                version = await session.scalar(select(
+                    platform_settings.c.opencode_default_version,
+                ).where(platform_settings.c.tenant_id == "eval")) or configured
+            await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+                result={**result, "agent_version": version}, updated_at=func.now(),
+            ))
+            return version

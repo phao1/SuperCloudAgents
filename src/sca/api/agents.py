@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import difflib
 import json
 import shlex
@@ -8,7 +9,9 @@ from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import NoResultFound
+from temporalio.service import RPCError
 
 from sca.agents.opencode_build import records_dir, reserve_build, write_record
 from sca.agents.opencode_prompt import (
@@ -23,10 +26,12 @@ from sca.agents.opencode_prompt import (
 )
 from sca.api.authz import authorize
 from sca.api.evals import RunRequest, enqueue_run, read_run, require_eval
+from sca.api.evolutions import Admin, client_for, scoped
 from sca.config import Settings, get_settings
 from sca.core.errors import InvalidTaskError, NotFoundError
 from sca.core.models import Event, Principal, Task
 from sca.eval.trajectory import overall_passed
+from sca.evolve.solidify import SOLIDIFY_KIND, ChampionSolidifyWorkflow, champion_branch
 from sca.kinds.coding.spec import CodingSpec
 
 router = APIRouter(prefix="/v1/agents/opencode")
@@ -63,6 +68,7 @@ def fix_spec(settings: Settings, task: Task, events: list[Event], body: FixReque
         }
     ]
     repo = task.spec.get("repo_url", "")
+    source_version = task.spec.get("agent_version") or task.result.get("agent_version")
     case_id = task.result.get("eval_case_id") or task.spec.get("eval_case_id")
     if not case_id and task.spec.get("eval_run_id"):
         from pathlib import Path
@@ -89,7 +95,7 @@ def fix_spec(settings: Settings, task: Task, events: list[Event], body: FixReque
             "source_task_id": str(task.id),
             "eval_run_id": str(task.spec.get("eval_run_id") or ""),
             "case_id": str(case_id or ""),
-            "source_version": str(task.spec.get("agent_version") or settings.opencode_default_version),
+            "source_version": str(source_version or settings.opencode_default_version),
         },
         repo_url=settings.opencode_repo_url,
         base_ref="main",
@@ -444,3 +450,73 @@ async def builds_get(
     else:
         record["log_tail"] = ""
     return record
+
+
+# Champion solidification and platform default
+champions_router = APIRouter(prefix="/v1/champions")
+
+
+class SolidifyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    notes: str | None = Field(default=None, max_length=2000)
+
+
+async def _champion(request: Request, user: Principal, champion_id: UUID) -> dict:
+    try:
+        champion = await scoped(request, user).get_champion(champion_id)
+    except NoResultFound:
+        champion = None
+    if champion is None:
+        raise NotFoundError("冠军记录不存在")
+    return champion
+
+
+@champions_router.get("/{champion_id}")
+async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> dict:
+    champion = await _champion(request, user, champion_id)
+    builds = [build for build in await builds_list(user)
+              if build.get("labels", {}).get("kind") == SOLIDIFY_KIND
+              and build["labels"].get("champion_id") == str(champion_id)]
+    return {**champion, "solidify_builds": builds}
+
+
+@champions_router.post("/{champion_id}/solidify", status_code=202)
+async def solidify(
+    champion_id: UUID, request: Request, user: Admin, body: SolidifyRequest | None = None,
+) -> dict:
+    champion = await _champion(request, user, champion_id)
+    if not champion.get("candidate_id"):
+        raise HTTPException(409, "冠军缺少原始评测记录")
+    settings = get_settings()
+    source_version = champion["agent_version"]
+    branch = champion_branch(champion_id)
+    record = reserve_build(
+        settings, str(uuid4()), user.tenant_id, ref=branch, branch=branch,
+        base_version=source_version, task_id=None, notes=body.notes if body else None,
+        labels={"kind": SOLIDIFY_KIND, "champion_id": str(champion_id),
+                "source_version": source_version},
+    )
+    try:
+        async with asyncio.timeout(10):
+            client = await client_for(request)
+            await client.start_workflow(
+                ChampionSolidifyWorkflow.run, {"record": record, "created_by": user.subject},
+                id=f"champion-solidify-{record['id']}", task_queue=settings.task_queue,
+            )
+    except (OSError, RuntimeError, RPCError):
+        message = "固化服务暂不可用"
+        write_record(records_dir(settings) / f"{record['id']}.json",
+                     {**record, "status": "failed", "error": message})
+        raise HTTPException(503, message) from None
+    return record
+
+
+@router.post("/versions/{version}/default")
+async def set_default_version(version: str, request: Request, user: Admin) -> dict:
+    store = scoped(request, user)
+    try:
+        version_commit(get_settings(), version)
+    except (OSError, ValueError):
+        raise NotFoundError("OpenCode 版本不存在或尚未完成构建") from None
+    await store.set_default_opencode_version(version)
+    return {"version": version}
