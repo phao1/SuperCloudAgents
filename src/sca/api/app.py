@@ -204,7 +204,7 @@ def create_app(
     from sca.api.tenants import router as tenancy_router
     from sca.api.usage import router as usage_router
 
-    app.state.check_tenant_submission = app.state.store.check_tenant_submission
+    app.state.check_tenant_submission = getattr(app.state.store, "check_tenant_submission", None)
     app.state.platform_admin_token = settings.platform_admin_token
     if platform_store is None and store is None and settings.platform_admin_token and (
         settings.api_database_url and settings.api_database_url != settings.database_url
