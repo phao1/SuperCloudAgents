@@ -43,10 +43,11 @@ class CodingKind:
 
     def activities(self, deps: KindDeps) -> list:
         from sca.kinds.coding.activities import CodingActivities
+        from sca.kinds.coding.best_of_activities import BestOfActivities
         from sca.kinds.coding.planning import PlanningActivities
 
         acts = CodingActivities(**{f: getattr(deps, f) for f in deps.__dataclass_fields__})
-        return acts.all() + PlanningActivities(acts).all() + prompt_activities()
+        return acts.all() + PlanningActivities(acts).all() + BestOfActivities(acts).all() + prompt_activities()
 
 
 def workflow_spec(spec: dict) -> dict:

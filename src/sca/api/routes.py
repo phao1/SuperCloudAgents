@@ -12,10 +12,11 @@ from sca.kinds import builtin as _builtin_kinds
 
 _builtin_kinds.load()
 from sca.api.authz import authorize
-from sca.core.errors import ConflictError, InvalidTaskError
+from sca.core.errors import ConflictError, InvalidTaskError, NotFoundError
 from sca.core.models import TERMINAL_STATES, Artifact, Event, Principal, Review, Task, TaskState
 from sca.kernel.kind import all as all_kinds
 from sca.kernel.kind import get
+from sca.kinds.coding.best_of import CHOSEN_KEY, PLAN_KEY, SELECT_DECISION_PREFIX, candidate_key
 from sca.observability import current_trace_id
 from sca.storage.local import key_for
 
@@ -175,6 +176,8 @@ async def review(
     task = await store.get_task(task_id, user.tenant_id)
     if task.state != TaskState.AWAITING_REVIEW:
         raise ConflictError("Task is not awaiting review")
+    if _awaiting_best_of_selection(task):
+        raise ConflictError("请先选择 Best-of-N 候选结果")
     if body.decision == "request_changes" and not (body.feedback or "").strip():
         raise InvalidTaskError("Requesting changes requires feedback")
     if body.accept_memories and body.decision != "approve":
@@ -333,3 +336,74 @@ async def revoke_token(
 ) -> Response:
     await request.app.state.store.for_tenant(user.tenant_id).revoke_api_token(token_id)
     return Response(status_code=204)
+
+
+# Best-of-N candidate review.
+
+
+class BestOfSelection(BaseModel):
+    attempt: int = Field(ge=1, le=5, strict=True)
+
+
+def _awaiting_best_of_selection(task: Task) -> bool:
+    return (
+        task.state == TaskState.AWAITING_REVIEW
+        and (task.spec.get("best_of") or {}).get("select") == "human"
+        and task.result.get(CHOSEN_KEY) is None
+    )
+
+
+@router.get("/tasks/{task_id}/best-of")
+async def get_best_of(
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read"))],
+) -> dict:
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    task = await store.get_task(task_id, user.tenant_id)
+    options = task.spec.get("best_of")
+    if task.kind != "coding" or not options:
+        raise NotFoundError("此任务未启用 Best-of-N")
+    chosen = task.result.get(CHOSEN_KEY)
+    attempts = []
+    for plan in task.result.get(PLAN_KEY, []):
+        attempt = plan["attempt"]
+        candidate = task.result.get(candidate_key(attempt))
+        artifact = candidate.get("patch_artifact") if candidate else None
+        data = {
+            **plan, "verification": None, "cost_usd": None, "turns": 0, "diff_stats": None,
+            **(candidate or {}), "chosen": attempt == chosen,
+            "completed": candidate is not None,
+            "patch_url": f"/v1/tasks/{task_id}/artifacts/{artifact}" if artifact else None,
+        }
+        if data["diff_stats"] is not None:
+            stats = data["diff_stats"]
+            data["diff_stats"] = {**stats, "changed_lines": stats["insertions"] + stats["deletions"]}
+        attempts.append(data)
+    return {"select": options.get("select", "verify_then_cost"), "chosen_attempt": chosen,
+            "awaiting_selection": _awaiting_best_of_selection(task), "attempts": attempts}
+
+
+@router.post("/tasks/{task_id}/best-of/select", status_code=202)
+async def select_best_of(
+    task_id: UUID,
+    body: BestOfSelection,
+    request: Request,
+    user: Annotated[Principal, Depends(authorize("review"))],
+) -> BestOfSelection:
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    task = await store.get_task(task_id, user.tenant_id)
+    options = task.spec.get("best_of")
+    if task.kind != "coding" or not options:
+        raise NotFoundError("此任务未启用 Best-of-N")
+    if options.get("select") != "human":
+        raise ConflictError("此任务使用自动选择")
+    if task.result.get(CHOSEN_KEY) == body.attempt:
+        return body
+    if not _awaiting_best_of_selection(task):
+        raise ConflictError("此任务当前未等待选择候选结果")
+    candidate = task.result.get(candidate_key(body.attempt))
+    if candidate is None or candidate.get("patch_artifact") is None:
+        raise InvalidTaskError("该尝试没有可选择的补丁")
+    await request.app.state.orchestrator.submit_review(
+        str(task_id), f"{SELECT_DECISION_PREFIX}{body.attempt}", user.subject,
+    )
+    return body

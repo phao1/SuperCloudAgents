@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from sca.core.interfaces import ObjectStore
 from sca.core.models import Event, EventType, SandboxSpec, Task
 from sca.db.repo import Store
-from sca.kinds.coding.activities import CodingActivities, branch_name
+from sca.kinds.coding.activities import CodingActivities, StepInput, TurnInput, branch_name
+from sca.kinds.coding.subtask_inputs import SubtaskInput
 from sca.workspace.git import GitWorkspace
 
 
@@ -92,6 +94,23 @@ class ChildActivities(CodingActivities):
             worker_identity=parent.worker_identity,
         )
         self.name = name
+
+    async def run_step(self, inp: SubtaskInput) -> dict:
+        if inp.action in {"run_setup", "destroy_sandbox"}:
+            await getattr(self, inp.action)(inp.task_id)
+            return {}
+        if inp.action == "collect_memory_proposals":
+            await self.collect_memory_proposals(StepInput(inp.task_id, inp.turn))
+            return {}
+        if inp.action == "run_agent_turn":
+            result = await self.run_agent_turn(
+                TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id)
+            )
+        else:
+            result = await getattr(self, inp.action)(StepInput(inp.task_id, inp.turn))
+        if inp.action == "check_budget":
+            return {"reason": result}
+        return asdict(result)
 
     def _task_dir(self, task_id: str) -> Path:
         return self.settings.task_dir(task_id) / "sub" / self.name
