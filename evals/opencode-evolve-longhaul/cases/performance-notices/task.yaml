@@ -6,9 +6,10 @@ instruction: |
 
   - Prepare one notice per scheduled performance with an actual date or venue change. The
     destination must have enough seats and no other scheduled or moved performance on that day.
-    Prepare on or before both performance dates. Record the old venue and day in previous_scope
-    and previous_day, the new day in scheduled, and the destination as scope. The sent date is
-    unset and the audience field is only required on sent notices.
+    The same venue and performance date, insufficient seats, an occupied slot or an existing
+    notice each returns conflict (409). Prepare on or before both performance dates. Record the
+    old venue and day in previous_scope and previous_day, the new day in scheduled, and the
+    destination as scope. The sent date is unset and audience is only required on sent notices.
   - Send once between preparation and the earlier performance date, inclusive. If the original
     show moved or was cancelled while pending, reject the old notice. Recheck venue capacity and
     availability. Capture the current sorted audience groups at send time and persist them in
@@ -16,21 +17,30 @@ instruction: |
   - Sending updates the version-one performance to moved at the destination and new performance
     day, with prior_scope, prior_day, reason and sent populated. Afterward, audience edits on
     the show do not change the frozen notice.
-  - The performance_notices section of the destination desk report lists pending IDs as of that
-    date (prepared by then and sent later or still unsent) and recipient_groups, the sorted
-    union of groups sent notices through the date.
-  - Import moved legacy shows with prior scope, prior day, reason and send date as sent notices
-    keyed by the show ID. Use the old send date as preparation day when no draft is recorded.
-    Skip shows already represented by live notices or whose IDs are already in the version-two
-    table. Keep legacy readers working and support repeat runs.
+  - The performance_notices section of the destination desk report contains pending, the sorted
+    IDs of notices prepared by that date and sent later or still unsent, and recipient_groups,
+    the sorted union of audience groups from notices sent through that date.
+  - Import moved performances with prior_scope, prior_day, reason and sent as sent notices. Use
+    the performance ID for id and performance. Copy the production, destination scope, reason
+    and sorted audience. Map prior_scope and prior_day to previous_scope and previous_day, and
+    map the performance's day to scheduled. Use sent as the preparation day for paper notices.
 
-  Ship the commands as performance-notices prepare, performance-notices send and
-  performance-notices list, with the matching /v1/performance-notices/<action> routes.
-  The minimum roles are operator for prepare and manager for send.
-  Readers can list by scope and optional status (prepared, sent) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add performance-notices prepare (POST, operator), send (POST, manager) and list (GET, reader)
+  to framehouse/registry.py with /v1/performance-notices/<action> routes. Wire permissions in
+  framehouse/policy.py. Use <group>.<action> keys with distinct en and fr success messages in
+  framehouse/messages.py. Register Table("performance-notices", 2) in framehouse/schema.py and
+  add the performance_notices section in framehouse/reporting.py alongside existing sections.
+  List by destination scope and optional status (prepared, sent) in ascending ID order. Unknown
+  scopes return not_found and unknown statuses return bad_request. Audits for the new actions
+  are optional.
+
+  Register a read-only converter under performance-notices in framehouse/migrations.py for the
+  existing manager-only store upgrade --name performance-notices (POST /v1/store/upgrade).
+  Skip a historical show if a sent notice references it in performance or any saved notice uses
+  its ID. On success the shared runner returns the inserted count as imported, sets upgrades[name]
+  to 2, and appends store.upgraded with the upgrade name as record_id and version=2 and the
+  imported count in details. A repeat returns imported=0 without rewriting the workspace.
+  Preserve format 1, existing notices, unrelated extensions, v1 performances and portable exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -46,12 +56,10 @@ instruction: |
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. A send after either
   performance date is a conflict. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/performance-notices.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12

@@ -5,28 +5,40 @@ instruction: |
   change. The desk must report the net correction rather than rewriting its history.
 
   - File a correction against a recorded mark on or after its attendance day. Keep mark, person,
-    before, corrected minutes, signed delta, reason, filing day and filed_by. Reject an
-    unchanged value or a second correction for the same mark.
+    scope, before, corrected minutes, delta (minutes minus before), reason, filing day and
+    filed_by. The signer and signing date start as null. An unchanged value or a second
+    correction for the same mark returns conflict (409).
   - Require a different person with manager permissions to sign off a filed correction on or
-    after filing. If the underlying minutes or mark status changed, reject the stale correction.
-    Persist the signer, signing date and signed status.
-  - On signoff also update the original attendance minutes, marking it corrected with original
-    minutes, reason and reviewed date. Workload reads keep using version-one marks and see the
-    new minutes.
+    after filing. Return forbidden (403) for self-signoff, even for a manager. If the underlying
+    minutes or mark status changed, return conflict. Persist signed_by, signed and signed status.
+  - In the same write update the version-one attendance mark's minutes, set its status to
+    corrected, copy before to original, copy reason and set reviewed to the signing date. The
+    existing workload query sees the updated minutes.
   - In the attendance-corrections section of the venue report, awaiting_review counts the
     corrections filed by the report day that are still in the filed state. net_minutes sums
     signed deltas through that day, including negative deltas.
-  - Convert historical corrected marks with original, reviewed and reason populated to signed
-    rows with the original mark ID and attendance day. Unknown actors stay null. Skip marks
-    already represented, preserve legacy rows and use the repeatable named upgrade.
+  - Convert corrected attendance marks with original, reviewed and reason populated to signed
+    rows. Use the mark ID for id and mark, copy its attendance day, map original to before and
+    reviewed to signed, and compute delta as for live records. Set filed_by and signed_by to
+    null. Skip a mark already referenced by the mark field of a signed correction.
 
-  Ship the commands as attendance-corrections file, attendance-corrections signoff and
-  attendance-corrections list, with the matching /v1/attendance-corrections/<action> routes.
-  The minimum roles are operator for file and manager for signoff.
-  Readers can list by scope and optional status (filed, signed) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add attendance-corrections file (POST, operator), signoff (POST, manager) and list
+  (GET, reader) to framehouse/registry.py with /v1/attendance-corrections/<action> routes. Wire
+  permissions in framehouse/policy.py. Use <group>.<action> keys with distinct en and fr success
+  messages in framehouse/messages.py. Register Table("attendance-corrections", 2) in
+  framehouse/schema.py and add the attendance-corrections section in framehouse/reporting.py
+  alongside existing sections. List by venue scope and optional status (filed, signed) in
+  ascending ID order. Unknown scopes return not_found and unknown statuses return bad_request.
+  Audits for the new actions are optional.
+
+  Register a read-only converter under attendance-corrections in framehouse/migrations.py
+  for the existing manager-only store upgrade --name attendance-corrections (POST /v1/store/upgrade).
+  If a live correction uses a historical mark's ID but refers to a different mark, return the
+  historical candidate so deskcore/history.py rejects the collision as conflict (409). The entire
+  workspace stays untouched on conflict. On success the shared runner returns the inserted count
+  as imported, sets upgrades[name] to 2, and appends store.upgraded with the upgrade name as
+  record_id and version=2 and the imported count in details. A repeat returns imported=0 without
+  rewriting the workspace. Preserve format 1, unrelated extensions, v1 marks and portable exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -40,12 +52,10 @@ instruction: |
   version. The other workflow fields are mark, person, day, before, minutes, delta, reason, filed_by, signed_by, signed.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/attendance-corrections.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12

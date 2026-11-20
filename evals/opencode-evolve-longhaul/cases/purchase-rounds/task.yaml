@@ -4,31 +4,40 @@ instruction: |
   Buyers want to review a combined order from several drafts before releasing the order to a
   supplier. The supplier totals must stay attached to the exact drafts that were reviewed.
 
-  - Assemble at least two distinct drafts for the same supplier and market. The round date
-    cannot precede an order. An order already in a pending round is unavailable. Save orders
-    as a list of snapshots with id, units and cents (unit price), sorted by order ID. Use the
-    same shape for live and imported rounds.
+  - Assemble at least two distinct drafts for the same supplier and market. Fewer than two or
+    repeated order IDs return bad_request (400). Different suppliers or markets, non-draft
+    orders and orders in another pending round return conflict (409). The round date must be
+    on or after every order day. Save orders as a list of snapshots with id, units and cents
+    (unit price), sorted by order ID. Use the same shape for live and imported rounds.
   - Group lines by product in product ID order, each with product, summed units and extended
     cents. Save the sum of extended cents as total_cents. The round starts with no released date.
-  - A manager releases once at or after assembly with the expected total. Any change to a source
-    order's status, quantity or price invalidates the review, even if the aggregate total still
-    matches. In one write mark every version-one order released with round and released
-    populated, and save the round's release date.
+  - A manager releases once at or after assembly with the expected total. A mismatched total or
+    any change to a source order's status, quantity or price returns conflict, even if the
+    aggregate total still matches. In one write, set each version-one order's status to released,
+    round to the workflow ID and released to the release date. Save the round as released.
   - Expose purchase_rounds in the market report with awaiting_release (sorted IDs assembled by
     the report day and released later or still unreleased) and released_cents through that day.
-  - Upgrade legacy released orders by round ID. Skip standalone releases and IDs already in
-    the version-two table. For each remaining group, require a common supplier, scope and release
-    date and use the latest order day as the assembly day. Inconsistent entries abort the whole
-    conversion as bad_store. Preserve saved rounds and paper orders and make repeat upgrades
-    a no-op.
+  - Convert released purchase-orders grouped by round, ignoring standalone releases. Allow a
+    single order in a historical round. Use the latest order day as the assembly day and require
+    a common supplier, scope and release date on or after that day. Inconsistent groups abort
+    the whole upgrade as bad_store (422).
 
-  Ship the commands as purchase-rounds assemble, purchase-rounds release and
-  purchase-rounds list, with the matching /v1/purchase-rounds/<action> routes.
-  The minimum roles are operator for assemble and manager for release.
-  Readers can list by scope and optional status (assembled, released) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add purchase-rounds assemble (POST, operator), release (POST, manager) and list (GET, reader)
+  to groveboard/registry.py with /v1/purchase-rounds/<action> routes. Wire permissions in
+  groveboard/policy.py. Use <group>.<action> keys with distinct en and fr success messages in
+  groveboard/messages.py. Register Table("purchase-rounds", 2) in groveboard/schema.py and
+  add the purchase_rounds section in groveboard/reporting.py alongside existing sections.
+  List by market scope and optional status (assembled, released) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request. Audits for the
+  new actions are optional.
+
+  Register a read-only converter under purchase-rounds in groveboard/migrations.py for the
+  existing manager-only store upgrade --name purchase-rounds (POST /v1/store/upgrade).
+  Skip any paper group whose round ID already exists in the version-two table, then validate
+  the remaining groups. On success the shared runner returns the inserted count as imported,
+  sets upgrades[name] to 2, and appends store.upgraded with the upgrade name as record_id and
+  version=2 and the imported count in details. A repeat returns imported=0 without rewriting
+  the workspace. Preserve format 1, saved rounds, unrelated extensions, paper orders and exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -42,12 +51,10 @@ instruction: |
   version. The other workflow fields are supplier, day, orders, lines, total_cents, released.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/purchase-rounds.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12

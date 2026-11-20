@@ -9,25 +9,35 @@ instruction: |
     units and borrower from the booking. A reservation can have only one handoff. A new handoff
     is staged with collected unset.
   - On collection, require the original borrower, a date at or after staging and a still-open
-    source with the same units and tool. Mark the handoff collected with its collection date and
-    update the original reservation's pickup, closed date and status. A second collection is a
-    conflict.
-  - On the desk report add reservation-handoffs with due (IDs staged by that date and not yet
-    collected that day, sorted) and collected_units (units collected at that destination on or
-    before the report date).
-  - Import collected paper reservations with a different pickup depot and a collection date,
-    using the reservation ID and reservation date for the historical handoff. Skip normal
-    pickups and already represented collections.
-  - Use the existing version-two extension format and named upgrade. Running it twice should add
-    no rows and leave the old reader and legacy export working on the same file.
+    source with the same units and tool. Mark the handoff collected with its collection date.
+    In the same write, set pickup to the destination, closed to the collection date and status
+    to collected on the original reservation. A borrower mismatch or second collection is a conflict.
+  - On the desk report add reservation-handoffs with due, the sorted IDs staged by the report
+    date and collected later or still uncollected, and collected_units, the units collected at
+    that destination on or before the report date.
+  - Import collected reservations whose pickup differs from their original scope and whose
+    closed date is set. Use the reservation ID for both id and reservation, copy its day, use the
+    original scope as origin and pickup as scope, and map closed to collected. Skip a reservation
+    already referenced by the reservation field of a collected handoff.
 
-  Ship the commands as reservation-handoffs stage, reservation-handoffs collect and
-  reservation-handoffs list, with the matching /v1/reservation-handoffs/<action> routes.
-  The minimum roles are operator for stage and manager for collect.
-  Readers can list by scope and optional status (staged, collected) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add reservation-handoffs stage (POST, operator), collect (POST, manager) and list
+  (GET, reader) to workyard/registry.py with /v1/reservation-handoffs/<action> routes. Wire
+  permissions in workyard/policy.py. Use <group>.<action> keys with distinct en and fr success
+  messages in workyard/messages.py. Register Table("reservation-handoffs", 2) in workyard/schema.py
+  and add the reservation-handoffs section in workyard/reporting.py alongside existing sections.
+  List by depot scope and optional status (staged, collected) in ascending ID order. Unknown
+  scopes return not_found and unknown statuses return bad_request. Audits for the new actions
+  are optional.
+
+  Register a read-only converter under reservation-handoffs in workyard/migrations.py for
+  the existing manager-only store upgrade --name reservation-handoffs (POST /v1/store/upgrade).
+  If a live handoff uses a paper reservation's ID but refers to a different reservation, return
+  the historical candidate so deskcore/history.py rejects the collision as conflict (409).
+  The entire workspace stays untouched on conflict. On success the shared runner returns the
+  inserted count as imported, sets upgrades[name] to 2, and appends store.upgraded with the
+  upgrade name as record_id and version=2 and the imported count in details. A repeat returns
+  imported=0 without rewriting the workspace. Preserve format 1, unrelated extensions, the old
+  reader and the legacy export.
 
   Use hyphens for underscores in CLI option names.
 
@@ -42,12 +52,10 @@ instruction: |
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. Staging with the
   original depot as the pickup is a bad_request. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/reservation-handoffs.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12

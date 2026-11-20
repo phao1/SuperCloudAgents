@@ -5,28 +5,39 @@ instruction: |
   disputed exposure and the actual approved charge in the same report.
 
   - File one dispute for a logged return that has damage, on or after intake day. Snapshot the
-    recorded damage, rate, tool and borrower and preserve the operator's reason. New disputes
-    are filed and have no ruling, charge or settlement date.
-  - Settle once on or after filing. The manager can waive from zero up to the damaged units. If
-    staff amended the rate or damage or closed the original intake in the meantime, reject
-    settlement. Charge (damaged minus waived) times the saved rate, record the result and update
-    the original intake to closed with its allowed units and settlement date.
-  - Add return-disputes to the depot report. open_cents sums the original damage charges of
-    disputes filed by the report day that are still open. settled_cents sums the charges from
-    rulings issued by that day. Report both in integer cents.
-  - Migrate historically closed damaged intakes with a ruling and settlement date to settled
-    disputes, preserving even zero waivers. Use the old intake ID and date and reason paper.
-    Skip undamaged intakes and those already represented.
-  - Preserve the version-one charge report and original reader. Add version-two records through
-    the named idempotent upgrade and preserve other tables.
+    recorded damage, rate, tool, borrower and scope and preserve the operator's reason. New
+    disputes are filed with waived, charge_cents and settled set to null. Filing a dispute for
+    an undamaged return or filing a duplicate returns conflict (409).
+  - Settle once on or after filing. A waiver must be an integer from zero through the damaged
+    units. Out-of-range values and booleans return bad_request (400). Changes to the original
+    rate, damage or logged status return conflict. Save charge_cents as (damaged minus waived)
+    times the saved rate, the waived units and the settlement date. In the same write set the
+    original return's status to closed, allowed to the waived units and settled to that date.
+  - Add return-disputes to the depot report. open_cents sums damaged times rate for disputes
+    filed by the report day that are still in filed status. settled_cents sums the charges
+    from rulings issued by that day. Report both in integer cents.
+  - Convert closed returns with damage, an allowed value (including zero) and settled date to
+    settled disputes. Use the return ID for id and intake and copy its day. Map allowed to
+    waived, compute charge_cents as for live records and use reason paper. Skip a return already
+    referenced by the intake field of a settled dispute.
 
-  Ship the commands as return-disputes file, return-disputes settle and
-  return-disputes list, with the matching /v1/return-disputes/<action> routes.
-  The minimum roles are operator for file and manager for settle.
-  Readers can list by scope and optional status (filed, settled) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add return-disputes file (POST, operator), settle (POST, manager) and list (GET, reader)
+  to workyard/registry.py with /v1/return-disputes/<action> routes. Wire permissions in
+  workyard/policy.py. Use <group>.<action> keys with distinct en and fr success messages in
+  workyard/messages.py. Register Table("return-disputes", 2) in workyard/schema.py and add
+  the return-disputes section in workyard/reporting.py alongside existing sections. List by
+  depot scope and optional status (filed, settled) in ascending ID order. Unknown scopes return
+  not_found and unknown statuses return bad_request. Audits for the new actions are optional.
+
+  Register a read-only converter under return-disputes in workyard/migrations.py for the existing
+  manager-only store upgrade --name return-disputes (POST /v1/store/upgrade). If a live dispute
+  uses a historical return's ID but refers to a different return, return the historical candidate
+  so deskcore/history.py rejects the collision as conflict (409). The entire workspace stays
+  untouched on conflict. On success the shared runner returns the inserted count as imported,
+  sets upgrades[name] to 2, and appends store.upgraded with the upgrade name as record_id and
+  version=2 and the imported count in details. A repeat returns imported=0 without rewriting
+  the workspace. Preserve format 1, unrelated extensions, the old reader, the version-one
+  charge report and portable exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -40,12 +51,10 @@ instruction: |
   version. The other workflow fields are intake, tool, borrower, damaged, rate, day, reason, waived, charge_cents, settled.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
   state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/return-disputes.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12

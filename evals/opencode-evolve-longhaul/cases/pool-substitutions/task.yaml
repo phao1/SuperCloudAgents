@@ -14,23 +14,34 @@ instruction: |
     live offers and live accepted substitutions also consume that quantity, regardless of
     ordering depot. Historical substitutions do not hold current stock.
   - Accept once on or after the offer date. Recheck the original order is open at the agreed
-    units and recheck the alternate's remaining capacity, excluding this offer. Write the legacy
-    substitute, fulfilled status and closed date as well as the accepted workflow state and
-    date.
+    units and recheck that the alternate is ready with enough remaining capacity, excluding
+    this offer. In one write set the v1 order's substitute to the alternate, status to fulfilled
+    and closed to the acceptance date, then save the workflow's accepted status and date.
   - In the ordering depot's desk report, the pool-substitutions section gives offered (sorted
     IDs of offers made by the report day that are still open) and accepted_units (sum of units
     from acceptances through that day).
-  - Migrate fulfilled v1 orders with a substitute and closed date, keyed by order ID. Mark these
-    accepted and historical, keep the legacy files readable, and skip orders already represented
-    by a live workflow. Repeat upgrade without changes.
+  - Convert fulfilled pool-orders with a substitute and closed date. Use the order ID for id
+    and order and copy scope, units and day. Map tool to original, substitute to alternate and
+    closed to accepted, and use the alternate's depot as source. Set status to accepted and
+    historical to true. Skip an order referenced by the order field of an accepted substitution.
 
-  Ship the commands as pool-substitutions offer, pool-substitutions accept and
-  pool-substitutions list, with the matching /v1/pool-substitutions/<action> routes.
-  The minimum roles are operator for offer and manager for accept.
-  Readers can list by scope and optional status (offered, accepted) in ascending ID order.
-  Unknown scopes return not_found and unknown statuses return bad_request.
-  Audit entries for the new actions are optional. Keep the existing upgrade audit behavior.
-  Use English and French success messages through the existing response catalogs.
+  Add pool-substitutions offer (POST, operator), accept (POST, manager) and list (GET, reader)
+  to workyard/registry.py with /v1/pool-substitutions/<action> routes. Wire permissions in
+  workyard/policy.py. Use <group>.<action> keys with distinct en and fr success messages in
+  workyard/messages.py. Register Table("pool-substitutions", 2) in workyard/schema.py and add
+  the pool-substitutions section in workyard/reporting.py alongside existing sections.
+  List by ordering depot scope and optional status (offered, accepted) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request. Audits for the
+  new actions are optional.
+
+  Register a read-only converter under pool-substitutions in workyard/migrations.py for the
+  existing manager-only store upgrade --name pool-substitutions (POST /v1/store/upgrade).
+  If a live substitution uses a paper order's ID but refers to a different order, return the
+  historical candidate so deskcore/history.py rejects the collision as conflict (409). The entire
+  workspace stays untouched on conflict. On success the shared runner returns the inserted count
+  as imported, sets upgrades[name] to 2, and appends store.upgraded with the upgrade name as
+  record_id and version=2 and the imported count in details. A repeat returns imported=0 without
+  rewriting the workspace. Preserve format 1, unrelated extensions, v1 orders and portable exports.
 
   Use hyphens for underscores in CLI option names.
 
@@ -43,13 +54,12 @@ instruction: |
   The write response and list entries are saved workflow records with id, scope, status and
   version. The other workflow fields are order, original, alternate, source, units, day, accepted, historical.
   Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
-  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
-  Accept valid version-one workspaces even if some live workflows have already run. History
-  upgrade must preserve those version-two records without importing them again.
+  state transitions, capacity, stale source records or duplicate work. Using a retired alternate
+  returns conflict. Rejected changes are atomic.
 
   Keep README.md, the existing docs and tests, tools/read_v1.py,
   fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
   docs/pool-substitutions.md with all three command examples and a store upgrade example.
-  Add at least two focused unittest tests and run python -B verify.py.
+  Add at least two focused unittest tests in a new tests/test_*.py file and run python -B verify.py.
 verify_command: python -B verify.py
 image: python:3.12
