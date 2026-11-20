@@ -1,0 +1,57 @@
+split: dev
+category: allocation
+instruction: |
+  The member desks sometimes request a model their own depot cannot fill. Let dispatchers
+  reserve an equivalent from the shared pool and have a manager confirm the substitution before
+  fulfillment.
+
+  - Offer one substitution per open order, on or after the order date. The alternate must be a
+    different ready tool of the same kind. Cross-depot fulfillment is allowed. Store order,
+    original model, alternate, source depot, units, offer day and the order's own depot as
+    scope. A live offer is not historical and has no acceptance date yet.
+  - An offer holds units against the alternate's ready quantity after open reservations. Other
+    live offers and live accepted substitutions also consume that quantity, regardless of
+    ordering depot. Historical substitutions do not hold current stock.
+  - Accept once on or after the offer date. Recheck the original order is open at the agreed
+    units and recheck the alternate's remaining capacity, excluding this offer. Write the legacy
+    substitute, fulfilled status and closed date as well as the accepted workflow state and
+    date.
+  - In the desk report, pool-substitutions gives offered IDs sorted and accepted_units through
+    the selected day for the ordering depot. A subsequently accepted offer stays visible when
+    viewing the earlier date.
+  - Migrate fulfilled v1 orders with a substitute and closed date, keyed by order ID. Mark these
+    accepted and historical, keep the legacy files readable, and skip orders already represented
+    by a live workflow. Repeat upgrade without changes.
+  - Ship the CLI and API operations and document the permissions, bilingual responses and audit
+    behavior.
+
+  Ship the commands as pool-substitutions offer, pool-substitutions accept and
+  pool-substitutions list, with the matching /v1/pool-substitutions/<action> routes.
+  The minimum roles are operator for offer and manager for accept.
+  Readers can list by scope and optional status (offered, accepted) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register pool-substitutions.offered and pool-substitutions.accepted.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | offer | id (new workflow identifier), order (open pool order), alternate (alternate model), day (effective calendar day) |
+  | accept | id (existing workflow identifier), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are order, original, alternate, source, units, day, accepted, historical.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/pool-substitutions.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

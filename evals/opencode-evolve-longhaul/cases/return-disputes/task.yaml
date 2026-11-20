@@ -1,0 +1,54 @@
+split: holdout
+category: reconciliation
+instruction: |
+  Return staff need to file damage disputes for manager rulings. The finance desk needs the
+  disputed exposure and the actual approved charge in the same report.
+
+  - File one dispute for a logged return that has damage, on or after intake day. Snapshot the
+    recorded damage, rate, tool and borrower and preserve the operator's reason. New disputes
+    are filed and have no ruling, charge or settlement date.
+  - Settle once on or after filing. The manager can waive from zero up to the damaged units. If
+    staff amended the rate or damage or closed the original intake in the meantime, reject
+    settlement. Charge (damaged minus waived) times the saved rate, record the result and update
+    the original intake to closed with its allowed units and settlement date.
+  - Add return-disputes to the depot report. For the date and depot return open_cents from
+    disputes pending at that date and settled_cents from rulings issued that day or earlier,
+    always in integer cents.
+  - Migrate historically closed damaged intakes with a ruling and settlement date to settled
+    disputes, preserving even zero waivers. Use the old intake ID and date and reason paper.
+    Skip undamaged intakes and those already represented.
+  - Preserve the version-one charge report and original reader. Add version-two records through
+    the named idempotent upgrade and preserve other tables.
+  - Make both actions and the filtered list available on the desk interfaces with the required
+    roles, translations and audit trail.
+
+  Ship the commands as return-disputes file, return-disputes settle and
+  return-disputes list, with the matching /v1/return-disputes/<action> routes.
+  The minimum roles are operator for file and manager for settle.
+  Readers can list by scope and optional status (filed, settled) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register return-disputes.filed and return-disputes.settled.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | file | id (new workflow identifier), intake (logged intake ID), day (effective calendar day), reason (operator note) |
+  | settle | id (existing workflow identifier), waived (damaged units to waive), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are intake, tool, borrower, damaged, rate, day, reason, waived, charge_cents, settled.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/return-disputes.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

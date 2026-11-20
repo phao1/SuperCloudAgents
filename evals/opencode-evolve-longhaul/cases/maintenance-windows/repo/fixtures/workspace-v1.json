@@ -1,0 +1,443 @@
+{
+  "audit": [
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "depots.added",
+      "record_id": "north",
+      "seq": 1,
+      "version": 1
+    },
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "depots.added",
+      "record_id": "south",
+      "seq": 2,
+      "version": 1
+    }
+  ],
+  "format": 1,
+  "members": {
+    "clerk": {
+      "active": true,
+      "name": "Desk clerk",
+      "role": "operator"
+    },
+    "lead": {
+      "active": true,
+      "name": "Desk lead",
+      "role": "manager"
+    },
+    "ridge": {
+      "active": true,
+      "name": "Ridge operator",
+      "role": "operator"
+    },
+    "viewer": {
+      "active": true,
+      "name": "Read-only visitor",
+      "role": "reader"
+    }
+  },
+  "tables": {
+    "borrowers": {
+      "alba": {
+        "id": "alba",
+        "name": "Alba Ruiz",
+        "scope": "north",
+        "status": "active",
+        "tier": "member",
+        "version": 1
+      },
+      "bo": {
+        "id": "bo",
+        "name": "Bo Han",
+        "scope": "north",
+        "status": "active",
+        "tier": "guest",
+        "version": 1
+      },
+      "cam": {
+        "id": "cam",
+        "name": "Cam Singh",
+        "scope": "south",
+        "status": "active",
+        "tier": "member",
+        "version": 1
+      },
+      "dara": {
+        "id": "dara",
+        "name": "Dara Le",
+        "scope": "south",
+        "status": "inactive",
+        "tier": "guest",
+        "version": 1
+      }
+    },
+    "depots": {
+      "north": {
+        "capacity": 60,
+        "id": "north",
+        "name": "North Yard",
+        "region": "North district",
+        "version": 1
+      },
+      "south": {
+        "capacity": 120,
+        "id": "south",
+        "name": "South Workshop",
+        "region": "South district",
+        "version": 1
+      }
+    },
+    "desk-memos": {
+      "memo-north": {
+        "author": "Léa",
+        "day": "2025-04-01",
+        "id": "memo-north",
+        "message": "Keep a copy at the main desk.",
+        "scope": "north",
+        "version": 1
+      },
+      "memo-south": {
+        "author": "Karl",
+        "day": "2025-04-01",
+        "id": "memo-south",
+        "message": "Use the side entrance.",
+        "scope": "south",
+        "version": 1
+      }
+    },
+    "pool-orders": {
+      "paper-pool-a": {
+        "closed": "2025-04-04",
+        "day": "2025-04-01",
+        "id": "paper-pool-a",
+        "scope": "north",
+        "status": "fulfilled",
+        "substitute": "driver-mini",
+        "tool": "driver",
+        "units": 3,
+        "version": 1
+      },
+      "paper-pool-b": {
+        "closed": "2025-04-05",
+        "day": "2025-04-02",
+        "id": "paper-pool-b",
+        "scope": "south",
+        "status": "fulfilled",
+        "substitute": "driver",
+        "tool": "driver-yard",
+        "units": 1,
+        "version": 1
+      },
+      "pool-a": {
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "pool-a",
+        "scope": "north",
+        "status": "open",
+        "substitute": null,
+        "tool": "driver",
+        "units": 4,
+        "version": 1
+      },
+      "pool-b": {
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "pool-b",
+        "scope": "north",
+        "status": "open",
+        "substitute": null,
+        "tool": "driver",
+        "units": 3,
+        "version": 1
+      },
+      "pool-s": {
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "pool-s",
+        "scope": "south",
+        "status": "open",
+        "substitute": null,
+        "tool": "driver-yard",
+        "units": 2,
+        "version": 1
+      },
+      "same-model": {
+        "closed": "2025-04-03",
+        "day": "2025-04-01",
+        "id": "same-model",
+        "scope": "north",
+        "status": "fulfilled",
+        "substitute": null,
+        "tool": "saw",
+        "units": 1,
+        "version": 1
+      }
+    },
+    "reservations": {
+      "normal-pickup": {
+        "borrower": "bo",
+        "closed": "2025-04-04",
+        "day": "2025-04-03",
+        "id": "normal-pickup",
+        "pickup": null,
+        "scope": "north",
+        "status": "collected",
+        "tool": "driver-mini",
+        "units": 1,
+        "version": 1
+      },
+      "paper-handoff-a": {
+        "borrower": "alba",
+        "closed": "2025-04-04",
+        "day": "2025-04-02",
+        "id": "paper-handoff-a",
+        "pickup": "south",
+        "scope": "north",
+        "status": "collected",
+        "tool": "saw",
+        "units": 2,
+        "version": 1
+      },
+      "paper-handoff-b": {
+        "borrower": "cam",
+        "closed": "2025-04-03",
+        "day": "2025-04-03",
+        "id": "paper-handoff-b",
+        "pickup": "north",
+        "scope": "south",
+        "status": "collected",
+        "tool": "driver-yard",
+        "units": 1,
+        "version": 1
+      },
+      "reserve-a": {
+        "borrower": "alba",
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "reserve-a",
+        "pickup": null,
+        "scope": "north",
+        "status": "open",
+        "tool": "driver",
+        "units": 3,
+        "version": 1
+      },
+      "reserve-b": {
+        "borrower": "bo",
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "reserve-b",
+        "pickup": null,
+        "scope": "north",
+        "status": "open",
+        "tool": "driver-mini",
+        "units": 1,
+        "version": 1
+      },
+      "reserve-s": {
+        "borrower": "cam",
+        "closed": null,
+        "day": "2025-04-10",
+        "id": "reserve-s",
+        "pickup": null,
+        "scope": "south",
+        "status": "open",
+        "tool": "driver-yard",
+        "units": 2,
+        "version": 1
+      }
+    },
+    "returns": {
+      "clean-return": {
+        "allowed": 0,
+        "borrower": "bo",
+        "damaged": 0,
+        "day": "2025-04-01",
+        "id": "clean-return",
+        "rate": 2000,
+        "scope": "north",
+        "settled": "2025-04-02",
+        "status": "closed",
+        "tool": "saw",
+        "units": 1,
+        "version": 1
+      },
+      "paper-return-a": {
+        "allowed": 1,
+        "borrower": "alba",
+        "damaged": 2,
+        "day": "2025-04-01",
+        "id": "paper-return-a",
+        "rate": 1750,
+        "scope": "north",
+        "settled": "2025-04-03",
+        "status": "closed",
+        "tool": "saw",
+        "units": 2,
+        "version": 1
+      },
+      "paper-return-b": {
+        "allowed": 0,
+        "borrower": "cam",
+        "damaged": 1,
+        "day": "2025-04-03",
+        "id": "paper-return-b",
+        "rate": 1500,
+        "scope": "south",
+        "settled": "2025-04-04",
+        "status": "closed",
+        "tool": "driver-yard",
+        "units": 1,
+        "version": 1
+      },
+      "return-a": {
+        "allowed": null,
+        "borrower": "alba",
+        "damaged": 3,
+        "day": "2025-04-10",
+        "id": "return-a",
+        "rate": 2500,
+        "scope": "north",
+        "settled": null,
+        "status": "logged",
+        "tool": "driver",
+        "units": 4,
+        "version": 1
+      },
+      "return-ok": {
+        "allowed": null,
+        "borrower": "bo",
+        "damaged": 0,
+        "day": "2025-04-10",
+        "id": "return-ok",
+        "rate": 3000,
+        "scope": "north",
+        "settled": null,
+        "status": "logged",
+        "tool": "saw",
+        "units": 1,
+        "version": 1
+      },
+      "return-s": {
+        "allowed": null,
+        "borrower": "cam",
+        "damaged": 1,
+        "day": "2025-04-10",
+        "id": "return-s",
+        "rate": 1800,
+        "scope": "south",
+        "settled": null,
+        "status": "logged",
+        "tool": "driver-yard",
+        "units": 3,
+        "version": 1
+      }
+    },
+    "service-logs": {
+      "discarded-log": {
+        "day": "2025-04-02",
+        "end": "2025-04-02",
+        "id": "discarded-log",
+        "outcome": null,
+        "result_day": null,
+        "scope": "north",
+        "status": "void",
+        "tool": "driver-mini",
+        "units": 1,
+        "version": 1
+      },
+      "overhaul-a": {
+        "day": "2025-04-02",
+        "end": "2025-04-04",
+        "id": "overhaul-a",
+        "outcome": "ready",
+        "result_day": "2025-04-04",
+        "scope": "north",
+        "status": "done",
+        "tool": "driver",
+        "units": 2,
+        "version": 1
+      },
+      "overhaul-b": {
+        "day": "2025-04-03",
+        "end": "2025-04-05",
+        "id": "overhaul-b",
+        "outcome": "quarantined",
+        "result_day": "2025-04-06",
+        "scope": "south",
+        "status": "done",
+        "tool": "driver-yard",
+        "units": 2,
+        "version": 1
+      },
+      "shop-log": {
+        "day": "2025-04-10",
+        "end": "2025-04-11",
+        "id": "shop-log",
+        "outcome": null,
+        "result_day": null,
+        "scope": "north",
+        "status": "planned",
+        "tool": "saw",
+        "units": 1,
+        "version": 1
+      }
+    },
+    "tools": {
+      "driver": {
+        "cents": 19000,
+        "id": "driver",
+        "kind": "drill",
+        "name": "Impact driver",
+        "scope": "north",
+        "status": "ready",
+        "units": 9,
+        "version": 1
+      },
+      "driver-mini": {
+        "cents": 13500,
+        "id": "driver-mini",
+        "kind": "drill",
+        "name": "Compact driver",
+        "scope": "north",
+        "status": "ready",
+        "units": 5,
+        "version": 1
+      },
+      "driver-yard": {
+        "cents": 15700,
+        "id": "driver-yard",
+        "kind": "drill",
+        "name": "Yard driver",
+        "scope": "south",
+        "status": "ready",
+        "units": 7,
+        "version": 1
+      },
+      "saw": {
+        "cents": 28000,
+        "id": "saw",
+        "kind": "saw",
+        "name": "Mitre saw",
+        "scope": "north",
+        "status": "ready",
+        "units": 4,
+        "version": 1
+      },
+      "saw-old": {
+        "cents": 17500,
+        "id": "saw-old",
+        "kind": "saw",
+        "name": "Retired saw",
+        "scope": "south",
+        "status": "retired",
+        "units": 1,
+        "version": 1
+      }
+    }
+  }
+}

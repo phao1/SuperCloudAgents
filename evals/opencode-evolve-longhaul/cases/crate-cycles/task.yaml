@@ -1,0 +1,56 @@
+split: dev
+category: reconciliation
+instruction: |
+  A market loans crates to suppliers against a deposit. Each delivery back should credit only
+  the crates returned, and a network-free desk needs retryable check-in slips.
+
+  - Issue crates to an active supplier in its home market. Across version-two cycles in that
+    market, outstanding crates at issue time plus the new loan must fit its capacity. Store
+    supplier, units, rate, issue day, returned zero and balance_cents equal to units times rate.
+  - Check in one slip at a time, in date order starting no earlier than issue. A slip saves
+    slip, units, day and refund_cents at the original rate. The returns list orders by day then
+    slip. Reject over-returns. The cycle is out until all issued units are returned, then
+    closed.
+  - Replaying an identical slip on the cycle should return its current row without reapplying
+    the refund or appending any audit entry, even after closure. Reusing the slip with different
+    details is a conflict.
+  - Draw crate-cycles in the market report with crates_out and deposit_cents from cycles and
+    returns on or before that date. This is a separate balance from the original ungrouped paper
+    register.
+  - Upgrade posted paper movements with a cycle ID, using the one outgoing entry and the
+    matching returns as slips. Require matching market, supplier and rate, chronological dates
+    and a nonnegative remainder. Reject invalid groups as bad_store. Ignore void and ungrouped
+    movements, retain the old register and keep repeat conversion safe.
+  - Expose the two actions and scope-based list with desk permissions, bilingual messages and
+    audit events for every new slip.
+
+  Ship the commands as crate-cycles issue, crate-cycles check-in and
+  crate-cycles list, with the matching /v1/crate-cycles/<action> routes.
+  The minimum roles are operator for issue and manager for check-in.
+  Readers can list by scope and optional status (out, closed) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register crate-cycles.issued and crate-cycles.checked-in.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | issue | id (new workflow identifier), supplier (active supplier), units (crates sent), rate (deposit per crate in cents), day (effective calendar day) |
+  | check-in | id (existing workflow identifier), slip (return slip ID), units (crates returned), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are supplier, units, rate, day, returned, balance_cents, returns.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/crate-cycles.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

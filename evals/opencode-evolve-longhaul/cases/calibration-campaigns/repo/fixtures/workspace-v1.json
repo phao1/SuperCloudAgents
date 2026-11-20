@@ -1,0 +1,435 @@
+{
+  "audit": [
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "stations.added",
+      "record_id": "north",
+      "seq": 1,
+      "version": 1
+    },
+    {
+      "actor": "lead",
+      "details": {},
+      "event": "stations.added",
+      "record_id": "south",
+      "seq": 2,
+      "version": 1
+    }
+  ],
+  "format": 1,
+  "members": {
+    "clerk": {
+      "active": true,
+      "name": "Desk clerk",
+      "role": "operator"
+    },
+    "lead": {
+      "active": true,
+      "name": "Desk lead",
+      "role": "manager"
+    },
+    "ridge": {
+      "active": true,
+      "name": "Ridge operator",
+      "role": "operator"
+    },
+    "viewer": {
+      "active": true,
+      "name": "Read-only visitor",
+      "role": "reader"
+    }
+  },
+  "tables": {
+    "calibration-logs": {
+      "current-meter": {
+        "campaign": null,
+        "day": "2025-04-10",
+        "id": "current-meter",
+        "meter": "depth",
+        "reading": 3,
+        "reviewed": null,
+        "scope": "north",
+        "status": "logged",
+        "version": 1
+      },
+      "paper-meter-a": {
+        "campaign": "paper-meters",
+        "day": "2025-04-02",
+        "id": "paper-meter-a",
+        "meter": "depth",
+        "reading": -5,
+        "reviewed": "2025-04-03",
+        "scope": "north",
+        "status": "reviewed",
+        "version": 1
+      },
+      "paper-meter-b": {
+        "campaign": "paper-meters",
+        "day": "2025-04-02",
+        "id": "paper-meter-b",
+        "meter": "temp",
+        "reading": 2,
+        "reviewed": "2025-04-03",
+        "scope": "north",
+        "status": "reviewed",
+        "version": 1
+      },
+      "paper-meter-s": {
+        "campaign": "southern-meters",
+        "day": "2025-04-03",
+        "id": "paper-meter-s",
+        "meter": "cond",
+        "reading": 1,
+        "reviewed": "2025-04-04",
+        "scope": "south",
+        "status": "reviewed",
+        "version": 1
+      }
+    },
+    "crews": {
+      "brook": {
+        "id": "brook",
+        "lead": "clerk",
+        "name": "Brook Crew",
+        "scope": "north",
+        "status": "active",
+        "version": 1
+      },
+      "east": {
+        "id": "east",
+        "lead": "lead",
+        "name": "East Crew",
+        "scope": "south",
+        "status": "active",
+        "version": 1
+      },
+      "retired": {
+        "id": "retired",
+        "lead": "viewer",
+        "name": "Retired Crew",
+        "scope": "south",
+        "status": "inactive",
+        "version": 1
+      },
+      "ridge": {
+        "id": "ridge",
+        "lead": "ridge",
+        "name": "Ridge Crew",
+        "scope": "north",
+        "status": "active",
+        "version": 1
+      }
+    },
+    "desk-memos": {
+      "memo-north": {
+        "author": "Léa",
+        "day": "2025-04-01",
+        "id": "memo-north",
+        "message": "Keep a copy at the main desk.",
+        "scope": "north",
+        "version": 1
+      },
+      "memo-south": {
+        "author": "Karl",
+        "day": "2025-04-01",
+        "id": "memo-south",
+        "message": "Use the side entrance.",
+        "scope": "south",
+        "version": 1
+      }
+    },
+    "incidents": {
+      "incident-a": {
+        "crew": "brook",
+        "day": "2025-04-10",
+        "due": null,
+        "former": null,
+        "id": "incident-a",
+        "priority": "urgent",
+        "received": null,
+        "scope": "north",
+        "status": "open",
+        "version": 1
+      },
+      "incident-b": {
+        "crew": "brook",
+        "day": "2025-04-10",
+        "due": null,
+        "former": null,
+        "id": "incident-b",
+        "priority": "normal",
+        "received": null,
+        "scope": "north",
+        "status": "open",
+        "version": 1
+      },
+      "incident-s": {
+        "crew": "east",
+        "day": "2025-04-10",
+        "due": null,
+        "former": null,
+        "id": "incident-s",
+        "priority": "normal",
+        "received": null,
+        "scope": "south",
+        "status": "open",
+        "version": 1
+      },
+      "paper-incident-a": {
+        "crew": "east",
+        "day": "2025-04-01",
+        "due": "2025-04-03",
+        "former": "brook",
+        "id": "paper-incident-a",
+        "priority": "urgent",
+        "received": "2025-04-02",
+        "scope": "north",
+        "status": "forwarded",
+        "version": 1
+      },
+      "paper-incident-b": {
+        "crew": "brook",
+        "day": "2025-04-03",
+        "due": "2025-04-05",
+        "former": "east",
+        "id": "paper-incident-b",
+        "priority": "normal",
+        "received": "2025-04-04",
+        "scope": "south",
+        "status": "forwarded",
+        "version": 1
+      }
+    },
+    "meters": {
+      "cond": {
+        "id": "cond",
+        "kind": "conductivity",
+        "name": "Conductivity meter",
+        "scope": "south",
+        "status": "active",
+        "tolerance": 8,
+        "version": 1
+      },
+      "depth": {
+        "id": "depth",
+        "kind": "depth",
+        "name": "Depth pole",
+        "scope": "north",
+        "status": "active",
+        "tolerance": 4,
+        "version": 1
+      },
+      "temp": {
+        "id": "temp",
+        "kind": "temperature",
+        "name": "Temperature meter",
+        "scope": "north",
+        "status": "active",
+        "tolerance": 2,
+        "version": 1
+      },
+      "temp-old": {
+        "id": "temp-old",
+        "kind": "temperature",
+        "name": "Old temperature meter",
+        "scope": "north",
+        "status": "retired",
+        "tolerance": 3,
+        "version": 1
+      }
+    },
+    "samples": {
+      "paper-sample-a": {
+        "day": "2025-04-02",
+        "held": "2025-04-02",
+        "hold": "paper-hold",
+        "id": "paper-sample-a",
+        "note": "Labels unclear",
+        "resolved": "2025-04-04",
+        "scope": "north",
+        "status": "cleared",
+        "version": 1,
+        "water": "stream"
+      },
+      "paper-sample-b": {
+        "day": "2025-04-02",
+        "held": "2025-04-02",
+        "hold": "paper-hold",
+        "id": "paper-sample-b",
+        "note": "Labels unclear",
+        "resolved": "2025-04-04",
+        "scope": "north",
+        "status": "discarded",
+        "version": 1,
+        "water": "stream"
+      },
+      "paper-sample-s": {
+        "day": "2025-04-03",
+        "held": "2025-04-03",
+        "hold": "paper-south",
+        "id": "paper-sample-s",
+        "note": "Duplicate reading",
+        "resolved": "2025-04-05",
+        "scope": "south",
+        "status": "cleared",
+        "version": 1,
+        "water": "rain"
+      },
+      "sample-a": {
+        "day": "2025-04-10",
+        "held": null,
+        "hold": null,
+        "id": "sample-a",
+        "note": null,
+        "resolved": null,
+        "scope": "north",
+        "status": "logged",
+        "version": 1,
+        "water": "stream"
+      },
+      "sample-b": {
+        "day": "2025-04-10",
+        "held": null,
+        "hold": null,
+        "id": "sample-b",
+        "note": null,
+        "resolved": null,
+        "scope": "north",
+        "status": "logged",
+        "version": 1,
+        "water": "stream"
+      },
+      "sample-c": {
+        "day": "2025-04-10",
+        "held": null,
+        "hold": null,
+        "id": "sample-c",
+        "note": null,
+        "resolved": null,
+        "scope": "north",
+        "status": "logged",
+        "version": 1,
+        "water": "rain"
+      },
+      "sample-s": {
+        "day": "2025-04-10",
+        "held": null,
+        "hold": null,
+        "id": "sample-s",
+        "note": null,
+        "resolved": null,
+        "scope": "south",
+        "status": "logged",
+        "version": 1,
+        "water": "stream"
+      }
+    },
+    "stations": {
+      "north": {
+        "capacity": 60,
+        "district": "North district",
+        "id": "north",
+        "name": "North Weir",
+        "version": 1
+      },
+      "south": {
+        "capacity": 120,
+        "district": "South district",
+        "id": "south",
+        "name": "South Culvert",
+        "version": 1
+      }
+    },
+    "visits": {
+      "later": {
+        "crew": "brook",
+        "day": "2025-04-11",
+        "dispatched": null,
+        "id": "later",
+        "position": 1,
+        "route": null,
+        "scope": "north",
+        "status": "scheduled",
+        "version": 1
+      },
+      "paper-visit-a": {
+        "crew": "brook",
+        "day": "2025-04-04",
+        "dispatched": "2025-04-02",
+        "id": "paper-visit-a",
+        "position": 1,
+        "route": "paper-route",
+        "scope": "north",
+        "status": "done",
+        "version": 1
+      },
+      "paper-visit-b": {
+        "crew": "brook",
+        "day": "2025-04-04",
+        "dispatched": "2025-04-02",
+        "id": "paper-visit-b",
+        "position": 2,
+        "route": "paper-route",
+        "scope": "south",
+        "status": "dispatched",
+        "version": 1
+      },
+      "same-stop": {
+        "crew": "brook",
+        "day": "2025-04-04",
+        "dispatched": null,
+        "id": "same-stop",
+        "position": 2,
+        "route": null,
+        "scope": "north",
+        "status": "done",
+        "version": 1
+      },
+      "visit-a": {
+        "crew": "brook",
+        "day": "2025-04-10",
+        "dispatched": null,
+        "id": "visit-a",
+        "position": 3,
+        "route": null,
+        "scope": "north",
+        "status": "scheduled",
+        "version": 1
+      },
+      "visit-b": {
+        "crew": "brook",
+        "day": "2025-04-10",
+        "dispatched": null,
+        "id": "visit-b",
+        "position": 1,
+        "route": null,
+        "scope": "south",
+        "status": "scheduled",
+        "version": 1
+      },
+      "visit-c": {
+        "crew": "brook",
+        "day": "2025-04-10",
+        "dispatched": null,
+        "id": "visit-c",
+        "position": 2,
+        "route": null,
+        "scope": "north",
+        "status": "scheduled",
+        "version": 1
+      },
+      "visit-s": {
+        "crew": "east",
+        "day": "2025-04-10",
+        "dispatched": null,
+        "id": "visit-s",
+        "position": 1,
+        "route": null,
+        "scope": "south",
+        "status": "scheduled",
+        "version": 1
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+split: dev
+category: batch-commit
+instruction: |
+  Station staff need to schedule a group of meters and review all deviations against the agreed
+  tolerance values in one decision.
+
+  - Schedule active meters from one station, storing sorted meter IDs and each meter's tolerance
+    in limits. A meter cannot be pending in two campaigns on the same day. A scheduled campaign
+    starts with empty readings and flags and no reviewed date.
+  - Review all scheduled meters in one operation on or after the planned day. Require exactly
+    one signed integer reading for every meter and recheck that they are still active. A reading
+    is flagged only when its absolute value exceeds the saved tolerance. Later tolerance changes
+    must not change the flags.
+  - Persist reviewed, readings and sorted flag IDs with reviewed status. Repeated review is a
+    conflict. Keep individual legacy readings and tolerances usable.
+  - The calibration-campaigns section gives pending campaign IDs and sorted distinct
+    flagged_meters through the report date for that station.
+  - Upgrade legacy logs grouped by campaign ID. Every member must be reviewed, with a common
+    station, entry day and review date and a unique meter within the group. Snapshot the meter
+    tolerances at conversion and derive flags. Reject incomplete or inconsistent groups as
+    bad_store. Preserve the old data and make repeat conversion a no-op.
+  - Ship the commands and list on the standard interfaces with the desk's roles, localized
+    messages and audit entries.
+
+  Ship the commands as calibration-campaigns schedule, calibration-campaigns review and
+  calibration-campaigns list, with the matching /v1/calibration-campaigns/<action> routes.
+  The minimum roles are operator for schedule and manager for review.
+  Readers can list by scope and optional status (scheduled, reviewed) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register calibration-campaigns.scheduled and calibration-campaigns.reviewed.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | schedule | id (new workflow identifier), scope (station), meters (JSON array of meter IDs), day (effective calendar day) |
+  | review | id (existing workflow identifier), readings (JSON object mapping meter IDs to signed integer deviations), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are meters, day, limits, readings, flags, reviewed.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/calibration-campaigns.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

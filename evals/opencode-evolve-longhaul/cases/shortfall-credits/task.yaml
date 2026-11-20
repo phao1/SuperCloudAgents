@@ -1,0 +1,55 @@
+split: dev
+category: reconciliation
+instruction: |
+  Receiving staff need to file parts of a delivery shortage as credit claims. Finance can issue
+  a smaller credit than claimed, and overlapping pending claims must not reserve the same units.
+
+  - Claim units against a logged delivery at or after its entry date. Total pending units cannot
+    exceed ordered minus received minus previously credited units. Save the line, product,
+    units, unit_cents, claim day and reason. Start in claimed with no grant or issue date.
+  - Issue a claim once at or after its date. Grants from zero to the claimed units are valid,
+    and each grant consumes only its own credit. Recheck the original delivered quantities and
+    unit price against the claim and guard against exceeding the shortfall when earlier claims
+    have already issued.
+  - An issue sets the workflow granted, credit_cents and issued fields. In the same write add
+    the grant to the old line's credit, set its credited date and mark it credited. New claims
+    only start on logged lines, but existing pending claims can finish after the first issue.
+  - The market report's shortfall-credits section shows pending_cents (filed as of that day but
+    awaiting issue, at claimed units) and issued_cents (actual grants through that date).
+  - Migrate old credited lines with a credit and date as issued claims with the line ID, entry
+    date, granted and units both equal to the historical credit and reason paper. Skip lines
+    represented by live claims. Preserve legacy data, even a zero credit, and make the upgrade a
+    no-op on repeat.
+  - Register both actions and the scoped list on each interface, with role enforcement,
+    bilingual messages and audited state changes.
+
+  Ship the commands as shortfall-credits claim, shortfall-credits issue and
+  shortfall-credits list, with the matching /v1/shortfall-credits/<action> routes.
+  The minimum roles are operator for claim and manager for issue.
+  Readers can list by scope and optional status (claimed, issued) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register shortfall-credits.claimed and shortfall-credits.issued.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | claim | id (new workflow identifier), line (delivery line), units (units claimed), day (effective calendar day), reason (receiving note) |
+  | issue | id (existing workflow identifier), granted (approved units), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are line, product, day, units, unit_cents, reason, granted, credit_cents, issued.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/shortfall-credits.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

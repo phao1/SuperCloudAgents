@@ -1,0 +1,56 @@
+split: dev
+category: allocation
+instruction: |
+  Two productions occasionally need to exchange rooms while keeping their booked dates. An
+  approved trade must move both blocks together so venue teams can trust the calendar.
+
+  - Propose a venue exchange for two distinct confirmed, untraded blocks at different venues, no
+    later than either block's start. Neither can already be in a pending trade. Each production
+    must fit the destination and neither date range can clash with a third confirmed booking at
+    its destination.
+  - Store blocks sorted by booking ID, each with booking, from, to, day and end. Use the first
+    block's original venue as scope. Approval must be at or after the proposed day and on or
+    before both blocks. Reject changes to either original venue or dates or any newly introduced
+    conflict before approving.
+  - On approval switch both legacy venue references and set trade, former_scope and swapped on
+    the two original version-one bookings in one write. Store approved on the workflow and
+    reject repeat approvals. Existing calendar readers must see both moves.
+  - Add venue-trades to the report for both participating venues with pending and approved ID
+    lists as of the report date.
+  - Upgrade paper booking pairs grouped by trade into approved records. Two reciprocal blocks
+    and a common swapped date are required for each group. Reject an invalid group as bad_store
+    without importing any rows. Use that date for both proposal and approval, leave the legacy
+    data in place and keep upgrades idempotent.
+  - Provide the actions and scope-based list on both interfaces and record localized responses
+    and audit updates.
+
+  Ship the commands as venue-trades propose, venue-trades approve and
+  venue-trades list, with the matching /v1/venue-trades/<action> routes.
+  The minimum roles are operator for propose and manager for approve.
+  Readers can list by scope and optional status (proposed, approved) in ascending ID order.
+  Unknown scopes return not_found and unknown statuses return bad_request.
+  Register venue-trades.proposed and venue-trades.approved.
+  Use the workflow ID as the audit record_id and put scope in the event details.
+  Use English and French success messages through the existing response catalogs.
+
+  Use underscores in API field names and hyphens in CLI options.
+
+  | Command | Arguments |
+  | --- | --- |
+  | propose | id (new workflow identifier), left (first booking), right (second booking), day (effective calendar day) |
+  | approve | id (existing workflow identifier), day (effective calendar day) |
+  | list | scope (desk ID), status (optional) |
+
+  The write response and list entries are saved workflow records with id, scope, status and
+  version. The other workflow fields are day, approved, blocks.
+  Use bad_request for invalid arguments or reversed date bounds and conflict for invalid
+  state transitions, capacity, stale source records or duplicate work. Rejected changes are atomic.
+  Accept valid version-one workspaces even if some live workflows have already run. History
+  upgrade must preserve those version-two records without importing them again.
+
+  Keep README.md, the existing docs and tests, tools/read_v1.py,
+  fixtures/workspace-v1.json and verify.py unchanged. Add an operator guide at
+  docs/venue-trades.md with all three command examples and a store upgrade example.
+  Add at least two focused unittest tests and run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

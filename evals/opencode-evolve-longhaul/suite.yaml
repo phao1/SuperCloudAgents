@@ -1,0 +1,7 @@
+name: opencode-evolve-longhaul
+kind: coding
+description: 长程功能开发基准，11 个开发用例和 5 个留出用例，覆盖跨层工作流、历史迁移及版本兼容。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 900
+  memory_enabled: false
