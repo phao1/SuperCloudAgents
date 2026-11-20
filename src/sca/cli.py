@@ -303,3 +303,25 @@ def memory_export(repo: Annotated[str, typer.Option('--repo')]) -> None:
 from sca.eval.cli import app as eval_app
 
 app.add_typer(eval_app, name="eval")
+
+
+# Tenant operations and billing
+admin_app = typer.Typer(no_args_is_help=True)
+app.add_typer(admin_app, name="admin")
+
+
+@admin_app.command("usage-backfill")
+def usage_backfill() -> None:
+    """Rebuild finished-task usage using the database and configured object store."""
+    import asyncio
+
+    from sca.db.engine import get_store
+
+    async def run() -> int:
+        store = get_store()
+        try:
+            return await store.usage_backfill()
+        finally:
+            await store.sessionmaker.kw["bind"].dispose()
+
+    output({"tasks_processed": asyncio.run(run())})

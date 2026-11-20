@@ -1,6 +1,6 @@
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -83,7 +83,9 @@ class Store:
         if max_active_tasks < 0:
             raise ValueError("Quota must be nonnegative")
         async with self._transaction() as session:
-            stmt = pg_insert(tenants).values(id=tenant_id, max_active_tasks=max_active_tasks)
+            stmt = pg_insert(tenants).values(
+                id=tenant_id, display_name=tenant_id, max_active_tasks=max_active_tasks,
+            )
             await session.execute(
                 stmt.on_conflict_do_update(
                     index_elements=[tenants.c.id], set_={"max_active_tasks": max_active_tasks}
@@ -160,14 +162,15 @@ class Store:
                 raise NotFoundError("Tenant not found")
             await session.execute(
                 pg_insert(tenants)
-                .values(id=tenant_id, max_active_tasks=self.default_max_active_tasks)
+                .values(id=tenant_id, display_name=tenant_id,
+                        max_active_tasks=self.default_max_active_tasks)
                 .on_conflict_do_nothing(index_elements=[tenants.c.id])
             )
-            await session.scalar(
-                select(tenants.c.max_active_tasks)
-                .where(tenants.c.id == tenant_id)
-                .with_for_update()
-            )
+            # Commercial quotas share the tenant lock with submission and suspension.
+            tenant = await self._find_tenant(session, tenant_id, lock=True)
+            if tenant is None:
+                raise NotFoundError("租户不存在")
+            self._require_active_tenant(tenant)
             if idempotency_key is not None:
                 existing = (
                     (
@@ -194,6 +197,7 @@ class Store:
                 raise QuotaExceededError("Queued task backlog exceeded")
             if spec.get("priority", "interactive") not in ("interactive", "eval", "batch"):
                 raise ValueError("Invalid admission priority")
+            spec = await self._apply_plan(session, tenant, spec)
             stmt = pg_insert(tasks).values(
                 id=uuid4(),
                 tenant_id=tenant_id,
@@ -227,7 +231,8 @@ class Store:
         """Worker-only global scheduling; never call using the RLS API role."""
         from collections import Counter
 
-        from sca.admission.order import grant_order
+        from sca.admission.order import grant_order, tenant_slot_limit
+        from sca.db.schema import plans
 
         if self.tenant_id is not None:
             raise ValueError("Admission requires the worker store")
@@ -244,9 +249,13 @@ class Store:
                     .returning(tasks))).mappings().one()
             held = Counter((await session.execute(select(tasks.c.tenant_id).where(
                 tasks.c.slot_held))).scalars().all())
-            quotas = (await session.execute(select(tenants))).mappings().all()
+            quotas = (await session.execute(
+                select(tenants, plans.c.max_concurrent_tasks)
+                .join(plans, tenants.c.plan == plans.c.name)
+            )).mappings().all()
             weights = {r["id"]: r["weight"] for r in quotas}
-            limits = {r["id"]: r["max_active_tasks"] for r in quotas}
+            limits = {r["id"]: tenant_slot_limit(r["max_active_tasks"], r["max_concurrent_tasks"])
+                      for r in quotas}
             candidates = (await session.execute(select(tasks).where(
                 tasks.c.slot_requested_at.is_not(None), ~tasks.c.slot_held,
                 tasks.c.state.not_in(TERMINAL_STATES)))).mappings().all()
@@ -331,14 +340,29 @@ class Store:
                 "task.state_changed",
                 {"from": old, "to": new_state, "reason": reason},
             )
+            # Usage is committed with the terminal state and can be adjusted by late events.
+            if new_state in TERMINAL_STATES:
+                await self._meter_finished_task(session, updated)
             return Task.model_validate(dict(updated))
 
     async def append_event(
         self, task_id: str | UUID, type: str, payload: dict, dedup_key: str | None = None
     ) -> Event | None:
+        from sca.billing.metering import METERED_EVENTS
+
         async with self._transaction() as session:
             row = await self._task(session, task_id, True)
-            return await self._event(session, row["id"], type, payload, dedup_key)
+            event = await self._event(session, row["id"], type, payload, dedup_key)
+            terminal = row["state"] in TERMINAL_STATES
+            if terminal and event is not None and type in METERED_EVENTS:
+                await self._meter_finished_task(session, row)
+        if (terminal and type == "sandbox.destroyed" and "subtask" not in payload
+                and "best_of_candidate" not in payload):
+            from sca.config import get_settings
+            from sca.maintenance import cleanup_finished_cache
+
+            await cleanup_finished_cache(get_settings(), self, row["id"])
+        return event
 
     async def list_events(
         self, task_id: str | UUID, after: int = 0, limit: int = 500
@@ -375,6 +399,8 @@ class Store:
                 .where(tasks.c.id == row["id"])
                 .values(**{column: value}, updated_at=func.now())
             )
+            if column == "usage" and row["state"] in TERMINAL_STATES:
+                await self._meter_finished_task(session, {**row, "usage": value})
 
     async def update_result(self, task_id: str | UUID, patch: dict) -> None:
         await self._merge(task_id, "result", patch)
@@ -486,6 +512,7 @@ class Store:
         async with self._transaction() as session:
             stmt = pg_insert(tenants).values(
                 id=tenant_id,
+                display_name=tenant_id,
                 max_active_tasks=self.default_max_active_tasks,
                 daily_token_budget=daily_token_budget,
                 daily_cost_budget_usd=cost_budget,
@@ -1354,3 +1381,266 @@ class Store:
             return dict((await session.execute(update(harvest_candidates).where(*conditions).values(
                 status=status, reviewed_by=actor, reviewed_at=func.now()
             ).returning(harvest_candidates))).mappings().one())
+    # Tenant administration, plans and usage
+
+    async def _find_tenant(
+        self, session: AsyncSession, tenant_id: str, *, lock: bool = False,
+    ) -> RowMapping | None:
+        if self.tenant_id is not None and self.tenant_id != tenant_id:
+            return None
+        query = select(tenants).where(tenants.c.id == tenant_id)
+        if lock:
+            query = query.with_for_update(key_share=True)
+        return (await session.execute(query)).mappings().first()
+
+    @staticmethod
+    def _tenant_view(row: Mapping[str, Any]) -> dict[str, Any]:
+        return {key: row[key] for key in ("id", "display_name", "plan", "status", "created_at")}
+
+    @staticmethod
+    def _require_active_tenant(row: RowMapping | None) -> None:
+        from sca.tenancy.models import TenantSuspendedError
+
+        if row is not None and (row["status"] == "suspended" or row["deleted_at"] is not None):
+            raise TenantSuspendedError()
+
+    async def check_tenant_submission(self, tenant_id: str) -> None:
+        scoped = self.for_tenant(tenant_id)
+        async with scoped._transaction() as session:
+            self._require_active_tenant(await scoped._find_tenant(session, tenant_id))
+
+    async def tenant_deleted(self, tenant_id: str) -> bool:
+        scoped = self.for_tenant(tenant_id)
+        async with scoped._transaction() as session:
+            row = await scoped._find_tenant(session, tenant_id)
+            return row is not None and row["deleted_at"] is not None
+
+    async def list_tenants(self) -> list[dict[str, Any]]:
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        async with self._transaction() as session:
+            rows = (await session.execute(select(tenants).where(
+                tenants.c.deleted_at.is_(None)).order_by(tenants.c.id))).mappings()
+            return [self._tenant_view(row) for row in rows]
+
+    async def get_tenant(self, tenant_id: str) -> dict[str, Any]:
+        async with self._transaction() as session:
+            row = await self._find_tenant(session, tenant_id)
+            if row is None or row["deleted_at"] is not None:
+                raise NotFoundError("租户不存在")
+            return self._tenant_view(row)
+
+    async def _plan(self, session: AsyncSession, name: str) -> RowMapping:
+        from sca.db.schema import plans
+
+        row = (await session.execute(select(plans).where(plans.c.name == name))).mappings().first()
+        if row is None:
+            raise NotFoundError("套餐不存在")
+        return row
+
+    async def list_plans(self) -> list[dict[str, Any]]:
+        from sca.db.schema import plans
+
+        async with self._transaction() as session:
+            rows = (await session.execute(select(plans).order_by(plans.c.name))).mappings()
+            return [dict(row) for row in rows]
+
+    async def create_tenant(
+        self, tenant_id: str, display_name: str, plan: str, owner_email: str | None,
+    ) -> dict[str, Any]:
+        from sca.db.schema import tenant_members
+
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        async with self._transaction() as session:
+            await self._plan(session, plan)
+            row = (await session.execute(pg_insert(tenants).values(
+                id=tenant_id, display_name=display_name, plan=plan, membership_required=True,
+                max_active_tasks=self.default_max_active_tasks,
+            ).on_conflict_do_nothing(index_elements=[tenants.c.id]).returning(tenants)
+            )).mappings().first()
+            if row is None:
+                raise ConflictError("租户标识已存在")
+            if owner_email is not None:
+                await session.execute(insert(tenant_members).values(
+                    tenant_id=tenant_id, email=owner_email, role="owner"))
+            return self._tenant_view(row)
+
+    async def update_tenant(self, tenant_id: str, **changes: Any) -> dict[str, Any]:
+        allowed = {"display_name"} if self.tenant_id is not None else {"display_name", "plan", "status"}
+        if changes.keys() - allowed or (self.tenant_id is not None and tenant_id != self.tenant_id):
+            raise ValueError("Invalid tenant update")
+        if not changes:
+            return await self.get_tenant(tenant_id)
+        async with self._transaction() as session:
+            if "plan" in changes:
+                await self._plan(session, changes["plan"])
+            row = (await session.execute(update(tenants).where(
+                tenants.c.id == tenant_id, tenants.c.deleted_at.is_(None),
+            ).values(**changes).returning(tenants))).mappings().first()
+            if row is None:
+                raise NotFoundError("租户不存在")
+            return self._tenant_view(row)
+
+    async def delete_tenant(self, tenant_id: str) -> None:
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        async with self._transaction() as session:
+            deleted = await session.scalar(update(tenants).where(
+                tenants.c.id == tenant_id, tenants.c.deleted_at.is_(None),
+            ).values(status="suspended", deleted_at=func.now()).returning(tenants.c.id))
+            if deleted is None:
+                raise NotFoundError("租户不存在")
+            await session.execute(update(api_tokens).where(
+                api_tokens.c.tenant_id == tenant_id, api_tokens.c.revoked_at.is_(None),
+            ).values(revoked_at=func.now()))
+
+    @staticmethod
+    def _member_view(row: RowMapping) -> dict[str, Any]:
+        return {**row, "status": "active" if row["subject"] is not None else "pending"}
+
+    async def list_members(self) -> list[dict[str, Any]]:
+        from sca.db.schema import tenant_members
+
+        if self.tenant_id is None:
+            raise ValueError("Tenant scope required")
+        async with self._transaction() as session:
+            rows = (await session.execute(select(tenant_members).where(
+                tenant_members.c.tenant_id == self.tenant_id,
+            ).order_by(tenant_members.c.email))).mappings()
+            return [self._member_view(row) for row in rows]
+
+    async def invite_member(self, email: str, role: str) -> dict[str, Any]:
+        from sca.db.schema import tenant_members
+
+        if self.tenant_id is None:
+            raise ValueError("Tenant scope required")
+        async with self._transaction() as session:
+            tenant = await self._find_tenant(session, self.tenant_id, lock=True)
+            if tenant is None or tenant["deleted_at"] is not None:
+                raise NotFoundError("租户不存在")
+            row = (await session.execute(pg_insert(tenant_members).values(
+                tenant_id=self.tenant_id, email=email, role=role,
+            ).on_conflict_do_nothing().returning(tenant_members))).mappings().first()
+            if row is None:
+                raise ConflictError("该邮箱已被邀请或已加入租户")
+            return self._member_view(row)
+
+    async def oidc_member_tenants(self, subject: str, email: str | None) -> list[str]:
+        async with self._transaction() as session:
+            return list(await session.scalars(text(
+                "SELECT public.sca_oidc_member_tenants(:subject, :email)"
+            ), {"subject": subject, "email": email}))
+
+    async def resolve_oidc_membership(self, subject: str, email: str | None) -> tuple[bool, str | None]:
+        from sca.db.schema import tenant_members
+
+        if self.tenant_id is None:
+            raise ValueError("Tenant scope required")
+        member_scope = tenant_members.c.tenant_id == self.tenant_id
+        active = select(tenant_members.c.role).where(member_scope, tenant_members.c.subject == subject)
+        async with self._transaction() as session:
+            tenant = await self._find_tenant(session, self.tenant_id)
+            if tenant is None:
+                return False, None
+            if tenant["deleted_at"] is not None:
+                return True, None
+            role = await session.scalar(active)
+            if role is None and email is not None:
+                # Serialize first logins for the same subject even if the provider changed its email.
+                tenant = await self._find_tenant(session, self.tenant_id, lock=True)
+                if tenant is None or tenant["deleted_at"] is not None:
+                    return True, None
+                role = await session.scalar(active)
+                if role is None:
+                    role = await session.scalar(update(tenant_members).where(
+                        member_scope, tenant_members.c.email == email,
+                        tenant_members.c.subject.is_(None),
+                    ).values(subject=subject, activated_at=func.now()).returning(tenant_members.c.role))
+            return tenant["membership_required"], role
+
+    async def _apply_plan(self, session: AsyncSession, tenant: RowMapping, spec: dict) -> dict:
+        from sca.billing.quota import apply_cost_limits
+        from sca.db.schema import usage_daily
+
+        plan = await self._plan(session, tenant["plan"])
+        monthly = plan["monthly_cost_limit_usd"]
+        spent = Decimal(0)
+        if monthly is not None:
+            today = datetime.now(UTC).date()
+            spent = await session.scalar(
+                select(func.coalesce(func.sum(usage_daily.c.cost_usd), 0)).where(
+                    usage_daily.c.tenant_id == tenant["id"],
+                    usage_daily.c.day.between(today.replace(day=1), today),
+                )
+            )
+        return apply_cost_limits(spec, plan["max_task_cost_usd"], monthly, spent)
+
+    async def usage_rows(self, start: date, end: date) -> list[dict[str, Any]]:
+        from sca.db.schema import usage_daily
+
+        query = select(usage_daily).where(usage_daily.c.day.between(start, end))
+        if self.tenant_id is not None:
+            query = query.where(usage_daily.c.tenant_id == self.tenant_id)
+        async with self._transaction() as session:
+            rows = (await session.execute(query.order_by(
+                usage_daily.c.tenant_id, usage_daily.c.day))).mappings()
+            return [dict(row) for row in rows]
+
+    async def _meter_finished_task(
+        self, session: AsyncSession, task: Mapping[str, Any],
+    ) -> None:
+        from sca.billing.metering import METERED_EVENTS, completion_time, daily_delta, task_usage
+        from sca.config import get_settings
+        from sca.db.schema import usage_daily
+
+        relevant = (*METERED_EVENTS, "task.state_changed")
+        if task["events_archived_at"] is None:
+            rows = (await session.execute(select(events).where(
+                events.c.task_id == task["id"], events.c.tenant_id == task["tenant_id"],
+                events.c.type.in_(relevant),
+            ).order_by(events.c.seq))).mappings()
+            history = [Event.model_validate(dict(row)) for row in rows]
+        else:
+            from sca.archive import read_events
+
+            if self.objects is None:
+                raise RuntimeError("Archived usage backfill requires an object store")
+            history = [event for event in await read_events(self.objects, task["id"])
+                       if event.type in relevant]
+
+        finished_at = completion_time(task, history)
+        day = finished_at.astimezone(UTC).date()
+        before = task["billing_usage"] or {}
+        after = task_usage(task, history, finished_at, get_settings().default_model)
+        if before == after:
+            return
+        await session.execute(pg_insert(usage_daily).values(
+            tenant_id=task["tenant_id"], day=day,
+        ).on_conflict_do_nothing(index_elements=[usage_daily.c.tenant_id, usage_daily.c.day]))
+        day_filter = (usage_daily.c.tenant_id == task["tenant_id"], usage_daily.c.day == day)
+        row = (await session.execute(select(usage_daily).where(
+            *day_filter).with_for_update())).mappings().one()
+        await session.execute(update(usage_daily).where(*day_filter).values(
+            **daily_delta(row, before, after)))
+        await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+            finished_at=finished_at, billing_usage=after))
+
+    async def usage_backfill(self) -> int:
+        if self.tenant_id is not None:
+            raise ValueError("Platform scope required")
+        last_id, processed = None, 0
+        while True:
+            query = select(tasks.c.id).where(tasks.c.state.in_(TERMINAL_STATES))
+            if last_id is not None:
+                query = query.where(tasks.c.id > last_id)
+            async with self._transaction() as session:
+                batch = list(await session.scalars(query.order_by(tasks.c.id).limit(100)))
+            if not batch:
+                return processed
+            for task_id in batch:
+                async with self._transaction() as session:
+                    row = await self._task(session, task_id, True)
+                    await self._meter_finished_task(session, row)
+                processed += 1
+            last_id = batch[-1]
