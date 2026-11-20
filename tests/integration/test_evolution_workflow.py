@@ -4,12 +4,15 @@ import asyncio
 from datetime import timedelta
 from uuid import uuid4
 
-import httpx
 import pytest
 from temporalio import activity, workflow
 from temporalio.client import Client
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
+
+# The sandbox re-imports this module to validate its workflows; httpx is restricted there.
+with workflow.unsafe.imports_passed_through():
+    import httpx
 
 from sca.config import Settings, get_settings
 from sca.eval.activities import EvalActivities
