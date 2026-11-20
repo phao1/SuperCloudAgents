@@ -115,6 +115,16 @@ def validate_snapshot(data):
     require(set(ids) == expected_ids,
             f"Module ID coverage mismatch. Missing: {sorted(expected_ids - set(ids))}. "
             f"Unexpected: {sorted(set(ids) - expected_ids)}.")
+    coverage = json.loads((MILESTONE / "coverage-map.json").read_text(encoding="utf-8"))
+    require(set(coverage["modules"]) == set(ids), "Coverage map IDs differ from data.json")
+    for module_id, entry in coverage["modules"].items():
+        require(entry["platform"] in {"any", "linux-host", "k8s", "planned"},
+                f"Invalid coverage platform: {module_id}")
+        require(isinstance(entry["manual"], str) and bool(entry["how"].strip()),
+                f"Invalid coverage instructions: {module_id}")
+        require(isinstance(entry["evidence"], list), f"Invalid rules: {module_id}")
+        require(entry["platform"] != "planned" or not entry["evidence"],
+                f"Planned module has evidence: {module_id}")
     for module in modules:
         validate_module(module)
     paths = {path.rstrip("/") for module in modules

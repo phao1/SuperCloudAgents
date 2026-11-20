@@ -69,6 +69,8 @@ async def test_turn(tmp_path, code, complete):
     class Sandbox:
         async def exec(self, sid, argv, **kwargs):
             assert kwargs["env"]["SCA_MODEL_KEY"] == "temporary"
+            config = json.loads(kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+            assert config["permission"] == {"websearch": "deny", "webfetch": "deny"}
             assert "temporary" not in " ".join(argv)
             assert argv[-1] == "prompt"
             for line in TRANSCRIPT.splitlines():

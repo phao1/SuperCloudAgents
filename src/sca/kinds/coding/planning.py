@@ -115,7 +115,11 @@ class PlanningActivities:
                 TurnInput(
                     inp.task_id,
                     0,
-                    planning_prompt(spec.instruction, inp.feedback, spec.prompt_version),
+                    planning_prompt(spec.instruction, inp.feedback, spec.prompt_version)
+                    + "\n" + "\n".join([
+                        *task.result.get("intents", {}).get("notes", []),
+                        task.result.get("memory_note", ""),
+                    ]),
                 )
             )
             exit_event, output = await child._run(

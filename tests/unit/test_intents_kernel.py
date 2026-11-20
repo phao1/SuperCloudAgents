@@ -24,6 +24,7 @@ async def test_compile_context_and_event(tmp_path):
     kernel = activities(tmp_path)
     kernel.store.get_task.return_value = SimpleNamespace(
         tenant_id="t",
+        result={},
         spec={
             "intents": [
                 {"name": "lint", "type": "rules", "path": "ruff.toml", "params": {"tool": "ruff"}}

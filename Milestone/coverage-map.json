@@ -1,0 +1,632 @@
+{
+  "_predicates": "Rules are OR; event and payload fields are AND. Payload values use exact JSON equality, or one operator: gt (number), len_gt (list/string length), nonempty (true). Missing fields never match. eval_run:true requires a fetched run with at least one boolean acceptance_passed result; a queued run alone never matches. Evidence proves module execution, not correctness or full capability. No inferred UI visits. Planned modules have no rules.",
+  "modules": {
+    "ui_goal": {
+      "evidence": [],
+      "manual": "在 Portal 提交目标并保存任务详情截图。",
+      "platform": "any",
+      "how": "在 Portal 提交目标并保存任务详情截图。"
+    },
+    "ui_dispatch": {
+      "evidence": [
+        {
+          "event": "task.created"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "通过 API 或 Portal 提交任意任务并核对创建事件。"
+    },
+    "ui_quality": {
+      "evidence": [],
+      "manual": "打开 Portal 质量看板，核对验收矩阵与事件证据。",
+      "platform": "any",
+      "how": "打开 Portal 质量看板，核对验收矩阵与事件证据。"
+    },
+    "ui_confirm": {
+      "evidence": [
+        {
+          "event": "review.submitted"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "关闭 auto_finish，在审核阶段提交批准或修改意见。"
+    },
+    "ui_approve": {
+      "evidence": [
+        {
+          "event": "review.requested",
+          "payload": {
+            "plan": {
+              "nonempty": true
+            }
+          }
+        },
+        {
+          "event": "review.requested",
+          "payload": {
+            "stage": "plan"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "启用 plan=auto 与 plan_review 并等待拆分方案审核。"
+    },
+    "ui_history": {
+      "evidence": [],
+      "manual": "打开任务历史并定位到一个事件序号。",
+      "platform": "any",
+      "how": "打开任务历史并定位到一个事件序号。"
+    },
+    "design_in": {
+      "evidence": [],
+      "manual": "提交带 rules 或 visual intents 的任务，核对输入文件与编译事件。",
+      "platform": "any",
+      "how": "提交带 rules 或 visual intents 的任务，核对输入文件与编译事件。"
+    },
+    "design_spec": {
+      "evidence": [],
+      "manual": "提交视觉基准或设计规则，核对生成的意图上下文与检查项。",
+      "platform": "any",
+      "how": "提交视觉基准或设计规则，核对生成的意图上下文与检查项。"
+    },
+    "design_intent": {
+      "evidence": [
+        {
+          "event": "intents.compiled"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "在任务 intents 中提供 openapi、rules 或 visual 文件并运行编译。"
+    },
+    "verify_gw": {
+      "evidence": [
+        {
+          "event": "verification.started"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提交带 verify_command 的编码任务并进入验证阶段。"
+    },
+    "verify_parser": {
+      "evidence": [
+        {
+          "event": "verification.completed"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行验证命令并核对 verification.completed 的退出码与结果。"
+    },
+    "quality_echo": {
+      "evidence": [
+        {
+          "event": "intents.checked"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提交带可执行 intents 检查的任务并完成意图验证。"
+    },
+    "task_entry": {
+      "evidence": [
+        {
+          "event": "task.created"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行包含该模块对应步骤的任务并核对所列事件。"
+    },
+    "planner": {
+      "evidence": [
+        {
+          "event": "plan.started"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "启用 plan=auto 并运行需要拆分的编码需求。"
+    },
+    "decouple": {
+      "evidence": [
+        {
+          "event": "plan.completed",
+          "payload": {
+            "split": true
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "启用 plan=auto 并提交可按不同文件拆分的需求直至 split=true。"
+    },
+    "dag": {
+      "evidence": [
+        {
+          "event": "task.state_changed"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提交任务并让 Temporal 工作流推进任务状态。"
+    },
+    "checkpoint": {
+      "evidence": [
+        {
+          "event": "workspace.checkpointed"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行一次编码任务并让 Agent 完成一轮以保存 Git 检查点。"
+    },
+    "subtask_q": {
+      "evidence": [
+        {
+          "event": "subtask.started"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提供至少两个子任务或启用自动拆分并启动子工作流。"
+    },
+    "optim_entry": {
+      "evidence": [
+        {
+          "event": "review.submitted",
+          "payload": {
+            "decision": "request_changes"
+          }
+        },
+        {
+          "event": "agent.turn_started",
+          "payload": {
+            "turn": {
+              "gt": 1
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "关闭 auto_finish 并在审核时提交 request_changes 反馈。"
+    },
+    "evo_trigger": {
+      "evidence": [],
+      "manual": "从 Portal 发起评测并记录 run ID。",
+      "platform": "any",
+      "how": "从 Portal 发起评测并记录 run ID。"
+    },
+    "sandbox_sched": {
+      "evidence": [
+        {
+          "event": "sandbox.created"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行任意需要执行的任务直到沙箱创建成功。"
+    },
+    "sandbox_pool": {
+      "evidence": [],
+      "manual": "运行 kind 预热池测试 tests/integration/test_k8s_sandbox.py 并核对池命中。",
+      "platform": "k8s",
+      "how": "运行 kind 预热池测试 tests/integration/test_k8s_sandbox.py 并核对池命中。"
+    },
+    "runtime": {
+      "evidence": [
+        {
+          "event": "agent.turn_started"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "选择可用 Agent 后端并启动一轮任务执行。"
+    },
+    "executor": {
+      "evidence": [
+        {
+          "event": "agent.turn_completed"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行编码任务并等待一轮 Agent 执行完成。"
+    },
+    "recover_gate": {
+      "evidence": [
+        {
+          "event": "sandbox.restored"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "在审核释放沙箱后提交修改意见以恢复会话。"
+    },
+    "hand_brain": {
+      "evidence": [
+        {
+          "event": "agent.turn_started",
+          "payload": {
+            "backend": "opencode-brain"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "选择 opencode-brain 后端运行脑手分离任务。"
+    },
+    "memory": {
+      "evidence": [
+        {
+          "event": "memory.injected",
+          "payload": {
+            "ids": {
+              "len_gt": 0
+            }
+          }
+        },
+        {
+          "event": "memory.injected",
+          "payload": {
+            "count": {
+              "gt": 0
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "启用记忆并先审核一条匹配当前仓库的记忆再运行任务。"
+    },
+    "identity": {
+      "evidence": [
+        {
+          "event": "model.key_issued"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "配置模型网关并启动 Agent 轮次以签发临时访问密钥。"
+    },
+    "knowledge": {
+      "evidence": [
+        {
+          "event": "memory.injected",
+          "payload": {
+            "ids": {
+              "len_gt": 0
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "先审核仓库或租户范围的记忆再运行启用记忆的任务。"
+    },
+    "tool_domain": {
+      "evidence": [],
+      "manual": "",
+      "platform": "planned",
+      "how": "现有隔离维度是租户、任务和沙箱，可配置沙箱镜像。部门工具目录、分发与授权属于原图能力。"
+    },
+    "audit": {
+      "evidence": [
+        {
+          "event": "review.submitted",
+          "payload": {
+            "actor": {
+              "nonempty": true
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "通过鉴权 API 提交人工审核并核对事件中的操作者。"
+    },
+    "cache_code": {
+      "evidence": [
+        {
+          "event": "workspace.prepared",
+          "payload": {
+            "cache_hit": true
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "连续运行同仓库任务并检查工作区事件是否明确记录 cache_hit。"
+    },
+    "cache_dep": {
+      "evidence": [],
+      "manual": "运行带 pip 安装的 setup 两次，核对缓存命中与下载量。",
+      "platform": "any",
+      "how": "运行带 pip 安装的 setup 两次，核对缓存命中与下载量。"
+    },
+    "cache_gw": {
+      "evidence": [],
+      "manual": "在 mount 与 sync 模式分别执行缓存挂载测试并检查只读边界。",
+      "platform": "any",
+      "how": "在 mount 与 sync 模式分别执行缓存挂载测试并检查只读边界。"
+    },
+    "object_store": {
+      "evidence": [
+        {
+          "event": "artifact.published"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行编码任务至制品发布并核对对象存储中的补丁。"
+    },
+    "vector_store": {
+      "evidence": [
+        {
+          "event": "memory.injected",
+          "payload": {
+            "method": "vector",
+            "ids": {
+              "len_gt": 0
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "配置向量检索并让任务实际选中至少一条记忆。"
+    },
+    "repos": {
+      "evidence": [
+        {
+          "event": "workspace.prepared"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提交带 repo_url 的编码任务并完成仓库工作区准备。"
+    },
+    "k8s": {
+      "evidence": [
+        {
+          "event": "sandbox.created",
+          "payload": {
+            "driver": "k8s"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "k8s",
+      "how": "将 sandbox_driver 切换为 k8s 后运行编码任务。"
+    },
+    "compute": {
+      "evidence": [
+        {
+          "event": "sandbox.created",
+          "payload": {
+            "cpus": {
+              "gt": 0
+            },
+            "memory_mb": {
+              "gt": 0
+            }
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行沙箱任务并核对创建事件包含正数 CPU 与内存限额。"
+    },
+    "kms": {
+      "evidence": [],
+      "manual": "核对仓库凭证仅在宿主机使用，并执行出口 CA 持久化测试。",
+      "platform": "any",
+      "how": "核对仓库凭证仅在宿主机使用，并执行出口 CA 持久化测试。"
+    },
+    "obs_store": {
+      "evidence": [
+        {
+          "event": "task.created"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "提交任意任务并通过事件 API 读取持久化创建事件。"
+    },
+    "net_sec": {
+      "evidence": [],
+      "manual": "运行出口安全集成测试，核对私网地址和域前置被拒绝。",
+      "platform": "any",
+      "how": "运行出口安全集成测试，核对私网地址和域前置被拒绝。"
+    },
+    "evo_goal": {
+      "evidence": [
+        {
+          "eval_run": true
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行评测套件并使用 --runs 提供已产生验收结果的评测 ID。"
+    },
+    "evo_eval": {
+      "evidence": [
+        {
+          "eval_run": true
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行评测套件至至少一题产生验收结果并用 --runs 查询。"
+    },
+    "evo_improve": {
+      "evidence": [],
+      "manual": "提交标记 opencode-fix 的修复任务并审核补丁。",
+      "platform": "any",
+      "how": "提交标记 opencode-fix 的修复任务并审核补丁。"
+    },
+    "evo_release": {
+      "evidence": [],
+      "manual": "选择注册的新版本运行任务，再切回旧版本核对回滚。",
+      "platform": "any",
+      "how": "选择注册的新版本运行任务，再切回旧版本核对回滚。"
+    },
+    "obs_trace": {
+      "evidence": [],
+      "manual": "核对任务 trace_id 并在追踪后端找到对应 API 与 Worker spans。",
+      "platform": "any",
+      "how": "核对任务 trace_id 并在追踪后端找到对应 API 与 Worker spans。"
+    },
+    "obs_replay": {
+      "evidence": [],
+      "manual": "打开 Portal 回放并检查事件序号与节点投影一致。",
+      "platform": "any",
+      "how": "打开 Portal 回放并检查事件序号与节点投影一致。"
+    },
+    "obs_cost": {
+      "evidence": [
+        {
+          "event": "agent.usage"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "运行真实模型任务并等待产生 agent.usage 用量事件。"
+    },
+    "obs_risk": {
+      "evidence": [],
+      "manual": "在 Portal 对照失败任务的过程评分和回归诊断。",
+      "platform": "any",
+      "how": "在 Portal 对照失败任务的过程评分和回归诊断。"
+    },
+    "analysis_kind": {
+      "evidence": [],
+      "manual": "提交 analysis 场景并核对分析制品及对应场景活动。",
+      "platform": "any",
+      "how": "提交 analysis 场景并核对分析制品及对应场景活动。"
+    },
+    "model_gateway": {
+      "evidence": [
+        {
+          "event": "model.key_issued"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "配置模型网关并运行任务直至按轮签发临时密钥。"
+    },
+    "portal_loop": {
+      "evidence": [],
+      "manual": "在 Portal 完成评测、修复、构建及回归比较并保存关联 ID。",
+      "platform": "any",
+      "how": "在 Portal 完成评测、修复、构建及回归比较并保存关联 ID。"
+    },
+    "opencode_versions": {
+      "evidence": [],
+      "manual": "构建并注册版本，核对构建记录和二进制摘要。",
+      "platform": "any",
+      "how": "构建并注册版本，核对构建记录和二进制摘要。"
+    },
+    "brain_split": {
+      "evidence": [
+        {
+          "event": "agent.turn_started",
+          "payload": {
+            "backend": "opencode-brain"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "选择 opencode-brain 后端运行一次工具调用任务。"
+    },
+    "brain_pool": {
+      "evidence": [],
+      "manual": "开启常驻池，跨任务核对同版本进程 PID 复用及临时密钥隔离。",
+      "platform": "any",
+      "how": "开启常驻池，跨任务核对同版本进程 PID 复用及临时密钥隔离。"
+    },
+    "trajectory_checks": {
+      "evidence": [],
+      "manual": "读取评测结果并核对实际配置的轨迹规则和重评分结果。",
+      "platform": "any",
+      "how": "读取评测结果并核对实际配置的轨迹规则和重评分结果。"
+    },
+    "admission_control": {
+      "evidence": [
+        {
+          "event": "admission.granted"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "同时提交超过并发上限的任务，观察准入事件。"
+    },
+    "gateway_limiter": {
+      "evidence": [],
+      "manual": "启用限流代理，curl 其 /metrics 并核对排队及限流计数。",
+      "platform": "any",
+      "how": "启用限流代理，curl 其 /metrics 并核对排队及限流计数。"
+    },
+    "workspace_overlay": {
+      "evidence": [
+        {
+          "event": "workspace.prepared",
+          "payload": {
+            "workspace_method": "overlay"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "linux-host",
+      "how": "在 Linux Docker mount 模式启用 workspace_overlay 后运行编码任务。"
+    },
+    "workspace_forks": {
+      "evidence": [
+        {
+          "event": "workspace.forked"
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "启用准备快照并让第二个相同准备条件的任务从快照分叉。"
+    },
+    "pi_backend": {
+      "evidence": [
+        {
+          "event": "agent.turn_started",
+          "payload": {
+            "backend": "pi"
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "any",
+      "how": "选择 pi 后端运行编码任务。"
+    },
+    "idle_suspend": {
+      "evidence": [
+        {
+          "event": "sandbox.transition",
+          "payload": {
+            "paused": true
+          }
+        }
+      ],
+      "manual": "",
+      "platform": "linux-host",
+      "how": "启用 sandbox_suspend_idle 并运行 opencode-brain 任务观察暂停事件。"
+    },
+    "handd": {
+      "evidence": [],
+      "manual": "启用 handd 并核对 provider 通道日志与长连接复用。",
+      "platform": "any",
+      "how": "启用 handd 并核对 provider 通道日志与长连接复用。"
+    }
+  }
+}

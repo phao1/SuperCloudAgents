@@ -69,6 +69,9 @@ class EvalActivities:
             raise ValueError("suite changed after evaluation started")
         spec = {**case["spec"], **request["variant"], "auto_finish": True,
                 "eval_run_id": request["id"], "max_cost_usd": request["case_budget"]}
+        # Shared memory would make runs depend on earlier runs and flood the review queue with
+        # fixture-specific proposals; a suite or variant must opt in explicitly.
+        spec.setdefault("memory_enabled", False)
         if case["kind"] == "coding" and request.get("repeat", 1) > 1:
             spec["labels"] = {**spec.get("labels", {}), "fork_from_snapshot": "true"}
         source = Path(case["path"])

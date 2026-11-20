@@ -123,6 +123,11 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
             file.write_text("VERSION TEST\n" + file.read_text())
         monkeypatch.setattr(prompts, "PROMPTS_ROOT", tmp_path)
 
+    async def local_io(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr("sca.kinds.coding.planning.asyncio.to_thread", local_io)
+
     data = plan_data(["src/**"] if outcome == "overlap" else None)
     if outcome == "no_split":
         data = {"split": False, "reason": "coupled", "subtasks": []}
@@ -130,7 +135,7 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     store = SimpleNamespace(
         append_event=AsyncMock(),
         add_artifact=AsyncMock(),
-        get_task=AsyncMock(return_value=SimpleNamespace(result={"base_sha": "base"})),
+        get_task=AsyncMock(return_value=SimpleNamespace(result={"base_sha": "base", "memory_note": "memory note", "intents": {"notes": ["rule note"]}})),
     )
     workspace = SimpleNamespace(
         mirror=tmp_path / "mirror.git", _git=AsyncMock(return_value="src/one/a.py\0")
@@ -142,6 +147,7 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     acts = SimpleNamespace(
         store=store,
         prepare_mirror=AsyncMock(),
+        _activity_route=dict,
         _workspace=lambda _: workspace,
         _spec=AsyncMock(return_value=spec),
         sandbox=SimpleNamespace(destroy=AsyncMock()),
@@ -150,7 +156,7 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     child = SimpleNamespace(
         store=SimpleNamespace(update_result=AsyncMock()),
         _workspace=lambda _: SimpleNamespace(prepare=AsyncMock(), branch="plan"),
-        _create_sandbox=AsyncMock(return_value=("planning-sandbox", "image")),
+        create_sandbox=AsyncMock(return_value="planning-sandbox"),
         run_agent_turn=AsyncMock(),
         _run=AsyncMock(return_value=(ExecExit(exit_code=0), base64.b64encode(encoded).decode())),
         _task_dir=lambda _: tmp_path / "disposable",
@@ -168,6 +174,7 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     prompt = child.run_agent_turn.call_args.args[0].prompt
     assert prompt.startswith("VERSION TEST\n") == (version == "v-test")
     assert "task instruction" in prompt and "review feedback" in prompt
+    assert "memory note" in prompt and "rule note" in prompt
     events = [call.args[1] for call in store.append_event.call_args_list]
     assert events[0] == EventType.PLAN_STARTED
     if outcome in {"valid", "no_split"}:

@@ -180,7 +180,11 @@ class OpenCodeBackend:
                     "settings": {"baseURL": ctx.model_base_url},
                     "models": {model: {}},
                 }
-            }
+            },
+            # Headless runs cannot answer a permission prompt, and a cancelled one fails the turn.
+            # Denying the web tools lets the model see a refusal and carry on (sandbox egress is
+            # restricted anyway).
+            "permission": {"websearch": "deny", "webfetch": "deny"},
         }
         argv = [
             "/opt/opencode/opencode",

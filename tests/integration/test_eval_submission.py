@@ -44,7 +44,7 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
     (case / 'acceptance' / 'hidden.py').write_text('assert True\n')
     (case / 'acceptance.yaml').write_text('command: python hidden.py\n')
     request = {'id': str(uuid4()), 'suite': str(suite), 'repeat': repeat, 'concurrency': 1,
-               'budget': .5, 'case_budget': .1, 'variant': {'memory_enabled': False}}
+               'budget': .5, 'case_budget': .1, 'variant': {}}
     env = ActivityEnvironment()
     plan = await env.run(acts.prepare, request)
     submission = {**request, 'case': plan['cases'][0], 'iteration': 0}
@@ -55,6 +55,7 @@ async def test_eval_api_submission_retry_and_analysis_inputs(store, tmp_path, mo
     assert task.spec['priority'] == 'eval'
     assert task.spec['auto_finish'] is True
     assert task.spec['eval_run_id'] == request['id']
+    assert task.spec['memory_enabled'] is False  # eval runs never use shared memory implicitly
     assert task.spec['acceptance_command'] == 'python hidden.py'
     if kind == 'analysis':
         metadata = await store.for_tenant('eval').get_file(task.spec['inputs'][0])

@@ -237,10 +237,11 @@ class CodingSubtaskWorkflow:
             args=[spec, subtask],
             **_QUICK,
         )
+        prompt += "\n" + spec.get("_context_notes", "")
         session = None
         try:
             await step("prepare")
-            if spec.get("setup_command"):
+            if spec.get("setup_command") or spec.get("_intent_setup"):
                 await step("run_setup")
             for turn in range(1, spec["max_fix_attempts"] + 2):
                 budget = await step("check_budget", turn)
@@ -266,11 +267,16 @@ class CodingSubtaskWorkflow:
                     args=[spec, verify["exit_code"], verify["output_tail"]],
                     **_QUICK,
                 )
+                prompt += "\n" + spec.get("_context_notes", "")
         except (ActivityError, ApplicationError) as exc:
             if is_cancelled_exception(exc):
                 raise
             cause = exc.cause if isinstance(exc, ActivityError) else exc
             result.reason = str(cause)
         finally:
-            await step("destroy_sandbox")
+            try:
+                if spec.get("_context_notes") is not None and spec.get("memory_enabled"):
+                    await step("collect_memory_proposals")
+            finally:
+                await step("destroy_sandbox")
         return result

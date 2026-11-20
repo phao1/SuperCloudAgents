@@ -64,6 +64,8 @@ await Effect.runPromise(Effect.scoped(Effect.gen(function* () {
       providers: { sca: { name: "SCA gateway", env: ["SCA_MODEL_KEY"],
         package: "@opencode/ai/providers/openai-compatible",
         settings: { baseURL: input.gateway_url }, models: { [input.model]: {} } } },
+      // A headless run cannot answer a permission prompt; a denial lets the model carry on.
+      permission: { websearch: "deny", webfetch: "deny" },
     }) },
     models: { fetch: false }, fs: { filewatcher: false, fff: false },
   }), (host) => Effect.promise(host.close))

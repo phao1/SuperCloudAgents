@@ -27,8 +27,9 @@ class ChildStore:
             for k, v in task.result.items()
             if k.startswith(self.prefix)
         }
-        if task.result.get("prompt_version"):
-            result["prompt_version"] = task.result["prompt_version"]
+        for key in ("prompt_version", "memory_context", "memory_note", "intents"):
+            if key in task.result:
+                result[key] = task.result[key]
         return task.model_copy(update={"result": result})
 
     async def update_result(self, task_id: str, patch: dict) -> None:
@@ -116,6 +117,9 @@ class ChildActivities(CodingActivities):
             return await super()._create_sandbox(task_id)
         finally:
             self.sandbox = provider
+
+    def _memory_proposal_batch(self, turn: int) -> str:
+        return f"subtask.{self.name}.{turn}"
 
     async def destroy_sandbox(self, task_id: str) -> None:
         task = await self.store.get_task(task_id)

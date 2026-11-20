@@ -8,6 +8,9 @@
 - [portal-demo.md](portal-demo.md)：2026-11-17 Portal 演示——评测发现 OpenCode 缺陷 → 观测定位 → 修源码 → 重编译 → 回归通过，含逐步截图和换电脑运行方法；以及脑手分离、pi 和 overlay 的历史验证结果。最新状态以四期设计的负责人补记为准。
 - [verified-scenarios.md](verified-scenarios.md)：截至 a5a0d63 真实跑通的全部场景、每个场景用到的功能，以及在 Portal 上自己点一遍的操作指引。
 - [verification-flow.md](verification-flow.md)：负责人自验证流程，按架构图展开：五层验证方法、Portal 闭环经过的模块与证据、64 个模块的验证级别着色图和逐层明细，以及在另一台机器上复现验证的步骤（V0–V5）。
+- [mac-run-review.md](mac-run-review.md)：负责人对 Mac 执行记录的评审，包括逐条校验、64 个模块的覆盖分析、修复清单，以及记忆时机修复的现场验证。
+- [coverage-test-plan.md](coverage-test-plan.md)：交给 Mac 上的 agent 执行的全量覆盖测试计划（S0–S12）。用 `python3 scripts/coverage_report.py` 按任务事件客观统计 64 个模块的覆盖情况，规则在 [coverage-map.json](coverage-map.json)。
+- [oss-selection-review.md](oss-selection-review.md)：逐模块的选型与开源复用评审。
 - [portal-run-2026-11-19.md](portal-run-2026-11-19.md) 记录本次 Portal 部署、真实提示词基线、订单任务的失败与重跑、架构回放和测试结果，并链接到两次任务的完整事件顺序。
 
 ## 使用架构工作台

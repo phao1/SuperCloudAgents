@@ -161,6 +161,21 @@ class TaskWorkflow:
 
         self._admission = spec.get("_admission", False)
         await self._acquire_slot(task_id)
+        early_context = workflow.patched("memory-before-planning")
+        intents = {}
+        memory_note = ""
+        if early_context:
+            if spec.get("memory_enabled"):
+                memory_note = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
+            if spec.get("intents"):
+                if any(source.get("path") for source in spec["intents"]):
+                    await workflow.execute_activity(
+                        spec["hooks"]["prepare"], task_id,
+                        start_to_close_timeout=timedelta(minutes=10), retry_policy=_retry(3),
+                    )
+                intents = await workflow.execute_activity("compile_intents", task_id, **_QUICK)
+            spec["_context_notes"] = "\n".join([*intents.get("notes", []), memory_note])
+            spec["_intent_setup"] = bool(intents.get("setup"))
         await self._set_state(task_id, "PROVISIONING")
         hooks = spec["hooks"]
         extension = {}
@@ -176,12 +191,11 @@ class TaskWorkflow:
                 start_to_close_timeout=timedelta(minutes=10),
                 retry_policy=_retry(3),
             )
-        intents = {}
-        if spec.get("intents"):
-            intents = await workflow.execute_activity("compile_intents", task_id, **_QUICK)
-        memory_note = ''
-        if spec.get('memory_enabled'):
-            memory_note = await workflow.execute_activity('memory_initial_prompt', task_id, **_QUICK)
+        if not early_context:
+            if spec.get("intents"):
+                intents = await workflow.execute_activity("compile_intents", task_id, **_QUICK)
+            if spec.get("memory_enabled"):
+                memory_note = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
         await workflow.execute_activity(
             "create_sandbox",
             task_id,

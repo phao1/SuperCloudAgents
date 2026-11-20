@@ -126,6 +126,9 @@ input, select, textarea, button, .button {
   background: var(--panel); color: var(--ink);
 }
 input, select, textarea { width: 100%; padding: 8px 11px; }
+.memory-proposal { grid-template-columns: auto 1fr; align-items: start; margin: 10px 0; }
+.memory-proposal input { width: auto; min-height: 0; margin-top: 4px; }
+.memory-proposal small { grid-column: 2; }
 textarea { min-height: 104px; resize: vertical; }
 button, .button {
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
@@ -459,6 +462,8 @@ body[data-trace-expanded] { overflow: hidden; }
       <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
       <a href="#/evals"><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/tasks"><span class="nav-symbol" aria-hidden="true">⌘</span>任务进度</a>
+      <a href="#/memories">共享记忆</a>
+      <a href="#/analysis">数据分析</a>
       <a href="#/loop"><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
       <a href="#/compare"><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
       <a href="#/versions"><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
@@ -668,6 +673,11 @@ body[data-trace-expanded] { overflow: hidden; }
           <h2>任务证据</h2>
           <div class="stack"><h3>过程检查</h3><div id="task-trajectory"></div></div>
           <div class="stack"><h3>证据规则</h3><div id="task-diagnostics"></div></div>
+          <div id="task-review" class="stack" hidden><h3>任务审核</h3><div id="task-memory-proposals" hidden></div>
+            <label>修改意见<textarea id="task-review-feedback"></textarea></label>
+            <div id="task-review-actions"></div>
+          </div>
+          <div id="analysis-report-panel" hidden><h3>分析报告</h3><pre id="analysis-report"></pre></div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
           <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
@@ -675,6 +685,29 @@ body[data-trace-expanded] { overflow: hidden; }
       </div>
     </section>
 
+    <section id="memories-page" class="page" hidden>
+      <div class="panel"><h2>共享记忆</h2>
+        <label>状态<select id="memory-status"><option value="active">已启用</option><option value="proposed">待确认</option><option value="retired">已停用</option><option value="rejected">已拒绝</option></select></label>
+        <label>范围筛选<input id="memory-filter" placeholder="留空查看全部范围"></label>
+        <button id="memory-refresh" type="button">刷新记忆</button><div id="memory-list"></div>
+      </div>
+      <form id="memory-form" class="panel stack"><h2>创建记忆</h2>
+        <label>内容<textarea id="memory-text" required maxlength="500"></textarea></label>
+        <label>分类<select id="memory-category"><option value="convention">约定</option><option value="pitfall">陷阱</option><option value="command">命令</option><option value="preference">偏好</option></select></label>
+        <label>范围<input id="memory-scope" required value="tenant" maxlength="2000"></label>
+        <small>范围填写 tenant、kind:analysis、kind:coding 或 repo:仓库地址。手动创建后立即启用。</small>
+        <button type="submit">创建记忆</button>
+      </form>
+    </section>
+    <section id="analysis-page" class="page" hidden>
+      <form id="analysis-form" class="panel stack"><h2>数据分析</h2>
+        <label>数据文件<input id="analysis-files" type="file" accept=".csv,.json" multiple required></label>
+        <label>分析问题<textarea id="analysis-question" required></textarea></label>
+        <label>检查命令（可选，每行一条，最多 16 条）<textarea id="analysis-checks"></textarea></label>
+        <small>检查命令在分析沙箱中运行。报告将以 Markdown 纯文本显示。</small>
+        <button id="analysis-submit" type="submit">上传并开始分析</button><p id="analysis-status" role="status"></p>
+      </form>
+    </section>
     <section id="loop" class="page" hidden>
       <div class="panel">
         <div class="panel-head">
@@ -722,6 +755,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <div class="action-bar">
               <button id="start-fix" class="primary" type="button" disabled>发起修复</button>
               <button id="fix-trace" type="button">查看修复轨迹</button>
+              <div id="loop-memory-proposals" hidden></div>
               <button id="approve" type="button" disabled>批准修复</button>
               <button id="build" type="button" disabled>构建新版本</button>
               <button id="rerun" type="button" disabled>用新版本重跑评测</button>
@@ -775,9 +809,9 @@ function button(text,fn){
 function json(value){
   return JSON.stringify(value,null,2)
 }
-async function api(path,body){
+async function api(path,body,method){
   const r=await fetch('/v1'+path,{
-    method:body===undefined?'GET':'POST',headers:{
+    method:method||(body===undefined?'GET':'POST'),headers:{
       Authorization:'Bearer '+portalToken,'Content-Type':'application/json'
     },body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)
   });
@@ -1508,6 +1542,8 @@ async function updateTask(){
     $('task-summary').textContent=json({
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
     });
+    await renderTaskReview(t);
+    if(selectedTask!==id)return;
     renderTaskObservability(currentTask);
     if(renderedEventCursor!==eventCursor){
       renderTimeline();
@@ -1518,6 +1554,11 @@ async function updateTask(){
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
     const artifacts=await data('/tasks/'+enc(id)+'/artifacts');
     if(selectedTask!==id)return;
+    $('analysis-report-panel').hidden=true;
+    if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
+      const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
+      if(selectedTask===id){$('analysis-report').textContent=report;$('analysis-report-panel').hidden=false}
+    }
     if(artifacts.some(a=>a.name==='changes.patch')){
       const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
       if(selectedTask===id){diff($('patch'),patch);renderTaskDiagnostics(patch)}
@@ -1671,6 +1712,7 @@ async function updateFlow(){
   $('rerun').disabled=pendingActions.has('rerun')||build?.status!=='succeeded'||!flow.oldRun
     ||Boolean(retest&&['queued','running','completed'].includes(retest.status));
   $('fix-trace').disabled=!flow.fixTask;
+  await renderMemoryProposals(task,'loop-memory-proposals');
   renderPromptReview(task,ready);
   renderFixControls();
   renderLoopResult(task,build,baseline,retest);
@@ -1992,7 +2034,85 @@ function renderSwimlane(task){
   if(timing)note.textContent='Agent 活跃时间 · 模型 '+timing.model.toFixed(1)+'% · 工具 '
     +timing.tools.toFixed(1)+'% · 其它 '+timing.other.toFixed(1)+'%';
 }
+const memoryChoices=new Map();
+function memoryCategoryLabel(category){return ({convention:'约定',pitfall:'陷阱',command:'命令',preference:'偏好'})[category]||category}
+function checkedMemories(taskId){return [...(memoryChoices.get(taskId)||new Set())]}
+async function renderMemoryProposals(task,targetId){
+  const target=$(targetId),ids=task?.state==='AWAITING_REVIEW'?(task.result?.memory_proposals||[]):[];
+  target.hidden=!ids.length;
+  if(!ids.length){target.replaceChildren();return}
+  const rows=await data('/memories?status=proposed');
+  if(targetId==='task-memory-proposals'&&selectedTask!==task.id)return;
+  const choices=memoryChoices.get(task.id)||new Set();
+  memoryChoices.set(task.id,choices);
+  for(const id of choices)if(!ids.includes(id))choices.delete(id);
+  target.replaceChildren(el('h3','选择随审核启用的共享记忆'));
+  for(const memory of rows.filter(row=>ids.includes(row.id))){
+    const label=el('label',undefined,'memory-proposal'),check=el('input');check.type='checkbox';check.checked=choices.has(memory.id);
+    check.onchange=()=>{if(check.checked)choices.add(memory.id);else choices.delete(memory.id)};
+    label.append(check,el('span',memory.text),el('small',memoryCategoryLabel(memory.category)+' · '+memory.scope));target.append(label);
+  }
+}
+async function renderTaskReview(task){
+  $('task-review').hidden=task.state!=='AWAITING_REVIEW';
+  await renderMemoryProposals(task,'task-memory-proposals');
+  if(selectedTask!==task.id)return;
+  $('task-review-actions').replaceChildren(...[['approve','批准'],['request_changes','要求修改'],['reject','拒绝']].map(([decision,label])=>button(label,async()=>{
+    const feedback=$('task-review-feedback').value.trim();
+    if(decision==='request_changes'&&!feedback)throw Error('请填写修改意见。');
+    const body={decision,feedback:feedback||null};
+    if(decision==='approve')body.accept_memories=checkedMemories(task.id);
+    await api('/tasks/'+enc(task.id)+'/review',body);
+    await updateTask();
+  })));
+}
+async function loadMemories(){
+  const status=$('memory-status').value,scope=$('memory-filter').value.trim();
+  const rows=await data('/memories?status='+enc(status)+(scope?'&scope='+enc(scope):''));
+  $('memory-list').replaceChildren(rows.length?table(['内容','范围','分类','来源任务','上次使用','操作'],rows.map(memory=>{
+    const actions=el('div');
+    actions.append(button(memory.status==='active'?'停用':'启用',async()=>{
+      await api('/memories/'+enc(memory.id),{status:memory.status==='active'?'retired':'active'},'PATCH');await loadMemories();
+    }),button('删除',async()=>{
+      if(!confirm('确认删除这条共享记忆？'))return;
+      await api('/memories/'+enc(memory.id),undefined,'DELETE');await loadMemories();
+    }));
+    return [el('span',memory.text),memory.scope,memoryCategoryLabel(memory.category),memory.source_task_id?evidenceLink(memory.source_task_id,'#/tasks/'+enc(memory.source_task_id)):'手动创建',memory.last_used_at||'尚未使用',actions];
+  })):el('p','当前条件下没有记忆。'));
+}
+$('memory-refresh').onclick=()=>loadMemories().catch(error);
+$('memory-status').onchange=()=>loadMemories().catch(error);
+$('memory-form').onsubmit=async event=>{
+  event.preventDefault();
+  const control=event.submitter;control.disabled=true;
+  try{
+    await data('/memories',{text:$('memory-text').value.trim(),category:$('memory-category').value,scope:$('memory-scope').value.trim()});
+    $('memory-text').value='';$('memory-status').value='active';await loadMemories();
+  }catch(e){error(e)}finally{control.disabled=false}
+};
+$('analysis-form').onsubmit=async event=>{
+  event.preventDefault();const control=$('analysis-submit');if(control.disabled)return;
+  control.disabled=true;
+  try{
+    const files=[...$('analysis-files').files],question=$('analysis-question').value.trim();
+    const checks=$('analysis-checks').value.split('\n').map(line=>line.trim()).filter(Boolean);
+    if(!question||!files.length||files.length>32||checks.length>16||files.some(file=>! /\.(csv|json)$/i.test(file.name)))throw Error('请填写问题，选择 1–32 个 CSV/JSON 文件，检查命令最多 16 条。');
+    const inputs=[];
+    for(const file of files){
+      $('analysis-status').textContent='正在上传：'+file.name;
+      const form=new FormData();form.append('file',file);
+      const response=await fetch('/v1/files',{method:'POST',headers:{Authorization:'Bearer '+portalToken},body:form,signal:AbortSignal.timeout(120000)});
+      if(!response.ok)throw Error('上传失败：'+response.status);
+      inputs.push((await response.json()).id);
+    }
+    const task=await data('/tasks',{kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}});
+    $('analysis-status').textContent='任务已创建：'+task.id;
+    await openTask(task.id);
+  }catch(e){error(e)}finally{control.disabled=false}
+};
 const pages={
+  memories:['memories-page','共享记忆','管理跨任务复用的约定。'],
+  analysis:['analysis-page','数据分析','上传数据并追踪分析报告。'],
   overview:['overview','概览','启动评测，追踪任务，再比较候选版本。'],
   evals:['evaluation','评测中心','配置评测条件，查看每个用例的结果。'],
   runs:['run-detail','运行详情','从结果矩阵打开任务证据。'],
@@ -2027,6 +2147,7 @@ async function route(){
   syncEvalForm();
   activeRun=current==='runs'&&parts[0]?decodeURIComponent(parts[0]):null;
   if(activeRun)await matrix();
+  if(current==='memories')await loadMemories();
   if(current==='loop'){
     if(['round','build'].includes(parts[0])&&parts[1]){
       selectedIteration=decodeURIComponent(parts[1]);
@@ -2258,7 +2379,7 @@ async function runAction(id,action){
 }
 $('approve').onclick=()=>runAction('approve',async()=>{
   if(!flow.fixTask)throw Error('尚未加载审核任务。');
-  await data('/tasks/'+enc(flow.fixTask)+'/review',{decision:'approve'});
+  await data('/tasks/'+enc(flow.fixTask)+'/review',{decision:'approve',accept_memories:checkedMemories(flow.fixTask)});
 });
 $('prompt-feedback-form').onsubmit=event=>{
   event.preventDefault();

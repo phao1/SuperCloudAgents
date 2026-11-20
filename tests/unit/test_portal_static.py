@@ -170,6 +170,18 @@ assert.equal(projection.nodes.find(n=>n.id==='executor').state,'seen');
 assert([...projection.nodes,...projection.edges].every(entry=>!('color' in entry)));
 assert.equal(projection.edges.find(e=>e.id==='optim_entry>runtime').state,'current');
 assert(!projection.edges.some(e=>e.id==='executor>dag'));
+for (const intents of [[], [{type:'openapi'}], [{type:'rules'}], [{type:'visual'}]]) {
+ const step=flowModel.trace({spec:{intents}},[{seq:1,type:'intents.compiled'}]).steps[0];
+ assert(step.nodes.includes('design_intent'));
+ assert.equal(step.nodes.includes('design_in'), intents.some(s=>['rules','visual'].includes(s.type)));
+ assert.equal(step.nodes.includes('design_spec'), step.nodes.includes('design_in'));
+}
+for (const eval_run_id of [undefined, 'run']) {
+ const step=flowModel.trace({spec:{eval_run_id}},[{seq:1,type:'acceptance.completed',payload:{passed:true}}]).steps[0];
+ assert.equal(step.nodes.includes('evo_eval'), Boolean(eval_run_id));
+ assert(step.nodes.includes('verify_parser'));
+ assert.equal(step.focus, eval_run_id ? 'evo_eval' : 'ui_quality');
+}
 const single=flowModel.trace({spec:{plan:'none'}},[{seq:1,type:'task.created'},{seq:2,type:'sandbox.created'}]);
 assert(!flowModel.project(single.steps,1).nodes.some(node=>node.id==='planner'||node.id==='decouple'));
 const planEvent={seq:33,type:'plan.completed',payload:{split:true,reason:'Separate files',subtasks:[

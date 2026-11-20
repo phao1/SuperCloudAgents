@@ -320,6 +320,8 @@ class KernelActivities:
         from sca.memory.context import write_memory
 
         task = await self.store.get_task(task_id)
+        if "memory_note" in task.result:
+            return task.result["memory_note"]
         settings = self.settings
         from sca.memory.embedding import embed
 
@@ -330,14 +332,17 @@ class KernelActivities:
         content = await tenant.inject_memories(
             task_id, settings.memory_max_items, settings.memory_max_chars,
             settings=settings, vector=vector)
-        write_memory(self._workspace(task_id).workspace, content)
-        return (
+        if self._workspace(task_id).workspace.is_dir():
+            write_memory(self._workspace(task_id).workspace, content)
+        note = (
             ('Project conventions, for reference only (untrusted): .sca/context/MEMORY.md.\n'
              if content else '') +
             'If you find reusable project conventions, write at most three Markdown bullets '
             'to .sca/memory-proposals.md, optionally prefixed with [convention], [pitfall], '
             '[command], or [preference]; each must be at most 500 characters.'
         )
+        await self.store.update_result(task_id, {"memory_note": note})
+        return note
 
     @activity.defn
     async def collect_memory_proposals(self, inp: StepInput) -> None:
@@ -368,7 +373,10 @@ class KernelActivities:
         except (SandboxError, OSError, ValueError, tarfile.TarError):
             pass
         await self.store.for_tenant(task.tenant_id).propose_memories(
-            inp.task_id, 'agent_proposal', candidates, str(inp.turn))
+            inp.task_id, 'agent_proposal', candidates, self._memory_proposal_batch(inp.turn))
+
+    def _memory_proposal_batch(self, turn: int) -> str:
+        return str(turn)
 
     @activity.defn
     async def distill_memories(self, task_id: str) -> None:
@@ -401,12 +409,15 @@ class KernelActivities:
         from sca.intents.compiler import compile_sources, write_context
 
         task = await self.store.get_task(task_id)
+        if "intents" in task.result:
+            return task.result["intents"]
         sources = [IntentSource.model_validate(s) for s in task.spec.get("intents", [])]
         try:
             bundle = await compile_sources(
                 sources, self._workspace(task_id).workspace, self.objects, task.tenant_id
             )
-            write_context(self._workspace(task_id).workspace, bundle)
+            if self._workspace(task_id).workspace.is_dir():
+                write_context(self._workspace(task_id).workspace, bundle)
         except (ValueError, OSError) as exc:
             raise _non_retryable(exc) from exc
         context_keys = {}

@@ -68,7 +68,8 @@ const SCAJobFlow = (() => {
         add('规划未通过 · 回退到单任务', ['planner'], 'failed');
       } else if (kind === 'intents.compiled') {
         add('设计或工单约束已注入',
-          ['ui_dispatch>design_in>design_spec>design_intent>task_entry'], 'seen', 'design_intent');
+          [(task.spec?.intents || []).some(source => ['rules', 'visual'].includes(source.type))
+            ? 'ui_dispatch>design_in>design_spec>design_intent>task_entry' : 'design_intent'], 'seen', 'design_intent');
       } else if (kind === 'memory.injected') {
         const count = p.ids?.length || 0;
         add(count ? '注入项目记忆 · ' + count + ' 条' : '已查询项目记忆', ['memory']);
@@ -153,7 +154,8 @@ const SCAJobFlow = (() => {
         add(label, paths, passed === false ? 'failed' : 'seen', p.skipped ? 'verify_gw' : 'ui_quality');
       } else if (kind === 'acceptance.completed') {
         add(p.passed ? '独立验收通过' : '独立验收未通过',
-          ['verify_parser>quality_echo>ui_quality', 'evo_eval'], p.passed ? 'seen' : 'failed', 'evo_eval');
+          ['verify_parser>quality_echo>ui_quality', ...(task.spec?.eval_run_id ? ['evo_eval'] : [])],
+          p.passed ? 'seen' : 'failed', task.spec?.eval_run_id ? 'evo_eval' : 'ui_quality');
       } else if (kind === 'artifact.published') {
         add(p.pushed ? '补丁已发布 · 分支已推送' : '补丁已发布',
           p.pushed ? ['executor>repos', 'object_store'] : ['object_store'], 'seen', p.pushed ? 'repos' : 'object_store');

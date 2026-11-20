@@ -213,6 +213,9 @@ class CodingActivities(KernelActivities):
         if inp.action in {"run_setup", "destroy_sandbox"}:
             await getattr(child, inp.action)(inp.task_id)
             return {}
+        if inp.action == "collect_memory_proposals":
+            await child.collect_memory_proposals(StepInput(inp.task_id, inp.turn))
+            return {}
         if inp.action == "run_agent_turn":
             result = await child.run_agent_turn(
                 TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id)
@@ -399,6 +402,13 @@ class CodingActivities(KernelActivities):
         from sca.workspace.overlay import OverlayWorkspace
 
         argv = ws.commit_argv(commit_message(f"sca: turn {inp.turn}", inp.task_id))
+        # Platform context (.sca/) must stay out of checkpoints even if an agent force-added it.
+        # Unstage it after `add -A`: naming an ignored path in the add pathspec makes git fail.
+        add = "core.fsmonitor=false add -A && "
+        assert add in argv[-3]
+        argv[-3] = argv[-3].replace(
+            add, add + "git -c core.hooksPath=/dev/null -c core.fsmonitor=false "
+            "rm -r -q --cached --ignore-unmatch -- .sca && ", 1)
         if isinstance(ws, OverlayWorkspace):
             await ws.helper(argv)
         else:

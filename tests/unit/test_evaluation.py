@@ -94,6 +94,7 @@ async def test_hidden_failure_never_enters_fix_loop(monkeypatch, visible, hidden
         if name == 'run_acceptance':
             return hidden
     monkeypatch.setattr('sca.kernel.workflow.workflow.execute_activity', execute)
+    monkeypatch.setattr('sca.kernel.workflow.workflow.patched', lambda _id: True)
     assert await TaskWorkflow()._run('task') == expected
     names = [name for name, _ in calls]
     assert names.count('run_agent_turn') == names.count('run_acceptance') == 1
