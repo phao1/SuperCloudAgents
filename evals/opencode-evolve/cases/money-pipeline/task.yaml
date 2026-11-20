@@ -1,0 +1,11 @@
+split: dev
+category: multi-file
+instruction: Repair orders pipeline across validation.py, totals.py, report.py. Each
+  row has currency (nonempty str), quantity (int>=0, not bool), cents (int>=0, not
+  bool). Invalid rows raise ValueError. summarize(rows) accepts one-shot input and
+  returns CSV with header currency,cents, LF terminators, currencies in first-seen
+  order, totals quantity*cents. CSV must round-trip Unicode and embedded commas/quotes/newlines.
+  Do not mutate rows. Use only the Python standard library. Keep verify.py unchanged.
+  Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

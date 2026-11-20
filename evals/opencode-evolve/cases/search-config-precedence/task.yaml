@@ -1,0 +1,10 @@
+split: dev
+category: search
+instruction: Repair resolve(defaults,file_values,environment) using the actual settings
+  chain in config/. Precedence is environment > file > defaults, by key presence,
+  even for False, 0, empty string, None. Return a new dict with all keys, keep inputs
+  unchanged. Remove stale truthiness-based fallback on the active path; legacy.py
+  is unrelated. Use only the Python standard library. Keep verify.py unchanged. Run
+  python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

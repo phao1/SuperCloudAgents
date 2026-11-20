@@ -1,0 +1,9 @@
+split: dev
+category: bug-fix
+instruction: 'Fix Cache: injected clock returns numeric seconds. put(key,value,ttl)
+  expires at now+ttl; get returns None at or after expiry, otherwise the stored value
+  (including falsey values). ttl<=0 must remove an existing key immediately. Each
+  cache has independent state. No sleeping or real clock access. Use only the Python
+  standard library. Keep verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

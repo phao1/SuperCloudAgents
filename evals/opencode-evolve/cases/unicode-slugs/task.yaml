@@ -1,0 +1,10 @@
+split: dev
+category: unicode
+instruction: 'Implement slug(text): normalize to NFC, casefold, then NFC again; retain
+  every Unicode alphanumeric character and combining mark attached to a retained character;
+  turn each run of all other characters into one hyphen and trim end hyphens. Preserve
+  Chinese; do not transliterate or ASCII-encode. Combining marks at the start or after
+  a separator are discarded. Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

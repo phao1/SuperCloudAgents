@@ -1,0 +1,11 @@
+split: dev
+category: feature
+instruction: 'Implement parse(text): parse LF-separated key=value lines; ignore blank
+  lines and lines whose first nonspace character is #. Strip outer whitespace from
+  keys and raw values, but preserve escaped spaces. Backslash escapes only backslash,
+  equals, hash, and space; reject unknown/dangling escapes, missing unescaped equals,
+  and empty keys with ValueError. Split on first unescaped equals; last duplicate
+  key wins. No inline comments. Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

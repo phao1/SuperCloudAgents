@@ -1,0 +1,10 @@
+split: holdout
+category: refactor
+instruction: 'Remove duplicated comma-separated integer parsing from total(text) and
+  largest(text): add parse_numbers(text), and make both functions call it at runtime.
+  Strip whitespace, ignore empty fields, use int for signed integers. Empty total
+  is 0 and empty largest is None. Invalid nonempty fields raise ValueError. Keep signatures.
+  Use only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

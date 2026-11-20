@@ -1,0 +1,11 @@
+split: dev
+category: iteration
+instruction: 'Implement apply(state,operations): operations is a one-shot iterable
+  of (key,delta) pairs, integer deltas. Apply additions to a dict of nonnegative integer
+  balances, missing keys start at zero. If any resulting balance is negative or iteration
+  raises any exception, restore state exactly (including missing keys) and re-raise
+  that original exception; negative balance raises ValueError. Success mutates state
+  in place and returns None. Keep the original dict identity. Use only the Python
+  standard library. Keep verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

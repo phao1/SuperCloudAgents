@@ -1,0 +1,10 @@
+split: holdout
+category: bug-fix
+instruction: Fix order(graph) to return dependency-first topological order of a dict
+  mapping node strings to dependency lists. Visit root keys and dependencies in insertion/list
+  order with DFS, emitting each node once. Dependencies absent from graph are leaves.
+  Detect every cycle (including self loops and disconnected cycles) with ValueError;
+  do not mutate graph. Use only the Python standard library. Keep verify.py unchanged.
+  Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

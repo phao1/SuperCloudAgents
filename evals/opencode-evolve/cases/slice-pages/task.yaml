@@ -1,0 +1,9 @@
+split: dev
+category: boundary
+instruction: 'Implement page(items,offset,limit): offset and limit must be nonnegative
+  ints (bool rejected), otherwise ValueError. Return a list of at most limit items
+  after skipping offset. Accept one-shot iterables, consume no items when limit=0,
+  and do not read beyond the returned page. Use only the Python standard library.
+  Keep verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

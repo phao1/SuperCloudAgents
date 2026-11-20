@@ -1,0 +1,13 @@
+split: holdout
+category: test-writing
+instruction: 'Test reserve(stock,requests): stock and requests map strings to nonnegative
+  integer quantities. Return a new stock dict with requested quantities subtracted;
+  raise ValueError for negative requests or insufficient/missing stock. Zero request
+  for missing item is allowed and adds that item with 0. Never mutate either input,
+  even when a later request fails. Add unittest tests under tests/test_*.py; keep
+  app.py unchanged. Tests must pass the given correct implementation and reject implementations
+  violating each listed requirement. Tests must call the production functions; do
+  not inspect source text or rely on files outside the repository. Use only the Python
+  standard library. Keep verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

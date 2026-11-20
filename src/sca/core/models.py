@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # --------------------------------------------------------------------------- tasks
 
@@ -190,6 +192,24 @@ ExecEvent = ExecOutput | ExecExit
 # --------------------------------------------------------------------------- agents
 
 
+class AgentOverlay(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    system_prompt: str | None = Field(default=None, max_length=40_000)
+    tool_guidance: str | None = Field(default=None, max_length=10_000)
+    tool_descriptions: dict[
+        Annotated[str, Field(pattern=r"^[a-z][a-z0-9_-]{0,40}$")],
+        Annotated[str, Field(max_length=4_000)],
+    ] | None = Field(default=None, max_length=64)
+
+    def canonical_json(self) -> str:
+        return json.dumps(self.model_dump(exclude_none=True), ensure_ascii=True,
+                          sort_keys=True, separators=(",", ":"))
+
+    def sha256(self) -> str:
+        return hashlib.sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
 class AgentContext(BaseModel):
     """What an agent backend needs to know about where it runs."""
 
@@ -199,6 +219,7 @@ class AgentContext(BaseModel):
     workdir: str = "/workspace"
     model: str | None = None
     agent_version: str | None = None
+    agent_overlay: AgentOverlay | None = None
     # Set per turn when a model gateway is configured: a short-lived credential the
     # backend must use instead of bringing its own.
     model_base_url: str | None = None

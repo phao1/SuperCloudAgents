@@ -31,6 +31,8 @@ from sca.db.engine import make_engine, make_sessionmaker
 from sca.db.repo import Store
 from sca.eval.activities import EvalActivities
 from sca.eval.workflow import EvalRunWorkflow
+from sca.evolve.activities import EvolutionActivities
+from sca.evolve.workflow import EvolutionWorkflow
 from sca.kernel.activities import KernelActivities
 from sca.kernel.kind import KindDeps
 from sca.kernel.kind import all as all_kinds
@@ -165,12 +167,13 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
 
     builds = OpenCodeBuildActivities(settings)
     evaluation = EvalActivities(settings, store)
+    evolution = EvolutionActivities(settings, store, deps.gateway)
     return Worker(
         client,
         identity=deps.worker_identity,
         task_queue=settings.task_queue,
-        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow],
-        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + [builds.build],
+        workflows=[wf for kind in all_kinds() for wf in kind.workflows()] + [MaintenanceWorkflow, EvalRunWorkflow, OpenCodeBuildWorkflow, EvolutionWorkflow],
+        activities=kernel.kernel_all() + scenario_activities + maintenance.all() + evaluation.all() + evolution.all() + [builds.build],
         max_concurrent_activities=8,
     )
 

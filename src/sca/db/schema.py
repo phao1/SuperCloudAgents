@@ -1,6 +1,7 @@
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -176,3 +177,52 @@ eval_results = Table(
     Column("cost_usd", Numeric, nullable=False),
     Column("duration_s", Float, nullable=False),
 )
+
+# Evolution candidates carry their own tenant key so RLS applies to direct reads too.
+evolutions = Table(
+    'evolutions', metadata,
+    Column('id', UUID(as_uuid=True), primary_key=True),
+    Column('tenant_id', Text, nullable=False),
+    Column('status', Text, nullable=False),
+    Column('config', JSONB, nullable=False),
+    Column('created_by', Text, nullable=False),
+    timestamp('created_at'), timestamp('updated_at'),
+    Column('finished_at', DateTime(timezone=True)),
+    Column('best_champion_id', UUID(as_uuid=True)),
+    Column('spent_usd', Numeric, nullable=False, server_default='0'),
+)
+evolution_candidates = Table(
+    'evolution_candidates', metadata,
+    Column('id', UUID(as_uuid=True), primary_key=True),
+    Column('tenant_id', Text, nullable=False),
+    Column('evolution_id', UUID(as_uuid=True), ForeignKey('evolutions.id'), nullable=False),
+    Column('generation', Integer, nullable=False),
+    Column('parent_id', UUID(as_uuid=True)),
+    Column('overlay', JSONB, nullable=False),
+    Column('overlay_sha256', Text, nullable=False),
+    Column('hypothesis', Text, nullable=False),
+    Column('diagnosis', JSONB, nullable=False),
+    Column('static_check', JSONB, nullable=False),
+    Column('dev_run_id', UUID(as_uuid=True)),
+    Column('holdout_run_id', UUID(as_uuid=True)),
+    Column('dev_metrics', JSONB), Column('holdout_metrics', JSONB),
+    Column('decision', Text, nullable=False), Column('reason', Text),
+    timestamp('created_at'),
+    CheckConstraint("decision IN ('pending','rejected','promoted','invalid')"),
+)
+champions = Table(
+    'champions', metadata,
+    Column('id', UUID(as_uuid=True), primary_key=True),
+    Column('tenant_id', Text, nullable=False),
+    Column('agent_version', Text, nullable=False),
+    Column('model', Text, nullable=False),
+    Column('overlay', JSONB, nullable=False),
+    Column('overlay_sha256', Text, nullable=False),
+    Column('candidate_id', UUID(as_uuid=True), ForeignKey('evolution_candidates.id')),
+    Column('metrics', JSONB, nullable=False),
+    Column('parent_champion_id', UUID(as_uuid=True)),
+    timestamp('created_at'),
+    Column('active', Boolean, nullable=False, server_default='false'),
+)
+Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
+      unique=True, postgresql_where=champions.c.active)

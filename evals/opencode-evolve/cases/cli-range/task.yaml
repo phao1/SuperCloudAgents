@@ -1,0 +1,10 @@
+split: dev
+category: multi-file
+instruction: 'Implement CLI python -m cli START STOP [--step N] using parser.py and
+  ranges.py. Print comma-separated integers from half-open range, then LF. Default
+  step=1; negative step allowed, zero invalid. Invalid integers/arguments/zero step:
+  nonzero exit and no stdout. app.render(start,stop,step=1) exposes the same formatting
+  and raises ValueError for zero step. Use only the Python standard library. Keep
+  verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

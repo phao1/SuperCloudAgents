@@ -1,0 +1,11 @@
+split: holdout
+category: unicode
+instruction: 'Implement encode(records) and decode(text) for JSON Lines: encode any
+  iterable of JSON-compatible objects as compact JSON, ensure_ascii=False, one LF
+  per record. decode returns list of objects, skips whitespace-only lines, handles
+  CRLF, and raises ValueError on malformed nonblank lines. Preserve Unicode, embedded
+  newlines, nested objects, falsey values, and input data; no Unicode normalization.
+  Use only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

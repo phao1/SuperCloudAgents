@@ -3,7 +3,7 @@
 import asyncio
 import re
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -20,7 +20,7 @@ from sca.core.models import Principal
 from sca.db.schema import eval_runs
 from sca.eval.compare import compare
 from sca.eval.rescore import rescore_run
-from sca.eval.suites import load_suite
+from sca.eval.suites import Split, case_metadata, load_suite, select_cases
 from sca.eval.trajectory import overall_passed
 from sca.eval.workflow import EvalRunWorkflow
 from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
@@ -49,11 +49,13 @@ class Variant(BaseModel):
     agent_version: str | None = None
     model: str | None = None
     prompt_version: str | None = None
+    agent_overlay: dict[str, Any] | None = None
 
 
 class RunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     suite: str
+    split: Split | None = None
     variant: Variant = Field(default_factory=Variant)
     repeat: int = Field(default=1, ge=1, le=100)
     concurrency: int = Field(default=1, ge=1, le=100)
@@ -63,7 +65,11 @@ class RunRequest(BaseModel):
 
 async def read_run(request: Request, run_id: UUID) -> dict:
     try:
-        return await request.app.state.store.for_tenant("eval").get_eval_run(str(run_id))
+        run = await request.app.state.store.for_tenant("eval").get_eval_run(str(run_id))
+        metadata = run["variant"].get("case_metadata", {})
+        return {**run, "split": run["variant"].get("split"),
+                "results": [{**row, **metadata.get(row["case_id"], {})}
+                            for row in run["results"]]}
     except NoResultFound:
         raise HTTPException(404, "Evaluation run not found") from None
 
@@ -92,6 +98,7 @@ async def suites(user: Annotated[Principal, Depends(authorize("read"))]) -> list
                 continue
             result.append({"name": path.name, "description": suite.get("description", ""),
                            "kind": suite.get("kind", "coding"),
+                           "case_metadata": case_metadata(suite["cases"]),
                            "cases": [case["id"] for case in suite["cases"]]})
         return result
 
@@ -112,6 +119,7 @@ async def enqueue_run(
     path = suite_path(body.suite)
     try:
         suite = await asyncio.to_thread(load_suite, path)
+        cases = select_cases(suite, body.split)
     except (ValueError, OSError):
         raise HTTPException(422, "Invalid suite") from None
     settings = get_settings()
@@ -130,7 +138,8 @@ async def enqueue_run(
         variant["prompt_version"] = prompt_version
     run_id = str(uuid4())
     payload = {**body.model_dump(), "id": run_id, "suite": str(path.resolve()),
-               "suite_hash": suite["hash"], "variant": variant}
+               "suite_hash": suite["hash"], "variant": variant,
+               "case_metadata": case_metadata(cases)}
     if source_build_id is not None:
         payload["source_build_id"] = str(source_build_id)
     await request.app.state.store.for_tenant("eval").create_eval_run({

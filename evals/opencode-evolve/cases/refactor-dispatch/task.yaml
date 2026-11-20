@@ -1,0 +1,10 @@
+split: dev
+category: refactor
+instruction: Refactor convert(value,unit) to dispatch through module-level CONVERTERS
+  mapping with exactly keys c,f,k and callable values; convert must use that mapping
+  so replacing an entry changes dispatch. Preserve Celsius conversion, Fahrenheit
+  (value-32)*5/9, Kelvin value-273.15, and ValueError for unknown units. Preserve
+  public function signature. Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

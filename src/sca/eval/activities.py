@@ -13,7 +13,7 @@ from temporalio.exceptions import ApplicationError
 from sca.config import Settings
 from sca.core.models import TERMINAL_STATES
 from sca.db.repo import Store
-from sca.eval.suites import archive_directory, load_suite
+from sca.eval.suites import archive_directory, case_metadata, load_suite, select_cases
 from sca.eval.trajectory import evaluate
 
 
@@ -43,15 +43,18 @@ class EvalActivities:
         if request.get("suite_hash") not in (None, suite["hash"]):
             await self.store.finish_eval_run(request["id"], "failed")
             raise ApplicationError("Suite changed after evaluation was queued", non_retryable=True)
+        cases = select_cases(suite, request.get("split"))
         await self.store.create_eval_run({
             "id": UUID(request["id"]), "tenant_id": "eval", "suite": suite["name"],
-            "suite_hash": suite["hash"], "variant": request, "created_by": "cli", "status": "running",
+            "suite_hash": suite["hash"],
+            "variant": {**request, "case_metadata": case_metadata(cases)},
+            "created_by": "cli", "status": "running",
         })
         await self.store.start_eval_run(request["id"])
         return {"cases": [{**case, "kind": suite.get("kind", "coding"),
                            "suite_hash": suite["hash"],
                            "spec": {**suite.get("defaults", {}), **case["spec"]}}
-                          for case in suite["cases"]]}
+                          for case in cases]}
 
     async def git(self, directory: Path, *args: str) -> None:
         proc = await asyncio.create_subprocess_exec(

@@ -1,0 +1,11 @@
+split: holdout
+category: multi-file
+instruction: 'Fix route(events) through normalize.py and handlers.py: normalize type
+  using strip().casefold(), recognize created/deleted only, ignore unknown types.
+  created increments an ID count, deleted decrements but never below zero. Missing
+  IDs or non-string IDs raise ValueError for recognized events, ignored unknown events
+  need no ID. Return dict in first-recognized-ID order, including zero counts. Accept
+  generators, preserve input. Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

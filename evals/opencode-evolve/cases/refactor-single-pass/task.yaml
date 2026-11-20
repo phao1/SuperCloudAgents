@@ -1,0 +1,9 @@
+split: dev
+category: refactor
+instruction: Refactor stats(values) to consume a one-shot iterable in one pass without
+  materializing it (no list/tuple/set/sorted or comprehension collecting values).
+  Return (count,total,minimum,maximum), with (0,0,None,None) for empty input. Preserve
+  exact integer sums and support negative numbers. Use bounded memory. Use only the
+  Python standard library. Keep verify.py unchanged. Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

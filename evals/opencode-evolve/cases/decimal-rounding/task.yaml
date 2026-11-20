@@ -1,0 +1,10 @@
+split: dev
+category: boundary
+instruction: 'Implement cents(text): parse finite Decimal from a string and convert
+  to integer cents using ROUND_HALF_UP (ties away from zero), including negatives
+  and exponent notation. Reject invalid, NaN, and infinities with ValueError. Handle
+  magnitudes up to 10^40 exactly without depending on caller decimal precision. Do
+  not change global decimal context. Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

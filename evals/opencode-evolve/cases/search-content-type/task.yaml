@@ -1,0 +1,10 @@
+split: holdout
+category: search
+instruction: Repair describe(filename) by finding the active MIME lookup path across
+  files. Match the final extension case-insensitively; unknown/no extension is application/octet-stream.
+  .tar.gz (case insensitive) is application/gzip, .json is application/json, .txt
+  is text/plain, .svg is image/svg+xml. Keep existing catalog values and use the shared
+  catalog at runtime, not a duplicate table. Use only the Python standard library.
+  Keep verify.py unchanged. Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

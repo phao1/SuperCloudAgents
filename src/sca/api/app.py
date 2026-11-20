@@ -142,6 +142,7 @@ def create_app(
         return FileResponse(Path(__file__).parent / "static" / "index.html")
 
     from sca.api.evals import router as evals_router
+    from sca.api.evolutions import router as evolutions_router
     from sca.api.files import router as files_router
     from sca.api.memories import router as memories_router
     from sca.api.portal import router as portal_router
@@ -174,6 +175,7 @@ def create_app(
         app.include_router(agents_router)
 
     app.include_router(evals_router)
+    app.include_router(evolutions_router)
     app.include_router(portal_router)
     app.include_router(memories_router)
     app.include_router(files_router)

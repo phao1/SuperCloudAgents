@@ -1,0 +1,11 @@
+split: dev
+category: search
+instruction: 'Find why authenticate(user,roles) fails to recognize role aliases. Use
+  the existing role catalog as authority: aliases and canonical names are matched
+  after strip+casefold; unknown roles ignored. authenticate returns sorted unique
+  canonical permissions for all recognized roles; no changes to catalog data. Search
+  existing modules rather than duplicate the catalog. Handle generators and preserve
+  user argument (currently unused). Use only the Python standard library. Keep verify.py
+  unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

@@ -253,10 +253,14 @@ class KernelActivities:
         return GitWorkspace(self._task_dir(task_id), branch_name(task_id), cache=cache)
 
     def _agent_ctx(self, task_id: str, spec: ExecutionSpec) -> AgentContext:
+        overlay = getattr(spec, "agent_overlay", None)
+        if overlay is not None and self._backend(spec).name != "opencode":
+            raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode"))
         return AgentContext(
             task_id=task_id,
             agent_home_host=str(self._task_dir(task_id) / "agent_home"),
             agent_version=getattr(spec, "agent_version", None),
+            agent_overlay=overlay,
             model=spec.model or self.settings.default_model,
         )
 
@@ -797,16 +801,20 @@ class KernelActivities:
                 return TurnResult(session_id=session_id, final_message="")
             turn_budget = min(turn_budget, remaining)
 
+        ctx = self._agent_ctx(task_id, spec)
+        overlay_metadata = ({"overlay_sha256": ctx.agent_overlay.sha256()}
+                            if ctx.agent_overlay is not None else {})
+        if overlay_metadata:
+            await self.store.update_result(task_id, overlay_metadata)
         await self.store.append_event(
             task_id,
             EventType.AGENT_TURN_STARTED,
             {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name,
              "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version,
-             **self._activity_route()},
+             **overlay_metadata, **self._activity_route()},
             dedup_key=f"{key}.started",
         )
 
-        ctx = self._agent_ctx(task_id, spec)
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):
             key_alias += f"-{self.name}"

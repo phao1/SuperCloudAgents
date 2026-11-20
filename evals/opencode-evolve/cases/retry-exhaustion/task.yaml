@@ -1,0 +1,11 @@
+split: dev
+category: iteration
+instruction: 'Implement retry(call,attempts,retry_on=(OSError,)): attempts is a positive
+  int (not bool) else ValueError before calling. Invoke call at most attempts times;
+  return immediately on success including falsey values. Retry only retry_on exceptions;
+  re-raise the last original exception object on exhaustion. Never sleep. Fix the
+  implementation and run the public verifier, which checks several failure paths.
+  Use only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

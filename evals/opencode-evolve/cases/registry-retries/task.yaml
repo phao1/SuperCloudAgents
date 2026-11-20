@@ -1,0 +1,8 @@
+split: dev
+category: large-file
+instruction: Change only service-0702's retries from 3 to 0. app.py has more than
+  900 lines. Keep every other line byte-for-byte, including Unicode labels, spacing,
+  key order and lookup(). lookup must still return an independent dict. Use only the
+  Python standard library. Keep verify.py unchanged. Run python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

@@ -1,0 +1,10 @@
+split: holdout
+category: boundary
+instruction: Implement compare_versions(a,b) returning -1/0/1. Each version consists
+  of one or more dot-separated nonnegative ASCII integer components. Leading zeros
+  allowed; missing trailing components are zeros, so 1.2 == 1.2.0. Reject empty components,
+  signs, whitespace, Unicode digits, other characters with ValueError. Never use float
+  comparisons. Use only the Python standard library. Keep verify.py unchanged. Run
+  python verify.py before finishing.
+verify_command: python verify.py
+image: python:3.12

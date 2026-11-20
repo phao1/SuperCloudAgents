@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -143,6 +145,22 @@ class OpenCodeBackend:
             raise AgentTurnError(f"Unknown OpenCode version: {directory.name}")
         return directory
 
+    def _overlay_env(self, ctx: AgentContext) -> dict[str, str]:
+        if ctx.agent_overlay is None:
+            return {}
+        home = Path(ctx.agent_home_host)
+        home.mkdir(parents=True, exist_ok=True)
+        # Replace atomically: resumed homes are untrusted and may contain symlinks.
+        fd, temporary = tempfile.mkstemp(prefix=".overlay-", dir=home)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(ctx.agent_overlay.canonical_json())
+                os.fchmod(stream.fileno(), 0o444)
+            os.replace(temporary, home / "sca-overlay.json")
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return {"SCA_AGENT_OVERLAY": f"{ctx.agent_home}/sca-overlay.json"}
+
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         directory = self.version_dir(ctx.agent_version)
         if self.state_transport != "mount":
@@ -154,7 +172,7 @@ class OpenCodeBackend:
                 Mount(source=str(directory), target="/opt/opencode", read_only=True),
                 Mount(source=str(home.resolve()), target=ctx.agent_home),
             ],
-            env={"HOME": ctx.agent_home},
+            env={"HOME": ctx.agent_home, **self._overlay_env(ctx)},
         )
 
     async def run_turn(
@@ -208,6 +226,7 @@ class OpenCodeBackend:
             argv,
             workdir=ctx.workdir,
             env={
+                **self._overlay_env(ctx),
                 "HOME": ctx.agent_home,
                 "OPENCODE_CONFIG_CONTENT": json.dumps(config),
                 "SCA_MODEL_KEY": ctx.model_api_key,

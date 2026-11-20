@@ -22,6 +22,8 @@ class Settings(BaseSettings):
 
     memory_max_items: int = Field(default=30, ge=0, le=1000)
     memory_max_chars: int = Field(default=3000, ge=0, le=100000)
+    evolve_model: str = "deepseek-flash"
+
     memory_model: str = "deepseek-flash"
     memory_embedding_model: str | None = None
     memory_retrieval_top_k: int | None = Field(default=None, ge=0, le=1000)

@@ -1,0 +1,10 @@
+split: holdout
+category: feature
+instruction: 'Implement patch(base, delta) with JSON Merge Patch semantics: if delta
+  is not a dict return a deep copy of delta. Otherwise treat non-dict base as {},
+  recursively merge dicts, remove keys whose delta value is None, replace lists/scalars.
+  Return fully independent data; never mutate or retain mutable aliases to either
+  input. Use only the Python standard library. Keep verify.py unchanged. Run python
+  verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

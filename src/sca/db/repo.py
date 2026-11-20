@@ -967,3 +967,118 @@ class Store:
             await self._event(session, row['id'], 'acceptance.completed', {
                 'passed': passed, 'exit_code': exit_code, 'output_tail': output_tail,
             }, 'acceptance.completed')
+
+    async def create_evolution(self, values: dict) -> None:
+        from sca.db.schema import evolutions
+
+        if self.tenant_id is None:
+            raise ValueError('tenant required')
+        async with self._transaction() as session:
+            await session.execute(pg_insert(evolutions).values(
+                **values, tenant_id=self.tenant_id).on_conflict_do_nothing())
+
+    async def list_evolutions(self) -> list[dict]:
+        from sca.db.schema import evolutions
+
+        async with self._transaction() as session:
+            return [dict(r) for r in (await session.execute(select(evolutions).where(
+                evolutions.c.tenant_id == self.tenant_id).order_by(
+                    evolutions.c.created_at.desc()).limit(100))).mappings()]
+
+    async def get_evolution(self, evolution_id: str) -> dict:
+        from sca.db.schema import eval_results, eval_runs, evolution_candidates, evolutions
+
+        async with self._transaction() as session:
+            row = (await session.execute(select(evolutions).where(
+                evolutions.c.id == task_uuid(evolution_id),
+                evolutions.c.tenant_id == self.tenant_id))).mappings().one()
+            candidates = [dict(r) for r in (await session.execute(select(evolution_candidates).where(
+                evolution_candidates.c.evolution_id == row['id'],
+                evolution_candidates.c.tenant_id == self.tenant_id).order_by(
+                    evolution_candidates.c.generation, evolution_candidates.c.created_at))).mappings()]
+            journal = [{k: c[k] for k in ('id', 'generation', 'hypothesis', 'decision', 'reason',
+                                         'dev_metrics', 'holdout_metrics')} for c in candidates]
+            runs = (await session.execute(select(eval_runs).where(
+                eval_runs.c.tenant_id == self.tenant_id,
+                eval_runs.c.variant['evolution_id'].astext == str(row['id'])
+            ).order_by(eval_runs.c.created_at))).mappings().all()
+            for run in runs:
+                cost = (await session.execute(select(func.coalesce(func.sum(eval_results.c.cost_usd), 0)).where(
+                    eval_results.c.run_id == run['id'], eval_results.c.tenant_id == self.tenant_id))).scalar_one()
+                journal.append({'type': 'evaluation', 'id': run['id'], 'status': run['status'],
+                                'split': run['variant'].get('split'), 'cost_usd': float(cost),
+                                'overlay': run['variant'].get('variant', {}).get('agent_overlay', {})})
+            return {**row, 'candidates': candidates, 'journal': journal}
+
+    async def update_evolution(self, evolution_id: str, values: dict) -> None:
+        from sca.db.schema import evolutions
+
+        if values.get('status') in ('completed', 'failed', 'stopped', 'budget_exhausted', 'patience_exhausted'):
+            values = {'finished_at': datetime.now(UTC), **values}
+        async with self._transaction() as session:
+            await session.execute(update(evolutions).where(
+                evolutions.c.id == task_uuid(evolution_id),
+                evolutions.c.tenant_id == self.tenant_id).values(**values, updated_at=func.now()))
+
+    async def save_evolution_candidate(self, values: dict) -> None:
+        from sca.db.schema import evolution_candidates, evolutions
+
+        async with self._transaction() as session:
+            (await session.execute(select(evolutions.c.id).where(
+                evolutions.c.id == values['evolution_id'],
+                evolutions.c.tenant_id == self.tenant_id))).one()
+            statement = pg_insert(evolution_candidates).values(**values, tenant_id=self.tenant_id)
+            await session.execute(statement.on_conflict_do_update(
+                index_elements=['id'], set_={k: v for k, v in values.items() if k != 'id'},
+                where=evolution_candidates.c.tenant_id == self.tenant_id))
+
+    async def list_champions(self, agent_version: str | None = None,
+                             model: str | None = None) -> list[dict]:
+        from sca.db.schema import champions
+
+        query = select(champions).where(champions.c.tenant_id == self.tenant_id)
+        if agent_version is not None:
+            query = query.where(champions.c.agent_version == agent_version)
+        if model is not None:
+            query = query.where(champions.c.model == model)
+        async with self._transaction() as session:
+            return [dict(r) for r in (await session.execute(query.order_by(
+                champions.c.created_at.desc()))).mappings()]
+
+    async def activate_champion(self, champion_id: str, values: dict | None = None) -> dict:
+        from sca.db.schema import champions
+
+        async with self._transaction() as session:
+            if values is None:
+                target = dict((await session.execute(select(champions).where(
+                    champions.c.id == task_uuid(champion_id),
+                    champions.c.tenant_id == self.tenant_id))).mappings().one())
+            else:
+                target = {**values, 'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
+            # Serialize even the first promotion, where there is no active row to lock.
+            lock_key = f"{self.tenant_id}:{target['agent_version']}:{target['model']}"
+            await session.execute(text('SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))'),
+                                  {'key': lock_key})
+            await session.execute(update(champions).where(
+                champions.c.tenant_id == self.tenant_id,
+                champions.c.agent_version == target['agent_version'],
+                champions.c.model == target['model'], champions.c.active).values(active=False))
+            if values is not None:
+                await session.execute(pg_insert(champions).values(**target, active=False).on_conflict_do_nothing())
+            return dict((await session.execute(update(champions).where(
+                champions.c.id == task_uuid(champion_id), champions.c.tenant_id == self.tenant_id
+            ).values(active=True).returning(champions))).mappings().one())
+
+    async def get_active_champion(self, agent_version: str, model: str) -> dict | None:
+        rows = await self.list_champions(agent_version, model)
+        return next((row for row in rows if row['active']), None)
+
+    async def evolution_evidence(self, task_id: str) -> list[dict]:
+        async with self._transaction() as session:
+            row = await self._task(session, task_id, True)
+            found = (await session.execute(select(events.c.payload).where(
+                events.c.task_id == row['id'], events.c.tenant_id == self.tenant_id,
+                events.c.type.in_(('agent.command', 'acceptance.completed'))
+            ).order_by(events.c.seq.desc()).limit(8))).scalars().all()
+            return [{k: str(payload[k])[-1000:] for k in ('command', 'output_tail') if k in payload}
+                    for payload in reversed(found)]

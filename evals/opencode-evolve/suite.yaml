@@ -1,0 +1,7 @@
+name: opencode-evolve
+kind: coding
+description: 演进基准：20 个开发用例与 10 个留出用例，覆盖边界、重构、搜索和测试编写。
+defaults:
+  max_fix_attempts: 1
+  turn_timeout_s: 240
+  memory_enabled: false

@@ -1,0 +1,9 @@
+split: dev
+category: feature
+instruction: 'Implement batches(items,size): lazily yield tuples of at most size items,
+  including a final short tuple. size must be a positive int (reject bool) or raise
+  ValueError when the iterator is first advanced. Support one-shot and infinite iterators;
+  do not read ahead past the yielded batch. Use only the Python standard library.
+  Keep verify.py unchanged. Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

@@ -1,0 +1,12 @@
+split: dev
+category: test-writing
+instruction: 'Test row(fields): serialize CSV with CRLF, quoting comma/quote/CR/LF,
+  double embedded quotes, preserve Chinese, preserve trailing empty fields, encode
+  a single empty field as quoted empty string. Add unittest tests under tests/test_*.py;
+  keep app.py unchanged. Tests must pass the given correct implementation and reject
+  implementations violating each listed requirement. Tests must call the production
+  functions; do not inspect source text or rely on files outside the repository. Use
+  only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12
