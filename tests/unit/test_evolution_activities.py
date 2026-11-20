@@ -62,9 +62,19 @@ async def test_holdout_reflection_forbidden(tmp_path):
 @pytest.mark.parametrize('response', ['not json', '{}', '[{"hypothesis": 3}]'])
 async def test_bad_model_output_is_journaled_invalid(tmp_path, response):
     activities, _, gateway, request = setup(tmp_path)
-    gateway.complete.side_effect = ['{"diagnoses": ["pattern"]}', response]
+    gateway.complete.side_effect = ['{"diagnoses": ["pattern"]}', response, response]
     result = await activities.propose(request)
     assert result and not result[0]['static_check']['valid']
+
+
+async def test_unparseable_proposals_get_one_correction_round(tmp_path):
+    activities, _, gateway, request = setup(tmp_path)
+    fixed = json.dumps([{'hypothesis': 'h', 'overlay': {'tool_guidance': 'Run tests'}}])
+    gateway.complete.side_effect = ['{"diagnoses": ["p"]}', 'Sure! Here are ideas: [{"hyp', fixed]
+    result = await activities.propose(request)
+    assert result[0]['hypothesis'] == 'h' and result[0]['static_check']['valid']
+    assert gateway.complete.await_count == 3
+    assert 'not a valid JSON array' in str(gateway.complete.call_args.args[0][-1])
 
 
 async def test_prepare_persists_split_and_overlay_before_child(tmp_path):

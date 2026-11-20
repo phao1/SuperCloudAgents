@@ -149,7 +149,7 @@ class EvolutionActivities:
         baseline = await self.baseline(request['config']['agent_version'])
         context = {'baseline': baseline, 'overlay': request['overlay'], 'diagnosis': diagnosis,
                    'journal': safe_journal[-100:], 'surfaces': request['config']['surfaces']}
-        raw = await self.gateway.complete([
+        messages = [
             {'role': 'system', 'content': system + f' Return a JSON array of {request["config"]["candidates"]} '
              'objects with hypothesis and overlay (system_prompt, tool_guidance, tool_descriptions). '
              'The effective text of each surface is the current overlay value, else the baseline. '
@@ -157,13 +157,22 @@ class EvolutionActivities:
              'surfaces you change; omitted surfaces keep their current value. tool_descriptions replaces '
              'the description of the named tools. Preserve ${OPENCODE_TOOL_GUIDANCE} in system_prompt. '
              'Do not repeat failed hypotheses.'},
-            {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}], self.settings.evolve_model,
-            # Each candidate may carry a full system prompt; the default 1024 tokens truncates the JSON.
-            max_tokens=8192)
+            {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}]
+        # Each candidate may carry a full system prompt; the default 1024 tokens truncates the JSON.
+        raw = await self.gateway.complete(messages, self.settings.evolve_model, max_tokens=8192)
         try:
             values = parse_json(raw[:200000])
         except ValueError:
-            values = []
+            # One correction round: live runs occasionally return prose or a cut-off array.
+            raw = await self.gateway.complete([
+                *messages, {'role': 'assistant', 'content': raw[:4000]},
+                {'role': 'user', 'content': 'That was not a valid JSON array. Reply with only the JSON '
+                 'array, shorter if needed, with no prose or Markdown.'}],
+                self.settings.evolve_model, max_tokens=8192)
+            try:
+                values = parse_json(raw[:200000])
+            except ValueError:
+                values = []
         if isinstance(values, dict):
             values = next((v for v in values.values() if isinstance(v, list)), [values])
         if not isinstance(values, list):
