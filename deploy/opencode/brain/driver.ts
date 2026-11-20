@@ -1,21 +1,32 @@
 import { Effect, Redacted } from "effect"
 import { ChildProcess } from "effect/process"
 
-interface DockerInput { workdir: string; container: string; docker_prefix: string[]; turn_marker?: string }
+export interface HanddInput { socket: string; python: string; helper: string }
+interface DockerInput {
+  workdir: string; container: string; docker_prefix: string[]; turn_marker?: string; handd?: HanddInput
+}
 const quote = (word: string) => `'${word.replaceAll("'", "'\\''")}'`
 const unwrap = (word: string | Redacted.Redacted<string>) => Redacted.isRedacted(word) ? Redacted.value(word) : word
+const hostEnv = () => ({ PATH: process.env.PATH ?? "/usr/bin:/bin" })
+
+function remoteEnv(command: ChildProcess.StandardCommand, input: DockerInput): Record<string, string> {
+  const env: Record<string, string> = {}
+  // The brain's model credentials stay on the host with either transport.
+  for (const [key, value] of Object.entries(command.options.env ?? {})) {
+    if (value !== undefined && !/KEY|TOKEN|SECRET|PASSWORD|OPENCODE_CONFIG/i.test(key)) {
+      env[key] = unwrap(value)
+    }
+  }
+  if (input.turn_marker) env.SCA_BRAIN_TURN = input.turn_marker
+  return env
+}
+
 export const dockerCommand = (command: ChildProcess.Command, input: DockerInput): ChildProcess.Command => {
   if (command._tag === "PipedCommand") {
     return { ...command, left: dockerCommand(command.left, input), right: dockerCommand(command.right, input) }
   }
   const args = ["exec", "-i", "-w", command.options.cwd ?? input.workdir]
-  // Never inherit the brain's environment into docker exec, including its gateway key.
-  for (const [key, value] of Object.entries(command.options.env ?? {})) {
-    if (value !== undefined && !/KEY|TOKEN|SECRET|PASSWORD|OPENCODE_CONFIG/i.test(key)) {
-      args.push("-e", `${key}=${unwrap(value)}`)
-    }
-  }
-  if (input.turn_marker) args.push("-e", `SCA_BRAIN_TURN=${input.turn_marker}`)
+  for (const [key, value] of Object.entries(remoteEnv(command, input))) args.push("-e", `${key}=${value}`)
   args.push(input.container)
   if (input.turn_marker) {
     // Persist the process group before exec; descendants may clear their environment.
@@ -38,10 +49,44 @@ export const dockerCommand = (command: ChildProcess.Command, input: DockerInput)
     : [...prefix.slice(1), ...args]
   return ChildProcess.make(prefix[0], argv, {
     ...command.options, cwd: undefined, shell: false,
-    env: { PATH: process.env.PATH ?? "/usr/bin:/bin" }, extendEnv: false,
+    env: hostEnv(), extendEnv: false,
   })
 }
 
+const helperArgs = (handd: HanddInput) => ["-I", "-S", handd.helper, handd.socket]
+
+export function handdCommand(command: ChildProcess.Command, input: DockerInput, handd: HanddInput,
+  piped = false): ChildProcess.Command {
+  if (command._tag === "PipedCommand") {
+    return { ...command, left: handdCommand(command.left, input, handd, piped),
+      right: handdCommand(command.right, input, handd, (command.options.to ?? "stdin") === "stdin") }
+  }
+  const env = remoteEnv(command, input)
+  const pty = env.OPENCODE_TERMINAL === "1"
+  const stdin = command.options.stdin
+  const buffer_stdin = !pty && (piped || (typeof stdin === "object" &&
+    (!("stream" in stdin) || typeof stdin.stream !== "string")))
+  const options = { cwd: command.options.cwd ?? input.workdir, env, pty, buffer_stdin }
+  return ChildProcess.make(handd.python,
+    [...helperArgs(handd), "run", JSON.stringify(options), command.command, ...command.args.map(unwrap)],
+    { ...command.options, cwd: undefined, shell: false, env: hostEnv(), extendEnv: false })
+}
+
+const probes = new WeakMap<HanddInput, Promise<boolean>>()
+function probeHandd(handd: HanddInput): Promise<boolean> {
+  const pending = probes.get(handd)
+  if (pending) return pending
+  const probe = (async () => {
+    try {
+      const child = Bun.spawn([handd.python, ...helperArgs(handd), "probe"], {
+        env: hostEnv(), stdout: "ignore", stderr: "ignore", stdin: "ignore",
+      })
+      return await child.exited === 0
+    } catch { return false }
+  })()
+  probes.set(handd, probe)
+  return probe
+}
 
 export class IdleSuspension {
   private active = 0
@@ -117,7 +162,12 @@ export const spawnWithSuspension = (local: import("effect/process/ChildProcessSp
     yield* Effect.promise(() => idle.begin())
     let ended = false
     const end = () => { if (!ended) { ended = true; idle.end() } }
-    const handle = yield* local.spawn(dockerCommand(command, input)).pipe(Effect.onError(() => Effect.sync(end)))
+    const handle = yield* Effect.gen(function* () {
+      const handd = input.handd
+      const remote = handd && (yield* Effect.promise(() => probeHandd(handd)))
+        ? handdCommand(command, input, handd) : dockerCommand(command, input)
+      return yield* local.spawn(remote)
+    }).pipe(Effect.onError(() => Effect.sync(end)))
     yield* handle.exitCode.pipe(Effect.ensuring(Effect.sync(end)), Effect.forkScoped)
     return handle
   })

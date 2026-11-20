@@ -12,6 +12,7 @@ from sca.kinds import builtin as _builtin_kinds
 
 _builtin_kinds.load()
 from sca.api.authz import authorize
+from sca.api.terminal import router as terminal_router
 from sca.core.errors import ConflictError, InvalidTaskError, NotFoundError
 from sca.core.models import TERMINAL_STATES, Artifact, Event, Principal, Review, Task, TaskState
 from sca.kernel.kind import all as all_kinds
@@ -21,6 +22,7 @@ from sca.observability import current_trace_id
 from sca.storage.local import key_for
 
 router = APIRouter(prefix="/v1")
+router.include_router(terminal_router)
 
 
 class Submission(BaseModel):

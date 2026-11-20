@@ -1,5 +1,5 @@
 import { Effect } from "effect"
-import { suspension, spawnWithSuspension } from "./driver"
+import { suspension, spawnWithSuspension, type HanddInput } from "./driver"
 import * as Spawner from "effect/process/ChildProcessSpawner"
 import * as NodeServices from "@effect/platform-node/NodeServices"
 import { pathToFileURL } from "node:url"
@@ -17,6 +17,7 @@ interface Input {
   suspend_idle?: boolean
   suspend_idle_min_s?: number
   docker_prefix: string[]
+  handd?: HanddInput
 }
 const checking = process.argv[2] === "--check-imports"
 const input: Input = checking ? {} as Input : JSON.parse(process.argv[2] ?? await Bun.stdin.text())
