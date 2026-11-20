@@ -1,0 +1,6 @@
+split: holdout
+category: language-build
+instruction: |
+  Implement the INI source-map parser as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

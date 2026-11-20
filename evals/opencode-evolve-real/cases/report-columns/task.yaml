@@ -1,0 +1,7 @@
+split: dev
+category: scattered-spec
+instruction: |
+  Implement configurable report columns across the projection and both exporters. docs/ is authoritative; start with docs/reports.md, then follow the ADR and the projection docstrings it references.
+  Use only the standard library offline. Keep docs/ and verify.py byte-for-byte unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

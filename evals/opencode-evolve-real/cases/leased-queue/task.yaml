@@ -1,0 +1,6 @@
+split: holdout
+category: stateful-build
+instruction: |
+  Implement the leased work queue as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

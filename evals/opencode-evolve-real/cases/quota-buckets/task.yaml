@@ -1,0 +1,6 @@
+split: dev
+category: stateful-build
+instruction: |
+  Implement the atomic quota buckets as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

@@ -1,0 +1,7 @@
+split: dev
+category: pipeline-debug
+instruction: |
+  Fix the empty snapshot failure reproduced by python -B verify.py. Follow the snapshot contract in docs/snapshots.md and the API docstrings it references.
+  Use the standard library offline. Keep docs/snapshots.md and verify.py byte-for-byte unchanged.
+verify_command: python -B verify.py
+image: python:3.12

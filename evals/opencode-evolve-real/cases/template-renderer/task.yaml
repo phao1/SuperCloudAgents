@@ -1,0 +1,6 @@
+split: dev
+category: language-build
+instruction: |
+  Implement the Pocket template renderer as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

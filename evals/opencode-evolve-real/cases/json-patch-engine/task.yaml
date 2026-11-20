@@ -1,0 +1,6 @@
+split: dev
+category: data-build
+instruction: |
+  Implement the JSON Patch engine as specified in SPEC.md.
+verify_command: python -B verify.py
+image: python:3.12

@@ -1,0 +1,7 @@
+split: holdout
+category: scattered-spec
+instruction: |
+  Implement catalog build planning with alias resolution and optional dependencies. docs/ is authoritative; start with docs/plans.md and follow the ADR and API docstrings it references.
+  Use only the standard library offline. Keep docs/ and verify.py byte-for-byte unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12

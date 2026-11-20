@@ -1,0 +1,7 @@
+split: dev
+category: scattered-spec
+instruction: |
+  Implement the revised parcel rate calculation and its CLI output. docs/ is authoritative; start at docs/quotes.md and follow its references to the ADR and input docstrings.
+  Use only the standard library offline. Keep docs/ and verify.py byte-for-byte unchanged. Run python -B verify.py.
+verify_command: python -B verify.py
+image: python:3.12
