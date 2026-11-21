@@ -3,9 +3,12 @@
 from uuid import uuid4
 
 import pytest
+from temporalio.exceptions import ActivityError, RetryState
 
+from sca.core.model_provider import ModelProviderError
 from sca.evolve.models import EvolutionConfig
 from sca.evolve.workflow import EvolutionWorkflow
+from sca.orchestration.provider_errors import account_failure
 
 
 @pytest.mark.parametrize('mode,expected,promotions', [
@@ -14,11 +17,13 @@ from sca.evolve.workflow import EvolutionWorkflow
     ('approve', 'completed', 1), ('reject', 'completed', 0),
     ('stop', 'stopped', 0), ('invalid', 'patience_exhausted', 0),
     ('eval_failed', 'failed', 0), ('legacy_eval_failed', 'budget_exhausted', 0),
+    ('provider_eval_failed', 'failed', 0), ('provider_propose_failed', 'failed', 0),
 ])
 async def test_controller(monkeypatch, mode, expected, promotions):
     from sca.evolve import workflow as module
 
     controller = EvolutionWorkflow()
+    provider = ModelProviderError('billing', 402)
     requests, candidates, statuses, promoted = {}, {}, [], []
     cfg = EvolutionConfig(suite='s', agent_version='v', repeat=1, candidates=1,
                           generations=3 if mode in ('patience', 'invalid') else 1,
@@ -37,6 +42,9 @@ async def test_controller(monkeypatch, mode, expected, promotions):
                 if mode in ('eval_failed', 'legacy_eval_failed'):
                     return {'id': request['run_id'], 'status': 'failed', 'reason': 'Suite changed',
                             'results': []}
+                if mode == 'provider_eval_failed':
+                    return {'id': request['run_id'], 'status': 'failed', 'reason': provider.reason,
+                            'results': [{'infrastructure_error': provider.payload(), 'cost_usd': .01, 'turns': 1}]}
                 passed = bool(item['overlay'])
                 if mode in ('rejection', 'patience') and item['split'] == 'holdout':
                     passed = not bool(item['overlay'])
@@ -45,6 +53,10 @@ async def test_controller(monkeypatch, mode, expected, promotions):
                                      'verification_passed': True, 'trajectory_passed': True,
                                      'cost_usd': .1, 'turns': 1}]}
             case 'evolve_propose':
+                if mode == 'provider_propose_failed':
+                    raise ActivityError('Activity failed', scheduled_event_id=1, started_event_id=2,
+                                        identity='test', activity_type=name, activity_id='1',
+                                        retry_state=RetryState.NON_RETRYABLE_FAILURE) from account_failure(provider)
                 return [{'hypothesis': 'h', 'overlay': {'tool_guidance': 'g'},
                          'overlay_sha256': 'h', 'diagnosis': {},
                          'static_check': {'valid': mode != 'invalid'}}]
@@ -88,6 +100,13 @@ async def test_controller(monkeypatch, mode, expected, promotions):
         run_id = next(iter(requests))
         assert statuses[-1]['reason'] == f'评测 {run_id} 失败：Suite changed'
         assert len(statuses) == 1
+    if mode == 'provider_eval_failed':
+        run_id = next(iter(requests))
+        assert statuses[-1]['reason'] == f'评测 {run_id} 失败：{provider.reason}'
+        assert statuses[-1]['spent_usd'] == .01
+    if mode == 'provider_propose_failed':
+        assert statuses[-1]['reason'] == provider.reason
+        assert len(requests) == 1 and not candidates
     if mode in ('patience', 'invalid'):
         assert len(candidates) == 2
         assert sum(r['split'] == 'dev' and not r['overlay'] for r in requests.values()) == 1

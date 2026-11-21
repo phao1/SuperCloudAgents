@@ -261,6 +261,9 @@ class AgentEvent(BaseModel):
     data: dict[str, Any] = Field(default_factory=dict)
     raw: dict[str, Any] | None = None
 
+    # Model provider errors
+    model_call_succeeded: bool = False
+
 
 OUTPUT_TAIL_BYTES = 4096
 

@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
+from temporalio.exceptions import ApplicationError
 
 from sca.config import Settings
+from sca.core.model_provider import ModelProviderError
 from sca.evolve.activities import EvolutionActivities
 from sca.evolve.models import EvolutionConfig
 
@@ -98,3 +100,26 @@ async def test_fenced_or_wrapped_proposals_parse_with_room_for_full_prompts(tmp_
     assert result[0]['hypothesis'] == 'h' and result[0]['static_check']['valid']
     assert result[0]['diagnosis'] == {'diagnoses': ['p']}
     assert gateway.complete.call_args.kwargs['max_tokens'] >= 4096
+
+
+@pytest.mark.parametrize('before,kind,status', [
+    ([], 'billing', 402),
+    (['{"diagnoses":["p"]}'], 'auth', 401),
+    (['{"diagnoses":["p"]}', 'unparseable'], 'billing', 402),
+])
+async def test_reflection_and_proposal_account_failures_are_non_retryable(tmp_path, before, kind, status):
+    activities, _, gateway, request = setup(tmp_path)
+    error = ModelProviderError(kind, status)
+    gateway.complete.side_effect = [*before, error]
+    with pytest.raises(ApplicationError) as failure:
+        await activities.propose(request)
+    assert failure.value.non_retryable and failure.value.type == 'ModelProviderError'
+    assert failure.value.message == error.reason
+    assert gateway.complete.await_count == len(before) + 1
+
+
+async def test_transient_provider_errors_keep_activity_retry_policy(tmp_path):
+    activities, _, gateway, request = setup(tmp_path)
+    gateway.complete.side_effect = ModelProviderError('rate_limit', 429)
+    with pytest.raises(ModelProviderError):
+        await activities.propose(request)

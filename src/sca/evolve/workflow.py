@@ -8,6 +8,7 @@ from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError
 
 from sca.eval.errors import eval_failure_reason
+from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
     from sca.evolve.checks import dev_basis, gate, metrics, select_best
@@ -151,6 +152,9 @@ class EvolutionWorkflow:
                     status = 'patience_exhausted'
                     break
         except Exception as exc:
+            if provider := patched_provider_account_error(exc):
+                await self.act('status', {'status': 'failed', 'spent_usd': self.spent, 'reason': provider.reason})
+                return 'failed'
             reason = None
             if isinstance(exc, EvalRunFailed):
                 reason = str(exc)

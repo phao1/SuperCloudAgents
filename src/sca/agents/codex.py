@@ -5,6 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider
 from sca.core.models import (
@@ -61,10 +62,9 @@ def parse_codex_line(line: str) -> list[AgentEvent]:
             },
         )
     elif kind in {"turn.failed", "error"}:
-        error = raw.get("error") or raw
-        message = error.get("message", str(error)) if isinstance(error, dict) else str(error)
-        event_type, data = "error", {"message": message}
-    return [AgentEvent(type=event_type, data=data, raw=raw)] if event_type else []
+        return [model_error_event(raw.get("error") or raw, "Codex turn reported an error")]
+    return [AgentEvent(type=event_type, data=data, raw=raw,
+                       model_call_succeeded=kind == "turn.completed")] if event_type else []
 
 
 GATEWAY_KEY_ENV = "SCA_MODEL_KEY"
@@ -154,7 +154,10 @@ class CodexBackend:
             elif output.stream == "stderr":
                 stderr = tail(stderr + output.text + "\n")
             else:
-                for event in parse_codex_line(output.text):
+                line = output.text
+                if ctx.model_api_key:
+                    line = line.replace(ctx.model_api_key, "[redacted]")
+                for event in parse_codex_line(line):
                     if event.type == "message":
                         final_message = event.data["text"]
                     elif event.type == "error":
@@ -163,9 +166,14 @@ class CodexBackend:
                         completed = True
                     yield event
         if result is None or result.exit_code != 0 or result.timed_out or not completed:
+            diagnostic = model_error_event(stderr, "Codex turn did not complete")
+            if diagnostic.data.get("model_provider_error"):
+                yield diagnostic
+            if diagnostic.data["message"] == "model gateway budget refused":
+                error_message = diagnostic.data["message"]
             raise AgentTurnError(
                 f"Codex exit_code={result.exit_code if result else None}, "
                 f"timed_out={result.timed_out if result else False}, "
-                f"turn_completed={completed}: {error_message}; stderr: {stderr}"
+                f"turn_completed={completed}: {error_message or 'Codex turn did not complete'}"
             )
         yield AgentEvent(type="turn_completed", data={"final_message": final_message})

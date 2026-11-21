@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
@@ -117,11 +118,13 @@ def parse_opencode_line(
             )
     elif kind == "error":
         error = raw.get("error") or {}
-        event, data = (
-            "error",
-            {"message": str(error.get("message", error) if isinstance(error, dict) else error)},
-        )
-    return [AgentEvent(type=event, data=data, raw=raw)] if event else []
+        error_type = error.get("type") if isinstance(error, dict) else None
+        if isinstance(error_type, str) and error_type.startswith(("tool.", "permission.")):
+            error = None
+        return [model_error_event(error, "OpenCode turn reported an error")]
+    return [AgentEvent(type=event, data=data, raw=raw, model_call_succeeded=(
+        kind == "step_finish" and part.get("reason") not in (None, "error", "aborted")
+    ))] if event else []
 
 
 class OpenCodeBackend:
@@ -263,14 +266,14 @@ class OpenCodeBackend:
                 continue
             if output.stream != "stdout":
                 continue
+            line = output.text.replace(ctx.model_api_key, "[redacted]")
             try:
-                raw = json.loads(output.text)
+                raw = json.loads(line)
             except ValueError:
                 continue
             if isinstance(raw, dict) and raw.get("sessionID") and not seen_session:
                 seen_session = raw["sessionID"]
                 yield AgentEvent(type="session_started", data={"session_id": seen_session})
-            line = output.text
             if secrets:
                 line = json.dumps(redact_mcp_output(raw, secrets))
             for event in parse_opencode_line(line, steps):

@@ -115,6 +115,8 @@ async def make_gateway(settings: Settings, sandbox: DockerSandboxProvider) -> Mo
     """Attach the gateway to the sandbox network and build its client."""
     if not settings.model_gateway_url:
         return None
+    # Model provider errors
+    from sca.gateway.health import ProviderHealth
     from sca.gateway.litellm import LiteLLMGateway
 
     await sandbox.ensure_egress()
@@ -123,6 +125,7 @@ async def make_gateway(settings: Settings, sandbox: DockerSandboxProvider) -> Mo
         settings.model_gateway_url,
         settings.model_gateway_master_key,
         sandbox_url=f"http://{address}:{settings.model_gateway_port}/v1",
+        provider_health=ProviderHealth(settings.data_dir),
     )
 
 

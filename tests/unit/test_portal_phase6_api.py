@@ -9,7 +9,9 @@ from sqlalchemy.engine import make_url
 from sca.api.app import create_app
 from sca.config import Settings
 from sca.core.errors import AuthError
+from sca.core.model_provider import ModelProviderError
 from sca.core.models import Principal
+from sca.gateway.health import ProviderHealth
 from sca.storage.local import LocalObjectStore
 
 
@@ -104,3 +106,23 @@ async def test_portal_serves_only_registered_assets(portal_client):
             "text/javascript" if file.endswith(".js") else "text/css"
         )
     assert (await client.get("/portal/assets/portal.html")).status_code == 404
+
+
+async def test_portal_config_reports_shared_provider_health(portal_client, monkeypatch, tmp_path):
+    client, _, _ = portal_client
+    settings = Settings(_env_file=None, data_dir=tmp_path, model_gateway_url='http://gateway')
+    monkeypatch.setattr('sca.api.portal.get_settings', lambda: settings)
+    monkeypatch.setattr('sca.api.portal.gateway_models', AsyncMock(return_value=(True, ['model'])))
+    health = ProviderHealth(tmp_path)
+    health.record(ModelProviderError('auth', 401))
+    health.record(ModelProviderError('unavailable', 503))
+    path = '/v1/portal/config'
+    assert (await client.get(path)).status_code == 401
+    headers = bearer('fixture-reader')
+    result = (await client.get(path, headers=headers)).json()
+    assert result['gateway_reachable'] is True
+    assert result['gateway_provider_account_error'] == health.read()['account_error']
+    assert result['gateway_provider_error']['kind'] == 'unavailable'
+    health.record(None)
+    result = (await client.get(path, headers=headers)).json()
+    assert result['gateway_provider_error'] is result['gateway_provider_account_error'] is None

@@ -23,6 +23,7 @@ from sca.config import get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
 from sca.db.schema import plans, tasks, tenants, usage_daily
+from sca.gateway.health import ProviderHealth
 
 router = APIRouter()
 _key_lock = asyncio.Lock()
@@ -105,6 +106,7 @@ async def config(request: Request,
                  user: Annotated[Principal, Depends(authorize("read"))]) -> dict:
     settings = get_settings()
     (gateway, models), temporal = await asyncio.gather(gateway_models(), temporal_reachable(request))
+    provider_health = ProviderHealth(settings.data_dir).read()
     backends = ["codex"]
     try:
         import sca.agents.opencode  # noqa: F401
@@ -120,6 +122,8 @@ async def config(request: Request,
             "versions_dir": str(getattr(settings, "opencode_versions_dir",
                                         Path(settings.data_dir) / "opencode" / "versions")),
             "temporal_reachable": temporal, "gateway_reachable": gateway,
+            "gateway_provider_error": provider_health.get("last_error"),
+            "gateway_provider_account_error": provider_health.get("account_error"),
             "can_rescore": can_rescore(user),
             "prompt_evolution": {"suite": PROMPT_SUITE, "models": PROMPT_MODELS, "path": PROMPT_PATH},
             "can_configure_model": user.tenant_id == "eval" and user.role == "admin" and not user.scopes

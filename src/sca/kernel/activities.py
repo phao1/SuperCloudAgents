@@ -30,6 +30,7 @@ from sca.core.interfaces import (
     SecretProvider,
     unpause_sandbox,
 )
+from sca.core.model_provider import GatewayError, ModelProviderError
 from sca.core.models import (
     TERMINAL_STATES,
     AgentContext,
@@ -43,9 +44,11 @@ from sca.core.models import (
     tail,
 )
 from sca.db.repo import Store
+from sca.gateway.health import ProviderHealth
 from sca.kernel.kind import ExecutionSpec, get
 from sca.kernel.prompts import EvaluationSettings, render_prompt
 from sca.observability import business_metrics, metric_guard
+from sca.orchestration.provider_errors import account_failure
 from sca.secrets import make_secret_provider
 from sca.workspace.cache import PIP_CACHE_ENV, RepoCache, pip_cache_mount
 from sca.workspace.git import GitWorkspace
@@ -73,6 +76,7 @@ class SetStateInput:
     task_id: str
     state: str
     reason: str | None = None
+    model_provider_error: dict | None = None
 
 
 @dataclass
@@ -152,6 +156,7 @@ class KernelActivities:
 
         self.secrets = secrets or make_secret_provider(settings)
         self.gateway = gateway
+        self.provider_health = ProviderHealth(settings.data_dir) if gateway is not None else None
         self.settings = settings
         self.store = store
         self.sandbox = with_tool_egress(sandbox)
@@ -605,7 +610,8 @@ class KernelActivities:
             if inp.state in TERMINAL_STATES:
                 with metric_guard():
                     previous_state = (await self.store.get_task(inp.task_id)).state
-            task = await self.store.set_state(inp.task_id, TaskState(inp.state), inp.reason)
+            metadata = {"model_provider_error": inp.model_provider_error} if inp.model_provider_error else {}
+            task = await self.store.set_state(inp.task_id, TaskState(inp.state), inp.reason, **metadata)
             if task.state in TERMINAL_STATES and previous_state not in TERMINAL_STATES:
                 with metric_guard():
                     business_metrics.duration.labels(task.kind, task.state).observe(
@@ -917,7 +923,8 @@ class KernelActivities:
             task_kind = (await self.store.get_task(task_id)).kind
         final_message = ""
         cost_final = False
-        turn_error: AgentTurnError | None = None
+        turn_error: AgentTurnError | ModelProviderError | None = None
+        provider_error: ModelProviderError | None = None
         n = 0
         try:
             if self.gateway:
@@ -943,6 +950,17 @@ class KernelActivities:
                 if ev.type == AgentEventType.TURN_COMPLETED:
                     final_message = ev.data.get("final_message", "")
                     continue
+                if ev.model_call_succeeded:
+                    provider_error = None
+                    if self.provider_health is not None:
+                        self.provider_health.record(None)
+                if ev.type == AgentEventType.ERROR:
+                    caught = ModelProviderError.from_payload(ev.data.get("model_provider_error"))
+                    if caught is not None:
+                        if self.provider_health is not None:
+                            self.provider_health.record(caught)
+                        if provider_error is None or caught.is_account_error or not provider_error.is_account_error:
+                            provider_error = caught
                 if ev.type == AgentEventType.USAGE and ev.data.get("summary") == "sandbox_transition":
                     await self.store.append_event(task_id, "sandbox.transition", ev.data,
                                                   dedup_key=f"{key}.{n}.suspend")
@@ -966,7 +984,17 @@ class KernelActivities:
                     {"turn": turn, **ev.data},
                     dedup_key=f"{key}.{n}",
                 )
-        except AgentTurnError as e:
+        except (AgentTurnError, ModelProviderError) as e:
+            if isinstance(e, ModelProviderError):
+                provider_error = e
+                if self.provider_health is not None:
+                    self.provider_health.record(e)
+            if provider_error is not None:
+                await self.store.append_event(
+                    task_id, "model.provider_error",
+                    {"turn": turn, "attempt": attempt, **provider_error.payload()},
+                    dedup_key=f"{key}.provider_error",
+                )
             await self.store.append_event(
                 task_id,
                 EventType.AGENT_ERROR,
@@ -980,16 +1008,24 @@ class KernelActivities:
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
             if self.gateway:
                 finalize = getattr(self.gateway, "finalize_key", None)
-                if finalize is not None:
-                    spend, cost_final = await asyncio.shield(finalize(key_alias))
-                else:
-                    spend = await asyncio.shield(self.gateway.revoke_key(key_alias))
+                spend = None
+                try:
+                    if finalize is not None:
+                        spend, cost_final = await asyncio.shield(finalize(key_alias))
+                    else:
+                        spend = await asyncio.shield(self.gateway.revoke_key(key_alias))
+                except GatewayError:
+                    if provider_error is None or not provider_error.is_account_error:
+                        raise
+                    activity.logger.warning("Could not finalize virtual model key after account failure")
                 if spend:
                     await self.store.add_usage(task_id, {"cost_micro_usd": round(spend * 1e6)})
                     with metric_guard():
                         business_metrics.cost.labels(task_kind).inc(spend)
 
         if turn_error is not None:
+            if provider_error is not None and provider_error.is_account_error:
+                raise account_failure(provider_error) from None
             reason = await self.store.check_budget(task_id)
             if reason or "budget" in str(turn_error).lower():
                 raise ApplicationError(
@@ -997,7 +1033,7 @@ class KernelActivities:
                     type="BudgetExceeded",
                     non_retryable=True,
                 ) from turn_error
-            raise turn_error
+            raise provider_error or turn_error
 
         if agent.name != "fake":
             await self.transport.pull_agent_home(sandbox_id, self._task_dir(task_id))

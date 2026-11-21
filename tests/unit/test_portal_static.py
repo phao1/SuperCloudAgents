@@ -52,6 +52,16 @@ def test_portal_workbench_sections_and_safe_rendering():
     assert "data('/agents/opencode/builds')" in source
 
 
+def test_portal_places_provider_alerts_in_overview_and_tasks():
+    source = Path('src/sca/api/static/portal.html').read_text()
+    for section, banner in [('overview', 'overview-provider-error'), ('trace', 'task-provider-error')]:
+        content = source.split(f'<section id="{section}"', 1)[1].split('</section>', 1)[0]
+        assert f'id="{banner}" class="provider-error-banner" role="alert" hidden' in content
+    assert '.provider-error-banner { color: var(--bad); background: var(--bad-bg)' in source
+    assert 'renderProviderError(c.gateway_provider_account_error)' in source
+    assert "if(['overview','tasks'].includes(page)&&!connect)await loadConfig()" in source
+
+
 def test_portal_diff_and_metrics_runtime(tmp_path):
     import shutil
     import subprocess
@@ -81,6 +91,20 @@ const localStorage={getItem:()=>''};
 '''
     checks = r'''
 const target=new Element();
+const providerAt='2026-11-21T01:05:00Z';
+renderProviderError({kind:'billing',at:providerAt});
+for(const id of ['overview-provider-error','task-provider-error']){
+ const banner=nodes.get(id);
+ assert.equal(banner.hidden,false);
+ assert.equal(banner.textContent,'模型服务账户余额不足 · '+new Date(providerAt).toLocaleString('zh-CN'));
+}
+renderProviderError({kind:'auth',at:providerAt});
+assert(nodes.get('task-provider-error').textContent.startsWith('模型密钥无效'));
+renderProviderError(null);
+assert(nodes.get('overview-provider-error').hidden&&nodes.get('task-provider-error').hidden);
+const infra={infrastructure_error:{kind:'billing'},acceptance_passed:null};
+assert.equal(resultLabel(infra),'⚠ 基础设施错误 · 模型服务账户余额不足');
+assert.equal(dimensions([infra]).rate,'—');
 assert.equal(terminalLines('clone\r\nprogress 1%\rprogress 100%\r\nend'), 'clone\nprogress 100%\nend');
 assert.equal(terminalLines('long progress\rdone\r'), 'done');
 assert.equal(uniqueDiagnostics([{title:'rule',note:'case · 第 1 次'},{title:'rule',note:'case · 第 1 次 · evidence'},{title:'rule',note:'case · 第 2 次'},{title:'other',note:'case · 第 1 次'}]).length,3);
