@@ -25,19 +25,23 @@ STEPS = (
     "coding-review", "usage", "usage-csv", "knowledge", "stripe-checkout", "suspend",
     "suspended-submit", "resume", "cleanup",
 )
+STRIPE_STEPS = ("stripe-complete", "stripe-payment-failed", "stripe-suspended-submit", "stripe-payment-succeeded")
+SIM_URL = "http://stripe.test:12111"
+CHECKOUT_PATH = "/_sim/checkout/cs_smoke"
+SUBSCRIPTION_PATH = "/_sim/subscriptions/sub_smoke"
 
 
 @dataclass
 class Exchange:
     method: str
     path: str
-    token: str
+    token: str | None
     reply: httpx.Response | httpx.RequestError
     body: dict | None = None
 
 
 def exchange(
-    method: str, path: str, token: str, data: object = None, *, status: int = 200,
+    method: str, path: str, token: str | None, data: object = None, *, status: int = 200,
     body: dict | None = None, content: bytes | None = None,
 ) -> Exchange:
     return Exchange(method, path, token, httpx.Response(status, json=data, content=content), body)
@@ -96,7 +100,7 @@ def coding(*, verified: bool = True, already_succeeded: bool = False) -> list[Ex
     return calls
 
 
-def accounting(task_count: int, *, stripe_enabled: bool) -> list[Exchange]:
+def accounting(task_count: int, *, stripe_enabled: bool, stripe_sim: bool = False) -> list[Exchange]:
     calls = [exchange("GET", "/v1/usage", MEMBER, [])]
     if task_count:
         calls.append(exchange("GET", "/v1/usage", MEMBER, [{"tenant_id": TENANT, "tasks": 1}]))
@@ -111,9 +115,37 @@ def accounting(task_count: int, *, stripe_enabled: bool) -> list[Exchange]:
         exchange("GET", "/v1/tenant/billing", ADMIN, {"enabled": stripe_enabled}),
     ]
     if stripe_enabled:
+        checkout_url = SIM_URL + CHECKOUT_PATH if stripe_sim else f"https://checkout.example.test/{VIEWER}"
         calls.append(exchange("POST", "/v1/tenant/billing/checkout", ADMIN,
-                              {"url": f"https://checkout.example.test/{VIEWER}"}, body={"plan": "team"}))
+                              {"url": checkout_url}, body={"plan": "team"}))
     return calls
+
+
+def stripe_payments() -> list[Exchange]:
+    tenant = {"id": TENANT, "plan": "team", "status": "active"}
+    billing = {"subscription_status": "active", "suspended_for_nonpayment": False}
+    invoice = {"id": "in_smoke", "subscription_id": "sub_smoke", "amount_due": 2900}
+    paid = {**invoice, "status": "paid", "amount_paid": 2900}
+    calls = [
+        exchange("PATCH", TENANT_PATH, OPERATOR, {**tenant, "plan": "free"}, body={"plan": "free"}),
+        exchange("POST", f"{CHECKOUT_PATH}/complete", None, {"subscription": "sub_smoke"}),
+        exchange("GET", "/v1/tenant", ADMIN, tenant),
+        exchange("GET", "/v1/tenant/billing", ADMIN, billing),
+    ]
+    for attempt in (1, 2, 3):
+        suspended = attempt == 3
+        calls += [
+            exchange("POST", f"{SUBSCRIPTION_PATH}/payment_failed", None,
+                     {**invoice, "status": "open", "attempt_count": attempt}),
+            exchange("GET", "/v1/tenant", ADMIN, {**tenant, "status": "suspended" if suspended else "active"}),
+            exchange("GET", "/v1/tenant/billing", ADMIN, {"suspended_for_nonpayment": suspended}),
+        ]
+    return calls + [
+        exchange("POST", "/v1/tasks", MEMBER, {"error": {"code": "tenant_suspended"}}, status=403),
+        exchange("POST", f"{SUBSCRIPTION_PATH}/payment_succeeded", None, paid),
+        exchange("GET", "/v1/tenant", ADMIN, tenant),
+        exchange("GET", "/v1/tenant/billing", ADMIN, {**billing, "invoices": [paid]}),
+    ]
 
 
 def suspension(*, delete_status: int) -> list[Exchange]:
@@ -131,15 +163,19 @@ def suspension(*, delete_status: int) -> list[Exchange]:
 
 def invoke(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], calls: list[Exchange],
-    *, with_agent: bool,
+    *, with_agent: bool, stripe_sim: bool = False,
 ) -> tuple[int, dict[str, str], str]:
     pending = deque(calls)
 
     def handle(request: httpx.Request) -> httpx.Response:
         step = pending.popleft()
         assert (request.method, request.url.path) == (step.method, step.path)
-        assert request.url.host == "sca.test"
-        assert request.headers["Authorization"] == f"Bearer {step.token}"
+        if step.token is None:
+            assert (request.url.host, request.url.port) == ("stripe.test", 12111)
+            assert "Authorization" not in request.headers
+        else:
+            assert request.url.host == "sca.test"
+            assert request.headers["Authorization"] == f"Bearer {step.token}"
         if step.body is not None:
             assert json.loads(request.content) == step.body
         if request.method == "POST" and request.url.path == "/v1/tasks":
@@ -165,12 +201,16 @@ def invoke(
     argv = ["--api", "http://sca.test"]
     if with_agent:
         argv += ["--with-agent", "--repo", "/srv/smoke.git"]
+    if stripe_sim:
+        argv += ["--stripe-sim", SIM_URL]
     status = commercial_smoke.main(argv)
     assert not pending
     output = capsys.readouterr()
     assert all(token not in output.out + output.err for token in (OPERATOR, ADMIN, MEMBER, VIEWER))
     lines = [line.split(maxsplit=2) for line in output.out.splitlines()]
-    assert tuple(line[1] for line in lines) == STEPS
+    after_checkout = STEPS.index("stripe-checkout") + 1
+    expected = STEPS[:after_checkout] + STRIPE_STEPS + STEPS[after_checkout:] if stripe_sim else STEPS
+    assert tuple(line[1] for line in lines) == expected
     results = {step: result for result, step, _ in lines}
     return status, results, output.out
 
@@ -229,3 +269,30 @@ def test_suspended_submission_requires_specific_error_code(monkeypatch, capsys):
     assert results["resume"] == "SKIP"
     assert results["cleanup"] == "PASS"
     assert "FAIL suspended-submit expected 403 tenant_suspended" in output
+
+
+def test_stripe_smoke_completes_billing_workflow_and_cancels_subscription(monkeypatch, capsys):
+    calls = onboarding() + accounting(0, stripe_enabled=True, stripe_sim=True) + stripe_payments()
+    *manual, delete = suspension(delete_status=204)
+    calls += [*manual, exchange("POST", f"{SUBSCRIPTION_PATH}/cancel", None, {}), delete]
+    status, results, _ = invoke(monkeypatch, capsys, calls, with_agent=False, stripe_sim=True)
+    assert status == 0
+    assert all(results[step] == "PASS" for step in ("stripe-checkout", *STRIPE_STEPS, "cleanup"))
+
+
+def test_stripe_smoke_skips_when_billing_is_disabled(monkeypatch, capsys):
+    calls = onboarding() + accounting(0, stripe_enabled=False) + suspension(delete_status=204)
+    status, results, _ = invoke(monkeypatch, capsys, calls, with_agent=False, stripe_sim=True)
+    assert status == 0
+    assert all(results[step] == "SKIP" for step in ("stripe-checkout", *STRIPE_STEPS))
+
+
+def test_stripe_smoke_does_not_follow_checkout_on_a_different_origin(monkeypatch, capsys):
+    calls = onboarding() + accounting(0, stripe_enabled=True)
+    calls.append(exchange("DELETE", TENANT_PATH, OPERATOR, status=204))
+    status, results, output = invoke(monkeypatch, capsys, calls, with_agent=False, stripe_sim=True)
+    assert status == 1
+    assert results["stripe-checkout"] == "FAIL"
+    assert all(results[step] == "SKIP" for step in STRIPE_STEPS)
+    assert results["cleanup"] == "PASS"
+    assert "checkout URL does not match --stripe-sim" in output
