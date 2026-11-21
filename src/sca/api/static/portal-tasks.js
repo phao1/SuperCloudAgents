@@ -108,20 +108,20 @@ const portalTasks = (() => {
     return {source: {type, name, params, ...(reference && {[value('reference_type')]: reference})}, file};
   }
 
-  function submitFields(form, intentList) {
+  function submitFields(form, intentList, defaultBackend) {
     const v = name => ui.value(form, name);
     const c = name => ui.checked(form, name);
     const optional = name => v(name) || undefined;
     const best = Number(v('best_n')), planMode = v('plan_mode');
     const spec = {
-      repo_url: v('repo_url'), base_ref: v('base_ref'), instruction: v('instruction'),
+      repo_url: optional('repo_url'), base_ref: optional('base_ref'), instruction: v('instruction'),
       verify_commands: ui.lines(v('verify_commands')), setup_command: optional('setup_command'),
       model: optional('model'), agent_backend: optional('agent_backend'),
       image: optional('image'), push: c('push'), fork_from_snapshot: c('fork_from_snapshot'),
       plan: planMode === 'auto' ? 'auto' : 'none',
       ...(v('max_cost_usd') && {max_cost_usd: Number(v('max_cost_usd'))}),
     };
-    const backend = spec.agent_backend || portalConfig.default_agent_backend;
+    const backend = spec.agent_backend || defaultBackend;
     if (backend?.startsWith('opencode')) spec.agent_version = optional('agent_version');
     if (backend === 'opencode') {
       spec.tools = new FormData(form).getAll('tool');
@@ -154,14 +154,16 @@ const portalTasks = (() => {
     return {spec, intents};
   }
 
-  async function loadSubmit() {
-    const target = $('submit-form');
-    if (target.hasChildNodes()) return refreshTools();
+  async function loadSubmit(target = $('submit-form'), project = null) {
+    if (!project && target.hasChildNodes()) return refreshTools();
     const identity = portalIdentity;
     const {check, control, field, fields, value} = ui;
+    const primaryRepo = project?.repos[0];
+    const defaultBackend = project?.default_backend || portalConfig.default_agent_backend;
+    const defaultModel = project?.default_model || portalConfig.default_model;
     const available = el('div', undefined, 'stack');
     const versionsList = el('datalist');
-    versionsList.id = 'submit-agent-versions';
+    versionsList.id = project ? 'project-submit-agent-versions' : 'submit-agent-versions';
     versionsList.append(...versions.map(version => {
       const option = el('option');
       option.value = version.version;
@@ -190,13 +192,17 @@ const portalTasks = (() => {
     );
     const form = ui.form([
       fields(
-        field('仓库地址', 'repo_url', {required: true, placeholder: 'Git URL 或服务端仓库路径'}),
-        field('基线分支、标签或提交', 'base_ref', {value: 'main', required: true}),
-        field('任务指令', 'instruction', {required: true, multiline: true, wide: true}),
+        field('仓库地址', 'repo_url', {required: !primaryRepo,
+          placeholder: primaryRepo?.repo_url || 'Git URL 或服务端仓库路径'}),
+        field('基线分支、标签或提交', 'base_ref', {value: project ? '' : 'main', required: !project,
+          placeholder: primaryRepo?.base_ref || 'main'}),
+        field(project ? '线程指令' : '任务指令', 'instruction', {required: true, multiline: true, wide: true}),
         field('准备命令（可选）', 'setup_command'),
-        field('模型（可选）', 'model', {placeholder: portalConfig.default_model}),
+        field('模型（可选）', 'model', {placeholder: defaultModel}),
         field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
-        field('Agent 后端', 'agent_backend', {choices: ui.backendChoices(portalConfig)}),
+        field('Agent 后端', 'agent_backend', {choices: ui.backendChoices({
+          ...portalConfig, default_agent_backend: defaultBackend,
+        })}),
         field('OpenCode 版本（可选）', 'agent_version', {placeholder: '平台默认版本'})
       ),
       disclosure('推送与拉取请求', check('推送任务分支', 'push'), prOption, pr),
@@ -211,8 +217,8 @@ const portalTasks = (() => {
       disclosure('工具', el('small', '已授权的 MCP 工具可附加到 OpenCode 任务。'), available),
       disclosure('设计意图与工单', ui.actions(addKind, add), list),
       versionsList,
-    ], '提交任务', async form => {
-      const {spec, intents} = submitFields(form, list);
+    ], project ? '提交线程' : '提交任务', async form => {
+      const {spec, intents} = submitFields(form, list, defaultBackend);
       const token = portalToken;
       spec.intents = [];
       for (const {source, file} of intents) {
@@ -226,7 +232,7 @@ const portalTasks = (() => {
         spec.intents.push(source);
       }
       if (token !== portalToken) return;
-      const task = await data('/tasks', {kind: 'coding', spec});
+      const task = await data('/tasks', {kind: 'coding', spec, ...(project && {project_id: project.id})});
       if (token !== portalToken) return;
       form.reset();
       for (const input of available.querySelectorAll('input')) input.checked = false;
@@ -237,10 +243,21 @@ const portalTasks = (() => {
       return '任务已创建：' + task.id;
     });
     form.classList.add('portal-form');
+    if (primaryRepo) {
+      const repositories = el('datalist');
+      repositories.id = 'project-submit-repositories';
+      repositories.append(...project.repos.map(repo => {
+        const option = el('option', repo.base_ref);
+        option.value = repo.repo_url;
+        return option;
+      }));
+      form.append(repositories);
+      control(form, 'repo_url').setAttribute('list', repositories.id);
+    }
     control(form, 'agent_version').setAttribute('list', versionsList.id);
     control(form, 'model').setAttribute('list', 'models');
     const sync = () => {
-      const backend = value(form, 'agent_backend') || portalConfig.default_agent_backend;
+      const backend = value(form, 'agent_backend') || defaultBackend;
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');
       control(form, 'champion').disabled = backend !== 'opencode';
       for (const input of available.querySelectorAll('input')) input.disabled = backend !== 'opencode';
@@ -256,7 +273,7 @@ const portalTasks = (() => {
     sync();
     target.replaceChildren(form);
     available.append(el('small', '正在读取可用工具…'));
-    refreshTools = async () => {
+    const refresh = async () => {
       try {
         const tools = await data('/tools/available');
         if (identity !== portalIdentity) return;
@@ -272,7 +289,8 @@ const portalTasks = (() => {
         ui.setMessage(available, e.message, true);
       }
     };
-    return refreshTools();
+    if (!project) refreshTools = refresh;
+    return refresh();
   }
 
   function taskPath(task) {

@@ -6,12 +6,13 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field
 
 from sca.kinds import builtin as _builtin_kinds
 
 _builtin_kinds.load()
 from sca.api.authz import authorize
+from sca.api.tasks_admission import submit
 from sca.api.terminal import router as terminal_router
 from sca.core.errors import ConflictError, InvalidTaskError, NotFoundError
 from sca.core.models import (
@@ -26,18 +27,12 @@ from sca.core.models import (
     TaskState,
 )
 from sca.kernel.kind import all as all_kinds
-from sca.kernel.kind import get
 from sca.kinds.coding.best_of import CHOSEN_KEY, PLAN_KEY, SELECT_DECISION_PREFIX, candidate_key
-from sca.observability import current_trace_id
 from sca.storage.local import key_for
 
 router = APIRouter(prefix="/v1")
 router.include_router(terminal_router)
-
-
-class Submission(BaseModel):
-    kind: str
-    spec: dict[str, Any]
+router.post("/tasks", status_code=201)(submit)
 
 
 @router.get("/kinds")
@@ -45,45 +40,6 @@ async def list_kinds(user: Annotated[Principal, Depends(authorize("read"))]) -> 
     return [
         {"name": kind.name, "schema": kind.spec_model.model_json_schema()} for kind in all_kinds()
     ]
-
-
-@router.post("/tasks", status_code=201)
-async def submit(
-    body: Submission,
-    request: Request,
-    user: Annotated[Principal, Depends(authorize("submit"))],
-    idempotency_key: str | None = Header(None),
-) -> Task:
-    kind = get(body.kind)
-    try:
-        spec = kind.spec_model.model_validate(body.spec)
-    except ValidationError as exc:
-        raise InvalidTaskError(str(exc)) from exc
-    if body.kind == "analysis":
-        from sca.core.errors import NotFoundError
-
-        for file_id in spec.inputs:
-            try:
-                await request.app.state.store.for_tenant(user.tenant_id).get_file(file_id)
-            except NotFoundError as exc:
-                raise InvalidTaskError("Input file not found in tenant") from exc
-    task, created = await request.app.state.store.for_tenant(user.tenant_id).create_task(
-        tenant_id=user.tenant_id,
-        kind=body.kind,
-        spec=spec.model_dump(),
-        idempotency_key=idempotency_key,
-        actor=user.subject,
-    )
-    if created:
-        request.app.state.metrics.created.inc()
-        trace_id = current_trace_id()
-        if trace_id:
-            tenant_store = request.app.state.store.for_tenant(user.tenant_id)
-            await tenant_store.update_result(task.id, {"trace_id": trace_id})
-            task = await tenant_store.get_task(task.id)
-    # Starting again repairs a previous submit whose database write succeeded.
-    await request.app.state.orchestrator.start_task(str(task.id), task.kind)
-    return task
 
 
 @router.get("/tasks")
@@ -296,6 +252,8 @@ async def resume(
     task = await store.get_task(task_id)
     if task.state != TaskState.PAUSED:
         raise ConflictError("Task is not paused")
+    if task.project_id is not None and await store.project_work_blocked(str(task_id)):
+        raise ConflictError("请先恢复此项目")
     await store.append_event(task_id, "task.resume_requested", {"actor": user.subject})
     await request.app.state.orchestrator.resume_task(str(task_id))
     return await store.get_task(task_id)

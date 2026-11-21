@@ -458,11 +458,12 @@ body[data-trace-expanded] { overflow: hidden; }
 <body>
 <div class="app-shell">
   <aside class="sidebar">
-    <a class="brand" href="#/overview"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>工作台</small></span></a>
+    <a class="brand" href="#/projects"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>工作台</small></span></a>
     <nav aria-label="主导航">
+      <a href="#/projects" data-access="tenant" hidden>项目</a>
       <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
       <a href="#/submit" data-access="member" hidden>提交任务</a>
-      <a href="#/tasks" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>任务进度</a>
+      <a href="#/tasks" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>所有线程</a>
       <a href="#/analysis" data-access="tenant" hidden>数据分析</a>
       <a href="#/evals" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
@@ -536,6 +537,43 @@ body[data-trace-expanded] { overflow: hidden; }
       <div id="recent-loop" class="panel result-card" data-access="eval" hidden></div>
     </section>
 
+    <section id="projects-page" class="page" hidden>
+      <p id="projects-status" class="portal-message" role="status"></p>
+      <div id="projects-home" class="page">
+        <div class="form-actions">
+          <button id="project-create" class="primary" type="button" data-access="member" hidden>新建项目</button>
+        </div>
+        <div id="project-cards" class="project-grid"></div>
+      </div>
+      <div id="project-detail" class="page" hidden>
+        <div class="panel project-header">
+          <div class="panel-head">
+            <div class="stack">
+              <a href="#/projects">所有项目</a>
+              <h2 id="project-name"></h2>
+              <p id="project-goal" class="portal-wrap"></p>
+            </div>
+            <div class="form-actions">
+              <span id="project-status" class="badge"></span>
+              <details id="project-menu" class="project-menu" data-access="member" hidden>
+                <summary aria-label="项目操作">⋯</summary>
+                <div id="project-actions" class="stack"></div>
+              </details>
+            </div>
+          </div>
+          <nav id="project-tabs" class="portal-tabs" aria-label="项目导航"></nav>
+        </div>
+        <div id="project-content" class="page"></div>
+      </div>
+      <dialog id="project-dialog" class="project-dialog panel" aria-labelledby="project-dialog-title">
+        <div class="panel-head">
+          <h2 id="project-dialog-title"></h2>
+          <form method="dialog"><button type="submit">关闭</button></form>
+        </div>
+        <div id="project-dialog-content"></div>
+      </dialog>
+    </section>
+
     <section id="submit-page" class="page" hidden>
       <div id="submit-form" class="panel"></div>
     </section>
@@ -604,6 +642,10 @@ body[data-trace-expanded] { overflow: hidden; }
         </div>
       </div>
       <div id="task-details" class="page" hidden>
+        <nav id="task-project-breadcrumb" class="project-breadcrumb" aria-label="线程面包屑" hidden>
+          <a id="task-project-link" href="#/projects">项目</a><span aria-hidden="true"> › </span>
+          <span aria-current="page">线程</span>
+        </nav>
         <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span></header>
         <p id="task-extras-status" class="status-text portal-message" role="status"></p>
         <div class="panel" hidden><h2>拉取请求与工单</h2><div id="task-delivery" class="stack"></div></div>
@@ -847,6 +889,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/assets/portal-tasks.js"></script>
 <script src="/portal/assets/portal-evolution.js"></script>
 <script src="/portal/assets/portal-settings.js"></script>
+<script src="/portal/assets/portal-projects.js"></script>
 <script>
 'use strict';
 const $=id=>document.getElementById(id), enc=encodeURIComponent;
@@ -1660,6 +1703,7 @@ async function updateTask(){
     currentTask=t;
     appendTaskEvents(events);
     $('task-details').hidden=false;
+    portalProjects.breadcrumb(t);
     $('task-summary').textContent=json({
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
     });
@@ -2253,6 +2297,7 @@ $('analysis-form').onsubmit=async event=>{
   }catch(e){error(e)}finally{control.disabled=false}
 };
 const pages={
+  projects:['projects-page','项目',''],
   memories:['memories-page','共享记忆','管理跨任务复用的约定。'],
   analysis:['analysis-page','数据分析','上传数据并追踪分析报告。'],
   overview:['overview','概览','连接工作空间，提交或查看任务。'],
@@ -2270,13 +2315,15 @@ const pages={
   platform:['platform-page','平台管理','管理租户和套餐，查看平台用量。'],
 };
 const pageAccess={
+  projects:'tenant',
   overview:'public',submit:'member',tasks:'tenant',analysis:'tenant',versions:'tenant',memories:'tenant',
   evals:'eval',runs:'eval',compare:'eval',loop:'eval',evolutions:'admin',integrations:'admin',
   tools:'tenant',team:'admin',platform:'platform',
 };
 function pageRoute(){
   const [requested,...parts]=location.hash.slice(2).split('/');
-  const page=Object.hasOwn(pages,requested)?requested:'overview';
+  const home=portalUI.can('tenant')?'projects':'overview';
+  const page=Object.hasOwn(pages,requested)?requested:home;
   return {page,parts,current:portalUI.can(pageAccess[page])?page:'overview'};
 }
 function syncAccess(){
@@ -2294,6 +2341,7 @@ async function route(){
     if(traceFullscreen())await setTraceFullscreen(false);
   }
   if(current!=='team')portalSettings.clearSensitive();
+  if(current!=='projects')portalProjects.leave();
   syncAccess();
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
@@ -2314,6 +2362,7 @@ async function route(){
   syncEvalForm();
   activeRun=current==='runs'&&parts[0]?decodeURIComponent(parts[0]):null;
   if(activeRun)await matrix();
+  if(current==='projects')await portalProjects.load(parts);
   if(current==='submit')await portalTasks.loadSubmit();
   if(current==='evolutions')await portalEvolution.load(parts);
   if(['tools','integrations','team','platform'].includes(current))await portalSettings.load(current);
@@ -2591,6 +2640,7 @@ function resetPortalSession(){
   portalTasks.reset();
   portalEvolution.reset();
   portalSettings.reset();
+  portalProjects.reset();
   portalIdentity=portalConfig=null;
   canRescore=false;
   selectedTask=currentTask=currentLoopTask=activeRun=selectedIteration=fixSelection=pendingReview=null;
@@ -2654,6 +2704,7 @@ async function refresh(manual=false){
       }
       if(page==='versions'&&!connect)await loadVersions();
       if(!connect&&page==='tasks')await updateTask();
+      if(!connect&&page==='projects')await portalProjects.poll(parts);
       if(!connect&&page==='evolutions')await portalEvolution.poll();
       if(!connect&&page==='analysis'){
         portalTasks.renderAnalysisChoices();

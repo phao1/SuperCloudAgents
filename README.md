@@ -164,6 +164,7 @@ make up-all    # also start the optional services (needs a .env with provider ke
 | Area | What it adds | Enable with |
 | --- | --- | --- |
 | Self-evolution | OpenCode prompts and tool descriptions evolve as overlays: reflect on dev failures, propose candidates, gate on a holdout split for quality or cost, promote a champion. Schedules, approvals, percentage rollouts, rollback, solidifying a champion into a built version, and harvesting real tasks as cases. | `/v1/evolutions`, `/v1/champions`, `/v1/evolution-schedules`, Portal → 自动演进 |
+| 项目与线程 | 每个项目保存仓库、指令和执行默认值，按状态查看线程，并汇集项目文件、记忆和用量。 | `/v1/projects`，Portal → 项目，[使用说明](docs/projects.md) |
 | Multi-tenant business | Tenants on plans (cost and concurrency limits), suspension, members and roles, tenant API tokens, operator-issued first tokens, per-tenant usage metering and monthly CSV billing export. | `SCA_PLATFORM_ADMIN_TOKEN`, `/v1/admin/*`, `/v1/tenant`, `/v1/usage` ([docs/operations.md](docs/operations.md)) |
 | Payments | Stripe Checkout for monthly plans, a billing portal, invoice history, and monthly usage overages. | `/v1/tenant/billing`, `/v1/admin/billing`, `sca admin report-usage-to-stripe` ([setup](docs/operations.md#stripe-订阅与付款)) |
 | Code hosting | GitHub / Gitea: tasks from issues, pull requests with review and CI status, outcomes written back. | `/v1/integrations/scm`, [docs/scm.md](docs/scm.md) |

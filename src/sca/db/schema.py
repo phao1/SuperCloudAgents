@@ -500,3 +500,35 @@ task_messages = Table(
     CheckConstraint("mode IN ('queue', 'interrupt')"),
     CheckConstraint("status IN ('pending', 'delivered', 'applied')"),
 )
+
+
+# Projects
+projects = Table(
+    "projects", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("tenant_id", Text, ForeignKey("tenants.id"), nullable=False),
+    Column("name", Text, nullable=False),
+    Column("goal", Text),
+    Column("instructions", Text, nullable=False, server_default=""),
+    Column("default_backend", Text),
+    Column("default_model", Text),
+    Column("repos", JSONB, nullable=False, server_default=text("'[]'::jsonb")),
+    Column("settings", JSONB, nullable=False, server_default=text("'{}'::jsonb")),
+    Column("status", Text, nullable=False, server_default="active"),
+    Column("is_default", Boolean, nullable=False, server_default="false"),
+    Column("created_by", Text, nullable=False),
+    timestamp("created_at"), timestamp("updated_at"),
+    Column("deleted_at", DateTime(timezone=True)),
+    UniqueConstraint("tenant_id", "id"),
+    CheckConstraint("char_length(instructions) <= 16000"),
+    CheckConstraint("status IN ('active', 'paused', 'archived')"),
+)
+Index("ix_projects_default", projects.c.tenant_id, unique=True,
+      postgresql_where=projects.c.is_default & projects.c.deleted_at.is_(None))
+for project_record in (tasks, kb_documents, memories):
+    project_record.append_column(Column("project_id", UUID(as_uuid=True)))
+    project_record.append_constraint(ForeignKeyConstraint(
+        ["tenant_id", "project_id"], ["projects.tenant_id", "projects.id"],
+        name=f"fk_{project_record.name}_project",
+    ))
+    Index(f"ix_{project_record.name}_project_id", project_record.c.project_id)

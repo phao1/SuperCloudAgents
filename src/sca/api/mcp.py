@@ -1,5 +1,6 @@
 import json
 from urllib.parse import urlsplit
+from uuid import UUID
 
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse
@@ -26,7 +27,7 @@ _TOOLS = [
 ]
 
 
-async def _authorize_task(request: Request) -> tuple[Store, list[str]]:
+async def _authorize_task(request: Request) -> tuple[Store, list[str], UUID | None]:
     settings = get_tool_settings()
     origin = request.headers.get("origin")
     if origin is not None:
@@ -51,7 +52,7 @@ async def _authorize_task(request: Request) -> tuple[Store, list[str]]:
     teams = settings.teams_for(tenant, actor)
     if not actor or not await store.available_tools(actor, teams, names=[KNOWLEDGE]):
         raise ForbiddenError("知识库工具未授权")
-    return store, teams
+    return store, teams, task.project_id
 
 
 def _result(id_: int | str, result: dict) -> JSONResponse:
@@ -63,17 +64,17 @@ def _error(id_: int | str | None, code: int, message: str, status: int = 200) ->
                         status_code=status)
 
 
-async def _call_tool(store: Store, teams: list[str], params: dict) -> dict:
+async def _call_tool(store: Store, teams: list[str], project_id: UUID | None, params: dict) -> dict:
     name = params.get("name")
     args = params.get("arguments", {})
     try:
         if name == "search_knowledge":
             body = SearchInput.model_validate(args)
-            hits = await search(store, teams, body.query, body.k, get_settings())
+            hits = await search(store, teams, body.query, body.k, get_settings(), project_id=project_id)
             value = {"results": [hit.model_dump(mode="json") for hit in hits]}
         elif name == "read_document":
             body = ReadInput.model_validate(args)
-            value = (await read_document(store, teams, body.id)).model_dump(mode="json")
+            value = (await read_document(store, teams, body.id, project_id=project_id)).model_dump(mode="json")
         else:
             raise ValueError
     except NotFoundError as exc:
@@ -84,7 +85,7 @@ async def _call_tool(store: Store, teams: list[str], params: dict) -> dict:
 
 @router.post(PATH, include_in_schema=False)
 async def knowledge_mcp(request: Request) -> Response:
-    store, teams = await _authorize_task(request)
+    store, teams, project_id = await _authorize_task(request)
     if request.headers.get("content-type", "").partition(";")[0].strip().lower() != "application/json":
         return _error(None, -32600, "MCP 请求须使用 application/json", 415)
     version = request.headers.get("mcp-protocol-version")
@@ -115,7 +116,7 @@ async def knowledge_mcp(request: Request) -> Response:
         return _result(id_, {"tools": _TOOLS})
     if method == "tools/call":
         try:
-            return _result(id_, await _call_tool(store, teams, params))
+            return _result(id_, await _call_tool(store, teams, project_id, params))
         except (ValidationError, ValueError):
             return _error(id_, -32602, "无效的 MCP 工具参数")
     return _error(id_, -32601, "不支持的 MCP 方法")

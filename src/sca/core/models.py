@@ -62,6 +62,11 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.CANCELLED: frozenset(),
 }
 
+# Projects can suspend a thread at a checkpoint and return it to the interrupted phase.
+ALLOWED_TRANSITIONS[TaskState.PAUSED] |= {
+    TaskState.PROVISIONING, TaskState.VERIFYING, TaskState.AWAITING_REVIEW,
+}
+
 
 def can_transition(src: TaskState, dst: TaskState) -> bool:
     return dst in ALLOWED_TRANSITIONS[src]
@@ -79,6 +84,8 @@ class Task(BaseModel):
     idempotency_key: str | None = None
     created_at: datetime
     updated_at: datetime
+    # Projects
+    project_id: UUID | None = None
 
 
 # --------------------------------------------------------------------------- events

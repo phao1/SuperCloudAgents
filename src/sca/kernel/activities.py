@@ -210,6 +210,7 @@ class KernelActivities:
             self.verify_intents,
             self.deliver_task_messages,
             self.apply_task_messages,
+            self.project_work_blocked,
         ]
 
     def _state(self, task_id: str) -> TaskStateStore:
@@ -362,6 +363,7 @@ class KernelActivities:
                 "_versioned_prompts": True,
                 "_admission": True,
                 "_user_interjection": True,
+                "_project_control": task.project_id is not None,
                 "memory_enabled": spec.get("memory_enabled") is not False,
                 "prompt_version": selected_version,
                 "hooks": asdict(get(task.kind).hooks),
@@ -617,6 +619,11 @@ class KernelActivities:
     @activity.defn
     async def release_slot(self, task_id: str) -> None:
         await self.store.release_slot(task_id)
+
+    # Projects
+    @activity.defn
+    async def project_work_blocked(self, task_id: str) -> bool:
+        return await self.store.project_work_blocked(task_id)
 
     @activity.defn
     async def set_state(self, inp: SetStateInput) -> str | None:

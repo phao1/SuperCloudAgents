@@ -30,12 +30,15 @@ async def create(body: MemoryInput, request: Request, user: Writer) -> dict:
 
 @router.get("")
 async def list_memories(
-    request: Request, user: Reader, scope: str | None = None, status: Status | None = None
+    request: Request, user: Reader, scope: str | None = None, status: Status | None = None,
+    project_id: UUID | None = None,
 ) -> list[dict]:
     from sca.core.errors import InvalidTaskError
 
     try:
-        return await request.app.state.store.for_tenant(user.tenant_id).list_memories(scope, status)
+        return await request.app.state.store.for_tenant(user.tenant_id).list_memories(
+            scope, status, project_id=project_id,
+        )
     except ValueError as exc:
         raise InvalidTaskError(str(exc)) from exc
 

@@ -25,7 +25,7 @@ from sca.orchestration.provider_errors import patched_provider_account_error
 with workflow.unsafe.imports_passed_through():
     from sca.intents.base import TICKET_TYPES
     from sca.kernel.interjection import MESSAGES_PENDING, Guidance, TurnInterrupted, with_guidance
-    from sca.kernel.workflow import TaskWorkflow
+    from sca.kernel.workflow import ProjectCheckpoints, TaskWorkflow
     from sca.kinds.coding.activities import (
         SCM_ATTEMPTS,
         CheckpointResult,
@@ -177,6 +177,7 @@ class CodingTaskWorkflow(TaskWorkflow):
         if spec.get("_user_interjection"):
             self._interjections.enable()
         self._admission = spec.get("_admission", False)
+        self._project_checkpoints = ProjectCheckpoints(spec)
         await self._acquire_slot(task_id)
         await self._set_state(task_id, "PROVISIONING")
         await workflow.execute_activity(
@@ -189,6 +190,7 @@ class CodingTaskWorkflow(TaskWorkflow):
         if spec.get("memory_enabled"):
             notes = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
         spec["_context_notes"] = "\n".join([*intents.get("notes", []), notes])
+        await self._wait_for_project(task_id, "PROVISIONING")
         await workflow.execute_activity(
             "create_sandbox", task_id, start_to_close_timeout=timedelta(minutes=5),
             retry_policy=_retry(3),
@@ -232,6 +234,7 @@ class CodingTaskWorkflow(TaskWorkflow):
         if chosen is None:
             await self._set_state(task_id, "FAILED", "No Best-of-N attempt produced a checkpoint")
             return "FAILED"
+        await self._wait_for_project(task_id, "RUNNING")
         await self._set_state(task_id, "VERIFYING")
         actor = None
         if spec["best_of"]["select"] == "human":
@@ -241,6 +244,7 @@ class CodingTaskWorkflow(TaskWorkflow):
             assert self._selected_attempt is not None
             attempt, actor = self._selected_attempt
             chosen = next(c for c in candidates if c.attempt == attempt)
+            await self._wait_for_project(task_id, "AWAITING_REVIEW")
             await self._acquire_slot(task_id)
             await self._set_state(task_id, "RUNNING")
             await self._set_state(task_id, "VERIFYING")
@@ -253,8 +257,10 @@ class CodingTaskWorkflow(TaskWorkflow):
     async def _review_best_of(self, task_id: str, spec: dict, chosen: Candidate, intents: bool) -> str:
         turn, passed, session = chosen.turns, chosen.passed, None
         if passed and spec.get("ci") is not None:
+            await self._wait_for_project(task_id, "VERIFYING", turn)
             passed = (await self._extension("coding.after_verify", task_id, spec, turn))["passed"]
         while True:
+            await self._wait_for_project(task_id, "VERIFYING", turn)
             if self._interjections.pending:
                 turn, passed, session = await self._revise_best_of(
                     task_id, spec, turn, session, None, intents,
@@ -266,11 +272,13 @@ class CodingTaskWorkflow(TaskWorkflow):
             if self._sandbox_up and spec.get("memory_enabled"):
                 await workflow.execute_activity("collect_memory_proposals", StepInput(task_id, turn), **_QUICK)
             if spec.get("acceptance_files"):
+                await self._wait_for_project(task_id, "VERIFYING", turn)
                 await workflow.execute_activity(
                     "run_acceptance", task_id,
                     start_to_close_timeout=timedelta(seconds=spec["turn_timeout_s"] + 660),
                     heartbeat_timeout=timedelta(minutes=5), retry_policy=_retry(3),
                 )
+            await self._wait_for_project(task_id, "VERIFYING", turn)
             await self._set_state(task_id, "AWAITING_REVIEW")
             if spec.get("auto_finish"):
                 state = "SUCCEEDED" if passed else "FAILED"
@@ -286,6 +294,7 @@ class CodingTaskWorkflow(TaskWorkflow):
                 except TimeoutError:
                     await self._release_sandbox(task_id, turn)
             await workflow.wait_condition(self._review_ready)
+            await self._wait_for_project(task_id, "AWAITING_REVIEW", turn)
             decision, feedback = self._next_review()
             if decision == "approve" and await self._complete(task_id, "SUCCEEDED"):
                 if spec.get("memory_enabled"):
@@ -312,6 +321,7 @@ class CodingTaskWorkflow(TaskWorkflow):
             prompt += "\n\nOriginal task:\n" + spec["instruction"]
         fix, limit = 0, spec["max_fix_attempts"]
         while True:
+            await self._wait_for_project(task_id, "RUNNING", turn)
             if self._pause_requested:
                 await self._release_sandbox(task_id, turn)
                 await self._set_state(task_id, "PAUSED")
@@ -335,6 +345,7 @@ class CodingTaskWorkflow(TaskWorkflow):
                 continue
             if messages and not response.skipped:
                 await self._interjections.apply(task_id, messages)
+            await self._wait_for_project(task_id, "RUNNING", turn)
             await self._check_budget(task_id, turn)
             await self._set_state(task_id, "VERIFYING")
             verify_steps = ["coding.run_verification", "verify_intents"] if intents else ["coding.run_verification"]
@@ -373,6 +384,7 @@ class CodingBeforeTurn(TaskWorkflow):
         if spec.get("_user_interjection"):
             self._interjections.enable()
         self._admission = spec.get("_admission", False)
+        self._project_checkpoints = ProjectCheckpoints(spec)
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
         subtasks = spec.get("subtasks", [])
         shared_paths = spec.get("shared_paths", [])
@@ -381,6 +393,7 @@ class CodingBeforeTurn(TaskWorkflow):
             await self._set_state(task_id, "RUNNING")
             attempt, feedback = 0, None
             while True:
+                await self._wait_for_project(task_id, "RUNNING")
                 attempt += 1
                 messages = await self._interjections.deliver(task_id, attempt, planning=True)
                 try:
@@ -418,6 +431,7 @@ class CodingBeforeTurn(TaskWorkflow):
                         await workflow.execute_activity("release_slot", task_id, **_QUICK)
                     await self._set_state(task_id, "AWAITING_REVIEW")
                     await workflow.wait_condition(self._review_ready)
+                    await self._wait_for_project(task_id, "AWAITING_REVIEW")
                     if self._interjections.pending:
                         decision, feedback = self._next_review()
                     else:
@@ -434,6 +448,7 @@ class CodingBeforeTurn(TaskWorkflow):
                 break
         statuses = []
         if subtasks:
+            await self._wait_for_project(task_id, "RUNNING")
             if guidance:
                 spec = {**spec, "_context_notes": with_guidance(
                     spec.get("_context_notes", ""), [message.text for message in guidance],
@@ -583,7 +598,9 @@ class CodingSubtaskWorkflow:
         shared = spec.get("_shared_paths", [])
         dependencies = subtask.get("_dependencies", [])
         session = None
+        project = ProjectCheckpoints(spec)
         try:
+            await project.wait(task_id)
             if attempt is None and (scopes or shared or dependencies):
                 prepared = await workflow.execute_activity(
                     "coding.prepare_scoped_subtask",
@@ -605,8 +622,10 @@ class CodingSubtaskWorkflow:
             else:
                 await step("prepare")
             if attempt is None and (spec.get("setup_command") or spec.get("_intent_setup")):
+                await project.wait(task_id)
                 await step("run_setup")
             for turn in range(1, spec["max_fix_attempts"] + 2):
+                await project.wait(task_id)
                 budget = await step("check_budget", turn)
                 if budget.get("reason"):
                     raise ApplicationError(
@@ -616,6 +635,7 @@ class CodingSubtaskWorkflow:
                 session = response["session_id"]
                 checkpoint = await step("checkpoint_workspace", turn)
                 result.commit, result.changed = checkpoint["commit"], checkpoint["changed"]
+                await project.wait(task_id)
                 if attempt is None:
                     budget = await step("check_budget", turn)
                     if budget.get("reason"):

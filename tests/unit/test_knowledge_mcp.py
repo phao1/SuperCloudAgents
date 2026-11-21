@@ -39,7 +39,7 @@ class KnowledgeStore:
 
     def __init__(self, tenant_id: str = "org", *, db=None):
         self.tenant_id = tenant_id
-        self.db = db or SimpleNamespace(documents={}, tasks={}, grants={"org"}, vector=None)
+        self.db = db or SimpleNamespace(documents={}, tasks={}, projects=set(), grants={"org"}, vector=None)
 
     def for_tenant(self, tenant):
         return KnowledgeStore(tenant, db=self.db)
@@ -63,19 +63,23 @@ class KnowledgeStore:
         self.db.documents[self.tenant_id, doc_id] = (row, chunks, embedding_model)
         return row
 
-    async def list_knowledge_documents(self, teams, limit, offset):
-        rows = [row for row, _, _ in self.readable(teams)]
+    async def get_project(self, project_id):
+        if (self.tenant_id, project_id) not in self.db.projects:
+            raise NotFoundError("项目不存在")
+
+    async def list_knowledge_documents(self, teams, limit, offset, *, project_id=None):
+        rows = [row for row, _, _ in self.readable(teams, project_id)]
         return rows[offset:offset + limit]
 
-    def readable(self, teams):
+    def readable(self, teams, project_id):
         return [(row, chunks, model) for (tenant, _), (row, chunks, model) in self.db.documents.items()
-                if tenant == self.tenant_id and (not row["allowed_teams"]
-                                                 or set(row["allowed_teams"]).intersection(teams))]
+                if tenant == self.tenant_id and row["project_id"] in (None, project_id)
+                and (not row["allowed_teams"] or set(row["allowed_teams"]).intersection(teams))]
 
-    async def search_knowledge(self, query, teams, limit, vector, model):
+    async def search_knowledge(self, query, teams, limit, vector, model, *, project_id=None):
         self.db.vector = vector
         results = []
-        for row, chunks, indexed_model in self.readable(teams):
+        for row, chunks, indexed_model in self.readable(teams, project_id):
             for chunk in chunks:
                 embedding = chunk["embedding"] if model == indexed_model else None
                 distance = None
@@ -88,8 +92,8 @@ class KnowledgeStore:
         results.sort(key=lambda row: row["distance"] if row["distance"] is not None else 2)
         return results[:limit]
 
-    async def get_knowledge_document(self, document_id, teams):
-        for row, chunks, _ in self.readable(teams):
+    async def get_knowledge_document(self, document_id, teams, *, project_id=None):
+        for row, chunks, _ in self.readable(teams, project_id):
             if row["id"] == document_id:
                 return {**row, "citations": chunks}
         raise NotFoundError("知识库文档不存在")
@@ -143,18 +147,19 @@ async def knowledge_api(tmp_path, monkeypatch):
         yield client, store, settings
 
 
-def _task(store, *, actor="static-token", tools=None, tenant="org"):
+def _task(store, *, actor="static-token", tools=None, tenant="org", project_id=None):
     task_id = uuid4()
     store.db.tasks[tenant, task_id] = SimpleNamespace(
         state=TaskState.RUNNING, spec={"tools": ["knowledge"] if tools is None else tools}, actor=actor,
+        project_id=project_id,
     )
     return task_id
 
 
-async def _upload(client, title, text, teams, *, token="admin"):
+async def _upload(client, title, text, teams, *, token="admin", project_id=None):
     response = await client.post("/v1/knowledge/documents", headers={"Authorization": f"Bearer {token}"},
                                  json={"title": title, "text": text, "format": "pdf-text",
-                                       "allowed_teams": teams})
+                                       "allowed_teams": teams, "project_id": project_id})
     assert response.status_code == 201
     return response.json()["id"]
 
@@ -220,6 +225,29 @@ async def test_mcp_requires_task_token_and_current_grant(knowledge_api):
     store.db.grants.add("org")
     store.db.tasks["org", task_id].state = TaskState.SUCCEEDED
     assert (await _rpc(client, token, "tools/list")).status_code == 403
+
+
+async def test_mcp_scopes_search_and_reads_to_the_thread_project(knowledge_api):
+    client, store, settings = knowledge_api
+    one, two = uuid4(), uuid4()
+    store.db.projects.update({("org", one), ("org", two)})
+    shared = await _upload(client, "Shared", "runbook", [])
+    own = await _upload(client, "One", "runbook", ["ops"], project_id=str(one))
+    other = await _upload(client, "Two", "runbook", [], project_id=str(two))
+    token = issue_knowledge_token(settings, _task(store, project_id=one), "org", 60)
+    response = await _rpc(client, token, "tools/call", {
+        "name": "search_knowledge", "arguments": {"query": "runbook"},
+    })
+    hits = response.json()["result"]["structuredContent"]["results"]
+    assert {hit["document_id"] for hit in hits} == {shared, own}
+    blocked = await _rpc(client, token, "tools/call", {
+        "name": "read_document", "arguments": {"id": other},
+    })
+    assert blocked.json()["result"]["isError"]
+    reader = {"Authorization": "Bearer admin"}
+    assert (await client.get("/v1/knowledge/documents/" + own, headers=reader)).status_code == 404
+    assert (await client.get("/v1/knowledge/documents/" + own + "?project_id=" + str(one),
+                             headers=reader)).status_code == 200
 
 
 def test_keyword_terms_drop_stopwords_stem_and_split_cjk():

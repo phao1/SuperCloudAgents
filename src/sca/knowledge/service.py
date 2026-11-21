@@ -46,7 +46,8 @@ async def ingest(store: Store, body: DocumentInput, actor: str, settings: Settin
     )
     row = await store.create_knowledge_document(
         {"title": body.title, "content": body.text, "format": body.format,
-         "allowed_teams": sorted(set(body.allowed_teams)), "created_by": actor},
+         "allowed_teams": sorted(set(body.allowed_teams)), "created_by": actor,
+         "project_id": body.project_id},
         [{**asdict(chunk), "embedding": vector} for chunk, vector in zip(chunks, vectors, strict=True)],
         settings.memory_embedding_model,
     )
@@ -60,16 +61,21 @@ def _citation(document_id: UUID, title: str, chunk: dict) -> Citation:
 
 
 async def search(store: Store, teams: list[str], query: str, k: int, settings: Settings,
-                 gateway: ModelGateway | None = None) -> list[SearchHit]:
+                 gateway: ModelGateway | None = None, *,
+                 project_id: UUID | None = None) -> list[SearchHit]:
     vector = await embed(query, settings, gateway)
-    rows = await store.search_knowledge(query, teams, k, vector, settings.memory_embedding_model)
+    rows = await store.search_knowledge(
+        query, teams, k, vector, settings.memory_embedding_model, project_id=project_id,
+    )
     return [SearchHit(
         **_citation(row["document_id"], row["title"], row).model_dump(), text=row["content"],
         score=1 - row["distance"] if row["distance"] is not None else None,
     ) for row in rows]
 
 
-async def read_document(store: Store, teams: list[str], document_id: UUID) -> DocumentRead:
-    row = await store.get_knowledge_document(document_id, teams)
+async def read_document(
+    store: Store, teams: list[str], document_id: UUID, *, project_id: UUID | None = None,
+) -> DocumentRead:
+    row = await store.get_knowledge_document(document_id, teams, project_id=project_id)
     return DocumentRead(id=document_id, title=row["title"], format=row["format"], text=row["content"],
                         citations=[_citation(document_id, row["title"], c) for c in row["citations"]])
