@@ -1,6 +1,7 @@
 from collections.abc import Callable, Coroutine
 from hmac import compare_digest
 from ipaddress import IPv6Address, ip_address
+from os import environ
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
@@ -109,7 +110,9 @@ async def history_principal(request: Request, authorization: str | None = Header
     if settings is not None and request.method == "GET" and authorization is None:
         mode = settings.guest_view
         if mode == "all" or (mode == "local" and request.client and is_loopback(request.client.host)):
-            tenant = settings.guest_tenant or ("eval" if demo_config_path() else "default")
+            # The demo launcher exports its runtime mode even with older configs.
+            demo = demo_config_path() is not None or environ.get("SCA_RUNTIME_MODE") in {"docker", "source"}
+            tenant = settings.guest_tenant or ("eval" if demo else "default")
             if not await request.app.state.store.tenant_deleted(tenant):
                 return GuestPrincipal(tenant_id=tenant)
     return await principal(request, authorization)

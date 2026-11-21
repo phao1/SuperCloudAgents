@@ -17,6 +17,7 @@ from sca.api.guest_history import (
     guest_downloadable,
     history_artifacts,
     history_event,
+    history_message,
     history_payload,
     history_task,
 )
@@ -411,6 +412,7 @@ async def send_task_message(
 async def list_task_messages(
     task_id: UUID,
     request: Request,
-    user: Annotated[Principal, Depends(authorize("read"))],
+    user: Annotated[Principal, Depends(authorize("read", guest=True))],
 ) -> list[TaskMessage]:
-    return await request.app.state.store.for_tenant(user.tenant_id).list_task_messages(task_id)
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    return [history_message(user, message) for message in await store.list_task_messages(task_id)]

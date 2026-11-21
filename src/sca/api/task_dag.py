@@ -6,6 +6,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Request
 
 from sca.api.authz import authorize
+from sca.api.guest_history import history_dag
 from sca.core.errors import NotFoundError
 from sca.core.models import Event, Principal, Task
 from sca.core.task_dag import TaskDAG, build_task_dag, linked_tasks
@@ -27,7 +28,7 @@ async def _history(store: Store, task_id: UUID) -> list[Event]:
 
 @router.get("/tasks/{task_id}/dag")
 async def task_dag(
-    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read"))],
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read", guest=True))],
 ) -> TaskDAG:
     store = request.app.state.store.for_tenant(user.tenant_id)
     root = await store.get_task(task_id, user.tenant_id)
@@ -49,4 +50,4 @@ async def task_dag(
                 except NotFoundError:
                     # Earlier links can outlive task retention.
                     continue
-    return build_task_dag(root, events, tasks[1:])
+    return history_dag(user, build_task_dag(root, events, tasks[1:]))

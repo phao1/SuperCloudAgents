@@ -28,7 +28,7 @@ def app_client(store, tmp_path, monkeypatch, *, objects=None):
                 return Principal(tenant_id="tenant-a", subject="ci", scopes=["ci:report"])
             return await super().authenticate(token)
 
-    settings = Settings(_env_file=None, data_dir=tmp_path)
+    settings = Settings(_env_file=None, data_dir=tmp_path, guest_view="off")
     monkeypatch.setattr("sca.api.app.get_settings", lambda: settings)
     app = create_app(
         store=store, orchestrator=SimpleNamespace(),

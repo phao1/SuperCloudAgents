@@ -57,9 +57,12 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 `SCA_GUEST_VIEW` 默认 `local`，允许从回环地址直接连接的无令牌 `GET` 请求读取历史。
 设为 `off` 要求使用令牌。`SCA_GUEST_TENANT` 指定访客可访问的唯一租户，独立部署默认是
 `default`，通过 `portal_demo.sh` 启动时默认是保存演示任务、评测和演进记录的 `eval`。
-提交、审核、令牌、成员、集成配置和账单管理仍需认证。访客可查看任务、事件（含流式更新）、
-文本制品和补丁、评测及演进历史（`eval`），以及租户用量。文本历史中的常见凭证字段和邮箱会被遮盖。
-二进制制品和原始终端需使用令牌查看。
+已有演示安装用 `bash scripts/portal_demo.sh up --mode docker` 或 `--mode source` 启动即可使用该默认值。
+运行中的 Portal 先执行 `bash scripts/portal_demo.sh down`。显式配置的 `SCA_GUEST_TENANT` 优先。
+
+访客可查看任务、执行图、插话记录、事件（含流式更新）、文本制品和补丁、评测及演进历史（`eval`），
+以及租户用量。访客历史会遮盖邮箱、常见凭证和账单标识，插话记录中的 `actor` 显示为 `[redacted]`。
+项目工作区及其 API、知识文档、二进制制品、原始终端及所有写操作均需使用令牌。
 
 **危险：`SCA_GUEST_VIEW=all` 会把指定租户的历史对所有能连接 API 的人开放，包括无令牌的远程用户。**
 任务指令、轨迹和补丁可能包含业务数据。只对允许公开的历史使用此模式，并显式设置
@@ -71,9 +74,13 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 `SCA_GUEST_VIEW=off`，或让代理通过非回环地址连接 API。
 
 ```bash
-curl -fsS http://127.0.0.1:8000/v1/portal/config
-curl -fsS http://127.0.0.1:8000/v1/tasks
-curl -fsS http://127.0.0.1:8000/v1/usage?group_by=day
+API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/config"
+curl -fsS "$API/v1/tasks"
+curl -fsS "$API/v1/usage?group_by=day"
+# 从任务列表取得 TASK_ID
+curl -fsS "$API/v1/tasks/$TASK_ID/dag"
+curl -fsS "$API/v1/tasks/$TASK_ID/messages"
 ```
 
 访客的配置响应包含 `guest_view: true`、`guest_tenant` 和 `model_configured`。
@@ -285,8 +292,8 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
 ```
 
-每条消息最多 4000 字符。发送成功返回 201，终态任务返回 409。列表按发送顺序返回，`actor` 标明
-发送者。事件记录中的状态与列表一致，依次为待送达（`pending`）、已加入轮次指令（`delivered`）、
+每条消息最多 4000 字符。发送成功返回 201，终态任务返回 409。列表按发送顺序返回，登录后可通过
+`actor` 查看发送者。事件记录中的状态与列表一致，依次为待送达（`pending`）、已加入轮次指令（`delivered`）、
 该轮已完成（`applied`）。被打断轮次中的插话会带入下一轮，直到有一轮完成。
 
 ### 源码模式下立即打断
