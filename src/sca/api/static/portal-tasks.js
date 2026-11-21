@@ -2,7 +2,6 @@
 
 const portalTasks = (() => {
   const ui = portalUI;
-  const backends = {codex: 'Codex', opencode: 'OpenCode', 'opencode-brain': 'OpenCode（脑手分离）', pi: 'Pi'};
   const intentTypes = [
     ['openapi', 'OpenAPI 规范'], ['rules', '项目规则'], ['visual', '截图基准'],
     ['design_tokens', 'Design Tokens'], ['figma', 'Figma 设计稿'],
@@ -197,8 +196,7 @@ const portalTasks = (() => {
         field('准备命令（可选）', 'setup_command'),
         field('模型（可选）', 'model', {placeholder: portalConfig.default_model}),
         field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
-        field('Agent 后端', 'agent_backend', {choices: [['', '默认 · ' + (backends[portalConfig.default_agent_backend]
-          || portalConfig.default_agent_backend)], ...portalConfig.agent_backends.map(name => [name, backends[name] || name])]}),
+        field('Agent 后端', 'agent_backend', {choices: ui.backendChoices(portalConfig)}),
         field('OpenCode 版本（可选）', 'agent_version', {placeholder: '平台默认版本'})
       ),
       disclosure('推送与拉取请求', check('推送任务分支', 'push'), prOption, pr),

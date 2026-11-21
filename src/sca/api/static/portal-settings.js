@@ -231,6 +231,9 @@ const portalSettings = (() => {
       const options = el('details', undefined, 'portal-disclosure');
       options.append(el('summary', '工单任务的默认规格'), ui.fields(
         ui.field('默认基线（留空使用仓库默认分支）', 'base_ref', {value: defaults.base_ref || ''}),
+        ui.field('Agent 后端', 'agent_backend', {value: defaults.agent_backend || '',
+          choices: ui.backendChoices(portalConfig, defaults.agent_backend)}),
+        ui.field('默认模型（可选）', 'model', {value: defaults.model || '', placeholder: portalConfig.default_model}),
         ui.field('沙箱镜像（可选）', 'image', {value: defaults.image || ''}),
         ui.field('准备命令', 'setup_command', {value: defaults.setup_command || ''}),
         ui.field('主要验证命令', 'verify_command', {value: defaults.verify_command || ''}),
@@ -266,7 +269,7 @@ const portalSettings = (() => {
         const pick = names => Object.fromEntries(names.map(name => [name, v(name) || null]));
         const body = {...pick(['provider', 'host', 'repo_full_name', 'webhook_secret_ref']),
           enabled: ui.checked(form, 'enabled'), default_spec: {
-            ...pick(['base_ref', 'image', 'setup_command', 'verify_command']),
+            ...pick(['base_ref', 'agent_backend', 'model', 'image', 'setup_command', 'verify_command']),
             verify_commands: ui.lines(v('verify_commands')), trigger_labels: ui.lines(v('trigger_labels')),
             pull_request: {...pick(['title', 'body', 'base', 'open_on']), draft: ui.checked(form, 'draft'),
               merge_on_approve: ui.checked(form, 'merge_on_approve')},

@@ -67,6 +67,10 @@ JSON
 
 管理员可用 `GET /v1/integrations/scm` 列出集成，并在 `/v1/integrations/scm/{id}` 使用 `GET` 查看、`PUT` 替换整条配置、`DELETE` 删除。将 `enabled` 设为 `false` 可暂停触发。工单任务使用仓库默认分支，也可通过 `default_spec.base_ref` 覆盖。`default_spec` 还支持 `verify_commands` 和 `image`。
 
+要让该仓库的工单使用 DeepSeek Harness，在 Portal 的「工单任务的默认规格」选择后端和模型，
+或在上述 API 请求的 `default_spec` 中填写 `"agent_backend": "dsh", "model": "deepseek-flash"`。
+留空时使用 Worker 的默认后端和模型。
+
 成功触发后，webhook 返回 HTTP 202 和 `task_id`。任务保存 `task.result.issue`。结束时，SCA 在原工单留言报告结果，已生成 PR 时附上链接。
 
 ## 现场验证（2026-11-21）

@@ -243,3 +243,18 @@ async def test_pr_read_uses_authenticated_tenant(scm_api):
     response = await scm_api.http.get(url, headers={"Authorization": "Bearer viewer"})
     assert response.status_code == 200 and response.json() == refreshed.model_dump()
     scm_api.store.get_task.assert_awaited_once_with(task_id, "alpha")
+
+
+async def test_scm_integration_applies_dsh_default_to_issue_task(scm_api):
+    defaults = {"agent_backend": "dsh", "model": "deepseek-flash"}
+    response = await scm_api.http.post("/v1/integrations/scm", headers={"Authorization": "Bearer admin"}, json={
+        "provider": "github", "host": "github.com", "repo_full_name": "acme/app",
+        "webhook_secret_ref": "repo-hook", "default_spec": defaults,
+    })
+    assert response.status_code == 201
+    scm_api.store.find_scm_integration.return_value = response.json()
+    body, headers = delivery("github", "issues", issue_payload(_GITHUB_REPO), scm_api.secret)
+    queued = await scm_api.http.post("/v1/webhooks/github", content=body, headers=headers)
+    assert queued.status_code == 202
+    (task,) = scm_api.queued.values()
+    assert {key: task.spec[key] for key in defaults} == defaults
