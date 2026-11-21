@@ -258,3 +258,15 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
 每条消息最多 4000 字符。发送成功返回 201，终态任务返回 409。列表按发送顺序返回，`actor` 标明
 发送者。事件记录中的状态与列表一致，依次为待送达（`pending`）、已加入轮次指令（`delivered`）、
 该轮已完成（`applied`）。被打断轮次中的插话会带入下一轮，直到有一轮完成。
+
+### 源码模式下立即打断
+
+在源码模式的 Portal 中勾选「立即打断当前轮」，或通过 API 发送 `mode: "interrupt"`。
+即使 Agent 命令还在启动，Worker 也会先停止该命令的进程组，再保存已完成的工作区编辑并继续。
+
+```bash
+curl -fsS -X POST "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"先修复空输入处理。","mode":"interrupt"}'
+```

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, SandboxSpec
-from sca.sandbox._exec import stream_process
+from sca.sandbox._exec import stream_process, wait_for_spawn
 from sca.workspace.tarsafe import chunks, extract, pack, receive
 
 _VIRTUAL_DIRS = {"workspace", "agent_home", "tmp"}
@@ -142,12 +142,15 @@ class LocalSandboxProvider:
         )
         active = self._processes.setdefault(sandbox_id, set())
         try:
-            try:
-                proc = await asyncio.create_subprocess_exec(
+            spawn = asyncio.create_task(
+                asyncio.create_subprocess_exec(
                     *_command(root, argv), cwd=cwd, env=environment, start_new_session=True,
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
                 )
+            )
+            try:
+                proc, cancelled = await wait_for_spawn(spawn)
             except OSError as exc:
                 raise SandboxError(f"Could not run local sandbox command: {exc.strerror}") from exc
             active.add(proc)
@@ -159,7 +162,9 @@ class LocalSandboxProvider:
 
             try:
                 async with aclosing(
-                    stream_process(proc, cleanup, stdin=stdin, timeout_s=timeout_s)
+                    stream_process(
+                        proc, cleanup, stdin=stdin, timeout_s=timeout_s, startup_cancel=cancelled
+                    )
                 ) as events:
                     async for event in events:
                         yield event

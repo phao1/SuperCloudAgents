@@ -9,6 +9,24 @@ from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, ExecExit, ExecOutput
 
 
+async def wait_for_spawn(
+    spawn: asyncio.Task[asyncio.subprocess.Process],
+) -> tuple[asyncio.subprocess.Process, asyncio.CancelledError | None]:
+    cancelled = None
+    while True:
+        try:
+            return await asyncio.shield(spawn), cancelled
+        except asyncio.CancelledError as exc:
+            if spawn.cancelled():
+                raise
+            # Cleanup needs the handle even when an interrupt arrives during startup.
+            cancelled = exc
+        except OSError:
+            if cancelled is not None:
+                raise cancelled from None
+            raise
+
+
 async def stream_exec(
     command: Callable[[str, str], list[str]],
     cleanup_command: Callable[[str, str], Awaitable[object]],
@@ -35,14 +53,8 @@ async def stream_exec(
             stderr=asyncio.subprocess.PIPE,
         )
     )
-    cancelled = False
     try:
-        try:
-            proc = await asyncio.shield(spawn)
-        except asyncio.CancelledError:
-            # Keep the exec handle so startup cancellation can kill the sandbox process too.
-            proc = await spawn
-            cancelled = True
+        proc, cancelled = await wait_for_spawn(spawn)
     except OSError as exc:
         raise SandboxError(str(exc)) from exc
 
@@ -66,7 +78,9 @@ async def stream_exec(
                 pass
         await proc.wait()
 
-    async with aclosing(stream_process(proc, cleanup, stdin=stdin, timeout_s=timeout_s)) as events:
+    async with aclosing(
+        stream_process(proc, cleanup, stdin=stdin, timeout_s=timeout_s, startup_cancel=cancelled)
+    ) as events:
         async for event in events:
             yield event
 
@@ -77,6 +91,7 @@ async def stream_process(
     *,
     stdin: bytes | None = None,
     timeout_s: float | None = None,
+    startup_cancel: asyncio.CancelledError | None = None,
 ) -> AsyncIterator[ExecEvent]:
     assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
     writer = proc.stdin
@@ -118,8 +133,8 @@ async def stream_process(
         return None if deadline is None else max(0, deadline - asyncio.get_running_loop().time())
 
     try:
-        if cancelled:
-            raise asyncio.CancelledError
+        if startup_cancel is not None:
+            raise startup_cancel
         try:
             ends = 0
             while ends < 2:
