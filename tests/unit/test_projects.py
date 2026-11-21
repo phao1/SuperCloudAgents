@@ -314,7 +314,8 @@ def test_project_asset_uses_role_checks_and_existing_task_routes():
     assert "const home=portalUI.can('tenant')?'projects':'overview';" in page
     assert 'id="project-create" class="primary" type="button" data-access="member" hidden' in page
     assert 'aria-label="线程面包屑"' in page and "portalProjects.breadcrumb(t)" in page
-    assert 'href="#/tasks" data-access="tenant"' in page
+    assert 'href="#/projects" data-access="tenant" hidden' in page
+    assert 'href="#/tasks" data-access="history" hidden' in page
     for value in ('待审核', '等你处理', '进行中', '合入中', '空闲', '已完成', '文件库', '用量', '设置', '16,000'):
         assert value in source
     assert "if (project.status === 'active' && ui.can('member'))" in source

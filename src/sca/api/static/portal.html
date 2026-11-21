@@ -1609,7 +1609,10 @@ function stopTaskStream(){
 }
 function refreshTaskDag(id, fromStream=false){
   if(!location.hash.startsWith('#/tasks'))return;
-  taskDag??=SCATaskDAG.create($('task-dag'),taskId=>data('/tasks/'+enc(taskId)+'/dag'));
+  const panel=$('task-dag');
+  panel.hidden=!portalUI.can('tenant')||typeof SCATaskDAG==='undefined';
+  if(panel.hidden)return;
+  taskDag??=SCATaskDAG.create(panel,taskId=>data('/tasks/'+enc(taskId)+'/dag'));
   taskDag.refresh(id,fromStream);
 }
 async function streamTask(taskId){
@@ -1747,7 +1750,8 @@ async function updateTask(){
     currentTask=t;
     appendTaskEvents(events);
     $('task-details').hidden=false;
-    portalProjects.breadcrumb(t);
+    if(portalUI.can('tenant'))portalProjects.breadcrumb(t);
+    else $('task-project-breadcrumb').hidden=true;
     refreshTaskDag(id);
     $('task-summary').textContent=json({
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
@@ -2367,6 +2371,9 @@ const pageAccess={
 };
 function pageRoute(){
   const [requested,...parts]=location.hash.slice(2).split('/');
+  if(requested==='projects'&&portalIdentity?.guest){
+    return {page:'tasks',parts:[],current:'tasks',redirect:'#/tasks'};
+  }
   const home=portalUI.can('tenant')?'projects':'overview';
   const page=Object.hasOwn(pages,requested)?requested:home;
   return {page,parts,current:portalUI.can(pageAccess[page])?page:'overview'};
@@ -2379,7 +2386,8 @@ function syncAccess(){
     :portalIdentity?portalIdentity.tenant_id+' · '+labels[portalIdentity.role]:'尚未连接';
 }
 async function route(){
-  const {page,current,parts}=pageRoute();
+  const {page,current,parts,redirect}=pageRoute();
+  if(redirect)history.replaceState(null,'',redirect);
   if(current!=='tasks'){
     stopTaskStream();
     taskDag?.reset();
