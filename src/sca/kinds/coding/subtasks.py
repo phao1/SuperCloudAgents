@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
@@ -31,10 +32,21 @@ from sca.workspace.git import GitWorkspace
 from sca.workspace.merge import MERGED_STATUSES, SubtaskResult, merge_subtasks
 
 
+def _artifact_name(scope: str, artifact: str, nested: bool) -> str:
+    separator = "." if nested else "-"
+    return f"subtask-{scope}{separator}{artifact}"
+
+
 class ChildStore:
     def __init__(self, store: Store, name: str) -> None:
         self.store, self.name = store, name
         self.prefix = f"subtask.{name}."
+
+    @property
+    def usage_prefix(self) -> str:
+        if isinstance(self.store, ChildStore):
+            return self.store.usage_prefix + self.prefix
+        return self.prefix
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.store, name)
@@ -75,7 +87,12 @@ class ChildStore:
         await self.update_result(task_id, {"session_id": backend_session_id})
 
     async def add_artifact(self, task_id: str, name: str, *args: Any) -> Any:
-        return await self.store.add_artifact(task_id, f"subtask-{self.name}-{name}", *args)
+        name = _artifact_name(self.name, name, isinstance(self.store, ChildStore))
+        return await self.store.add_artifact(task_id, name, *args)
+
+    def artifact_name(self, name: str) -> str:
+        name = _artifact_name(self.name, name, isinstance(self.store, ChildStore))
+        return self.store.artifact_name(name) if isinstance(self.store, ChildStore) else name
 
 
 class ChildObjects:
@@ -92,9 +109,8 @@ class ChildObjects:
         if "/state/" in key:
             return await self.objects.put(self._key(key), *args)
         path = Path(key)
-        return await self.objects.put(
-            str(path.with_name(f"subtask-{self.name}-{path.name}")), *args
-        )
+        name = _artifact_name(self.name, path.name, isinstance(self.objects, ChildObjects))
+        return await self.objects.put(str(path.with_name(name)), *args)
 
 
 @dataclass
@@ -127,6 +143,10 @@ class ChildActivities(CodingActivities):
             worker_identity=parent.worker_identity,
         )
         self.name = name
+        self._parent = parent if isinstance(parent, ChildActivities) else None
+        self.scope = name
+        if self._parent is not None:
+            self.scope = "nested." + hashlib.sha256(f"{parent.name}/{name}".encode()).hexdigest()[:12]
 
     async def run_step(self, inp: SubtaskInput) -> dict:
         if inp.action in {"run_setup", "destroy_sandbox"}:
@@ -146,7 +166,9 @@ class ChildActivities(CodingActivities):
         return asdict(result)
 
     def _task_dir(self, task_id: str) -> Path:
-        return self.settings.task_dir(task_id) / "sub" / self.name
+        base = (self._parent._task_dir(task_id) if self._parent is not None
+                else self.settings.task_dir(task_id))
+        return base / "sub" / self.name
 
     def _workspace(self, task_id: str) -> GitWorkspace:
         return GitWorkspace(self._task_dir(task_id), f"{branch_name(task_id)}-{self.name}")
@@ -154,21 +176,27 @@ class ChildActivities(CodingActivities):
     async def _create_sandbox(self, task_id: str) -> tuple[str, str]:
         # The provider wrapper changes only identity and labels, retaining all mounts/policy.
         provider = self.sandbox
-        name = self.name
+        name = self.scope
+        sandbox_name = self._scoped_sandbox_name(task_id)
 
         class ScopedProvider:
             def __getattr__(self, attr: str) -> Any:
                 return getattr(provider, attr)
 
-            async def create(self, sandbox_name: str, spec: SandboxSpec) -> str:
+            async def create(self, _sandbox_name: str, spec: SandboxSpec) -> str:
                 spec.labels["sca.subtask"] = name
-                return await provider.create(f"{sandbox_name}-{name}", spec)
+                return await provider.create(sandbox_name, spec)
 
         self.sandbox = ScopedProvider()
         try:
             return await super()._create_sandbox(task_id)
         finally:
             self.sandbox = provider
+
+    def _scoped_sandbox_name(self, task_id: str) -> str:
+        if self._parent is not None:
+            return f"{self.scope.replace('.', '-')}-{task_id}"
+        return f"task-{task_id}-{self.name}"
 
     def _memory_proposal_batch(self, turn: int) -> str:
         return f"subtask.{self.name}.{turn}"
@@ -254,7 +282,7 @@ class ChildActivities(CodingActivities):
 
     async def destroy_sandbox(self, task_id: str) -> None:
         task = await self.store.get_task(task_id)
-        sandbox_id = task.result.get("sandbox_id", f"sca-task-{task_id}-{self.name}")
+        sandbox_id = task.result.get("sandbox_id", f"sca-{self._scoped_sandbox_name(task_id)}")
         await self.sandbox.destroy(sandbox_id)
         await self.store.append_event(
             task_id,

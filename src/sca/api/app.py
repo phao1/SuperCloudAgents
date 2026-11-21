@@ -237,6 +237,10 @@ def create_app(
     from sca.api.payments import register_payments
 
     register_payments(app, settings, default_store=store is None)
+    # Task execution DAG
+    from sca.api.task_dag import router as dag_router
+
+    app.include_router(dag_router)
     return app
 
 

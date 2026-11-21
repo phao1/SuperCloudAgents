@@ -2613,3 +2613,14 @@ class Store:
                      "turn": row["turn"], "plan_attempt": row["plan_attempt"]},
                     f"user.message.{row['id']}.applied",
                 )
+
+    # Task execution DAG
+    async def list_task_children(self, task_id: UUID) -> list[Task]:
+        if self.tenant_id is None:
+            raise ValueError("Task graph lookup requires a tenant")
+        async with self._transaction() as session:
+            rows = (await session.execute(select(tasks).where(
+                tasks.c.tenant_id == self.tenant_id,
+                tasks.c.result["parent_task_id"].astext == str(task_id),
+            ).order_by(tasks.c.created_at, tasks.c.id))).mappings()
+            return [Task.model_validate(dict(row)) for row in rows]

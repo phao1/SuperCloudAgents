@@ -6,7 +6,7 @@ import asyncio
 import json
 import shutil
 from contextlib import suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from decimal import Decimal
 
 from temporalio import activity
@@ -26,10 +26,12 @@ from sca.kinds.coding.best_of import (
     Candidate,
     RecordAttempt,
     SelectAttempt,
+    SubtaskAttempts,
     allocate_attempts,
     candidate_key,
     parse_diff_stats,
 )
+from sca.kinds.coding.spec import BestOfSpec, CodingSpec
 from sca.kinds.coding.subtasks import ChildActivities, ChildStore
 from sca.workspace.overlay import OverlayWorkspace
 from sca.workspace.snapshots import preparation_key
@@ -47,13 +49,15 @@ class AttemptStore(ChildStore):
         task = await super().get_task(task_id)
         spec = {**task.spec, "model": self.attempt.model, "agent_version": self.attempt.agent_version,
                 "max_cost_usd": self.attempt.max_cost_usd, "best_of": None}
-        usage = {k.removeprefix(self.prefix): v for k, v in task.usage.items()
-                 if k.startswith(self.prefix)}
+        prefix = self.usage_prefix
+        usage = {k.removeprefix(prefix): v for k, v in task.usage.items() if k.startswith(prefix)}
         return task.model_copy(update={"spec": spec, "usage": usage})
 
     async def add_usage(self, task_id: str, usage: dict[str, int]) -> None:
         # Keep tenant totals and the attempt's allowance in sync in one Store write.
-        await self.store.add_usage(task_id, {**usage, **{self.prefix + k: v for k, v in usage.items()}})
+        await self.store.add_usage(
+            task_id, {**usage, **{self.usage_prefix + k: v for k, v in usage.items()}},
+        )
 
     async def check_budget(self, task_id: str) -> str | None:
         reason = await self.store.check_budget(task_id)
@@ -80,11 +84,12 @@ class AttemptStore(ChildStore):
         elif type_ == EventType.VERIFICATION_COMPLETED:
             await self.update_result(task_id, {"verification": payload})
             if payload.get("log_artifact"):
-                payload = {**payload, "log_artifact": f"subtask-{self.name}-{payload['log_artifact']}"}
+                payload = {**payload, "log_artifact": self.artifact_name(payload["log_artifact"])}
         elif type_ == "intents.checked":
             await self.update_result(task_id, {"intent_verification": payload})
+        number = self.attempt.attempt
         return await self.store.append_event(
-            task_id, type_, {**payload, "best_of_attempt": self.attempt.attempt},
+            task_id, type_, {**payload, "best_of_attempt": number, "best_of_candidate": number},
             dedup_key=f"{self.name}.{dedup_key}" if dedup_key else None,
         )
 
@@ -99,7 +104,7 @@ class AttemptActivities(ChildActivities):
     ) -> AgentContext:
         context = super()._agent_ctx(task_id, spec, champion)
         # The OpenCode brain pool uses this identity to route tools and session state.
-        return context.model_copy(update={"task_id": f"{task_id}-{self.name}"})
+        return context.model_copy(update={"task_id": f"{task_id}-{self.scope}"})
 
     async def run_verification(self, inp: StepInput) -> VerifyResult:
         if not (await self.store.get_task(inp.task_id)).result.get("intents"):
@@ -115,18 +120,39 @@ class BestOfActivities:
         self.store = coding.store
 
     def all(self) -> list:
-        return [self.start, self.step, self.record, self.adopt, self.cleanup]
+        return [self.start, self.step, self.record, self.adopt, self.cleanup,
+                self.start_subtask, self.cleanup_subtask]
+
+    def _for_subtask(self, name: str) -> BestOfActivities:
+        return BestOfActivities(ChildActivities(self.coding, name))
+
+    @activity.defn(name="coding.best_of_subtask_start")
+    async def start_subtask(self, inp: SubtaskAttempts) -> list[Attempt]:
+        scoped = self._for_subtask(inp.name)
+        spec = await scoped.coding._spec(inp.task_id)
+        task = await scoped.store.get_task(inp.task_id)
+        remaining = spec.max_cost_usd
+        if remaining is not None:
+            spent = Decimal(task.usage.get("cost_micro_usd", 0)) / MICRO_USD
+            remaining = float(max(Decimal(0), Decimal(str(remaining)) - spent))
+        if scoped.coding._backend(spec).name == "fake":
+            remaining = None  # Scripted turns do not use a model. Parent budget checks still apply.
+        spec = spec.model_copy(update={"best_of": BestOfSpec(n=inp.n), "max_cost_usd": remaining})
+        return await scoped._start(inp.task_id, spec, f"best-of:{inp.task_id}:{inp.name}")
 
     @activity.defn(name="coding.best_of_start")
     async def start(self, task_id: str) -> list[Attempt]:
         spec = await self.coding._spec(task_id)
+        return await self._start(task_id, spec, f"best-of:{task_id}")
+
+    async def _start(self, task_id: str, spec: CodingSpec, snapshot_scope: str) -> list[Attempt]:
         attempts = allocate_attempts(spec, self.coding.settings.default_model)
         if self.coding.gateway is None and any(a.max_cost_usd is not None for a in attempts):
             raise _non_retryable(InvalidTaskError("Best-of-N cost limits require the model gateway"))
         task = await self.store.get_task(task_id)
         ws = self.coding._workspace(task_id)
         base = task.result["base_sha"]
-        key = preparation_key(task.tenant_id, f"best-of:{task_id}", base, "", "")
+        key = preparation_key(task.tenant_id, snapshot_scope, base, "", "")
         sandbox_id = task.result["sandbox_id"]
         snapshot = await self.coding._snapshots().publish(
             key, self.coding.sandbox.download(sandbox_id, "/workspace/."), base_commit=base,
@@ -151,6 +177,8 @@ class BestOfActivities:
 
     @activity.defn(name="coding.best_of_step")
     async def step(self, inp: AttemptStep) -> dict:
+        if inp.subtask is not None:
+            return await self._for_subtask(inp.subtask).step(replace(inp, subtask=None))
         child = AttemptActivities(self.coding, inp.attempt)
         if inp.step.action == "prepare":
             await self._prepare(child, await self.store.get_task(inp.step.task_id))
@@ -167,7 +195,10 @@ class BestOfActivities:
         if snapshot is None or snapshot["base_commit"] != base:
             raise WorkspaceError("Prepared Best-of-N snapshot is unavailable")
         (ws.task_dir / "workspace.ready").write_text(base)
-        await child.store.update_result(task_id, {"base_sha": base, "branch": ws.branch})
+        await child.store.update_result(task_id, {
+            "base_sha": base, "branch": ws.branch,
+            **({"scope": task.result["scope"]} if "scope" in task.result else {}),
+        })
         await child.store.append_event(task_id, "workspace.forked", {"snapshot_id": snapshot["id"]},
                                        dedup_key="workspace.forked")
         sandbox_id = await child.create_sandbox(task_id)
@@ -181,6 +212,8 @@ class BestOfActivities:
 
     @activity.defn(name="coding.best_of_record")
     async def record(self, inp: RecordAttempt) -> Candidate:
+        if inp.subtask is not None:
+            return await self._for_subtask(inp.subtask).record(replace(inp, subtask=None))
         task = await self.store.get_task(inp.task_id)
         attempt = inp.attempt.attempt
         plan = task.result[PLAN_KEY][attempt - 1]
@@ -198,6 +231,8 @@ class BestOfActivities:
             patch = (await ws._git(*args, "--binary", *range_)).encode()
             patch_name = f"{inp.attempt.name}.patch"
             await self.coding._publish_artifact(inp.task_id, patch_name, patch, "text/x-diff")
+            if isinstance(self.store, ChildStore):
+                patch_name = self.store.artifact_name(patch_name)
             detail = scoped.result.get("verification", {})
             turn = scoped.result.get("checkpoint_turn")
             if detail and detail.get("turn") == turn:
@@ -220,6 +255,9 @@ class BestOfActivities:
 
     @activity.defn(name="coding.best_of_adopt")
     async def adopt(self, inp: SelectAttempt) -> None:
+        if inp.subtask is not None:
+            await self._for_subtask(inp.subtask).adopt(replace(inp, subtask=None))
+            return
         task_id = inp.task_id
         task = await self.store.get_task(task_id)
         candidate = task.result[candidate_key(inp.attempt)]
@@ -264,3 +302,7 @@ class BestOfActivities:
             (directory / SNAPSHOT_PIN).rmdir()
         for path in (directory / "sub").glob("best-of-[1-5]"):
             await asyncio.to_thread(shutil.rmtree, path)
+
+    @activity.defn(name="coding.best_of_subtask_cleanup")
+    async def cleanup_subtask(self, inp: SubtaskAttempts) -> None:
+        await self._for_subtask(inp.name).cleanup(inp.task_id)

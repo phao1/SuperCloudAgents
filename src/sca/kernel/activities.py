@@ -937,7 +937,7 @@ class KernelActivities:
 
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):
-            key_alias += f"-{self.name}"
+            key_alias += f"-{getattr(self, 'scope', self.name)}"
         if self.gateway:
             # The credential lives exactly as long as the turn and never enters the
             # workflow history.
@@ -952,6 +952,7 @@ class KernelActivities:
         with metric_guard():
             task_kind = (await self.store.get_task(task_id)).kind
         final_message = ""
+        spend = None
         cost_final = False
         turn_error: AgentTurnError | ModelProviderError | None = None
         provider_error: ModelProviderError | None = None
@@ -1053,7 +1054,6 @@ class KernelActivities:
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
             if self.gateway and issued:
                 finalize = getattr(self.gateway, "finalize_key", None)
-                spend = None
                 try:
                     if finalize is not None:
                         spend, cost_final = await asyncio.shield(finalize(key_alias))
@@ -1087,7 +1087,8 @@ class KernelActivities:
         await self.store.append_event(
             task_id,
             EventType.AGENT_TURN_COMPLETED,
-            {"turn": turn, "final_message": final_message, "cost_final": cost_final},
+            {"turn": turn, "final_message": final_message, "cost_final": cost_final,
+             **({"cost_usd": spend or 0.0} if spend is not None or cost_final else {})},
             dedup_key=f"{key}.completed",
         )
         return TurnResult(session_id=session_id, final_message=final_message)

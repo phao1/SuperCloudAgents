@@ -46,6 +46,7 @@ with workflow.unsafe.imports_passed_through():
         Candidate,
         RecordAttempt,
         SelectAttempt,
+        SubtaskAttempts,
         choose_candidate,
     )
     from sca.kinds.coding.spec import subtask_order
@@ -552,6 +553,9 @@ class CodingSubtaskWorkflow:
     async def run(self, task_id: str, subtask: dict, spec: dict) -> SubtaskResult:
         name = subtask["name"]
         attempt = Attempt(**subtask["attempt"]) if "attempt" in subtask else None
+        owner = subtask.get("_best_of_parent")
+        scope = owner["name"] if owner else None
+        best_of = subtask.get("best_of")
         result = SubtaskResult(
             name, branch=f"sca/{task_id[:8]}-{name}", depends_on=subtask.get("depends_on", []),
         )
@@ -565,16 +569,16 @@ class CodingSubtaskWorkflow:
                 no_retry.update({"prepare", "run_agent_turn"})
             return await workflow.execute_activity(
                 "coding.best_of_step" if attempt is not None else "coding.subtask_step",
-                AttemptStep(attempt, inp) if attempt is not None else inp,
+                AttemptStep(attempt, inp, scope) if attempt is not None else inp,
                 start_to_close_timeout=timedelta(seconds=max(spec["turn_timeout_s"] + 60, 1800)),
                 heartbeat_timeout=timedelta(seconds=spec.get("turn_heartbeat_timeout_s", 120)),
                 retry_policy=_NO_RETRY if action in no_retry else _retry(3),
                 cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
             )
 
-        if attempt is None:
+        if attempt is None or owner is not None:
             prompt = await workflow.execute_activity(
-                "coding.subtask_prompt", args=[spec, subtask], **_QUICK,
+                "coding.subtask_prompt", args=[spec, owner or subtask], **_QUICK,
             )
         else:
             prompt = await workflow.execute_activity("render_initial_prompt", spec, **_QUICK)
@@ -606,6 +610,8 @@ class CodingSubtaskWorkflow:
                 await step("prepare")
             if attempt is None and (spec.get("setup_command") or spec.get("_intent_setup")):
                 await step("run_setup")
+            if best_of:
+                return await _run_subtask_attempts(task_id, subtask, spec, context, result)
             for turn in range(1, spec["max_fix_attempts"] + 2):
                 budget = await step("check_budget", turn)
                 if budget.get("reason"):
@@ -622,6 +628,7 @@ class CodingSubtaskWorkflow:
                         raise ApplicationError(
                             budget["reason"], type="BudgetExceeded", non_retryable=True
                         )
+                if attempt is None or scope is not None:
                     result.reason = checkpoint.get("scope_feedback")
                     if result.reason:
                         result.passed = False
@@ -644,12 +651,72 @@ class CodingSubtaskWorkflow:
         finally:
             if result.status != "blocked":
                 try:
-                    if (attempt is None and spec.get("_context_notes") is not None
+                    if (attempt is None and not best_of and spec.get("_context_notes") is not None
                             and spec.get("memory_enabled")):
                         await step("collect_memory_proposals")
                 finally:
                     await step("destroy_sandbox")
         return result
+
+
+# Best-of-N inside a planned subtask
+async def _run_subtask_attempts(
+    task_id: str, subtask: dict, spec: dict, context: str, result: SubtaskResult,
+) -> SubtaskResult:
+    name = subtask["name"]
+    batch = SubtaskAttempts(task_id, name, subtask["best_of"]["n"])
+    owner = {"name": name, "instruction": subtask["instruction"]}
+    scoped_spec = {**spec, "_context_notes": context}
+
+    async def run_attempt(attempt: Attempt) -> Candidate:
+        try:
+            outcome = await workflow.execute_child_workflow(
+                CodingSubtaskWorkflow.run,
+                args=[task_id, {"name": attempt.name, "attempt": asdict(attempt),
+                                "_best_of_parent": owner}, scoped_spec],
+                id=f"task-{task_id}-attempt-{name}-{attempt.attempt}",
+                cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
+            )
+        except ChildWorkflowError as exc:
+            if is_cancelled_exception(exc) or patched_provider_account_error(exc):
+                raise
+            outcome = SubtaskResult(attempt.name, reason=str(exc.cause))
+        return await workflow.execute_activity(
+            "coding.best_of_record", RecordAttempt(task_id, attempt, outcome, name),
+            result_type=Candidate, start_to_close_timeout=timedelta(minutes=5),
+            retry_policy=_retry(3),
+        )
+
+    try:
+        attempts = await workflow.execute_activity(
+            "coding.best_of_subtask_start", batch, result_type=list[Attempt],
+            start_to_close_timeout=timedelta(minutes=15), retry_policy=_retry(3),
+        )
+        candidates = await asyncio.gather(*(run_attempt(attempt) for attempt in attempts),
+                                          return_exceptions=True)
+        for candidate in candidates:
+            if isinstance(candidate, BaseException):
+                raise candidate
+        chosen = choose_candidate(candidates)
+        if chosen is None or not chosen.passed:
+            result.reason = "No Best-of-N attempt passed subtask verification"
+            return result
+        await workflow.execute_activity(
+            "coding.best_of_adopt", SelectAttempt(task_id, chosen.attempt, subtask=name),
+            start_to_close_timeout=timedelta(minutes=10), retry_policy=_retry(3),
+        )
+        result.commit = chosen.commit or ""
+        result.changed = bool(chosen.diff_stats and chosen.diff_stats.files_changed)
+        result.passed = True
+        return result
+    finally:
+        try:
+            await workflow.execute_activity(
+                "coding.best_of_subtask_cleanup", batch,
+                start_to_close_timeout=timedelta(minutes=5), retry_policy=_retry(3),
+            )
+        except ActivityError:
+            workflow.logger.warning("could not clean up subtask Best-of-N workspaces")
 
 
 # Phase 6 subtask dependency scheduling
