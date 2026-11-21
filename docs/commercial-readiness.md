@@ -51,3 +51,9 @@ curl -fsS "$SCA_API_URL/v1/usage/export.csv" \
 | 设计稿和工单上下文 | 成员把 Figma、设计 Token 或外部工单加入编码任务，查看生成的检查和终态回写结果。 | `POST /v1/files`、`POST /v1/tasks` 的 `spec.intents`，Portal「提交任务」。 | `test_figma_compile_through_kernel`、`test_jira_read_and_write_outcome`、`test_linear_paginated_ticket_attachments_and_graphql_writeback`。[配置与验证](intents.md) | 远程服务采用模拟 API 验证。现场需客户提供相应服务凭证和测试数据。 |
 | 实时终端 | 任务查看者可在支持的 OpenCode 脑手分离部署查看沙箱输出。 | `GET /v1/tasks/{id}/terminal`，Portal「任务进度 → 观看输出」。 | `test_tenant_viewer_terminal_sse_and_live_input`、`test_brain_tool_transport_and_latency`。[终端与传输用例](../tests/unit/test_brain_handd.py) | 有终端 SSE 与 PTY 传输测试。需在目标 `opencode-brain` 和 `SCA_SANDBOX_HANDD=true` 的部署复验。 |
 | Portal | 平台管理员能创建、管理租户。租户管理员能管理团队、配额、用量、账单、工具和集成。成员能提交、审阅、查看候选和影响，只读角色可查看获准的任务。 | `/portal` 的「平台管理」「团队与用量」「工具与知识库」「集成」「提交任务」「任务进度」「自动演进」。 | `test_phase6_portal_navigation_and_local_assets`、`test_portal_phase6_browser_submission`、`test_portal_quota_with_real_admission_and_usage`。[界面用例](../tests/unit/test_portal_phase6_static.py) · [Portal 现场记录](../Milestone/portal-run-2026-11-19.md) | 有导航、模拟 API 的表单和权限用例，以及早期评测 Portal 的现场记录。烟测通过 HTTP 验证业务接口，新增页面需用目标部署的各角色在浏览器中验收。 |
+
+## 现场烟测记录（2026-11-21）
+
+`scripts/commercial_smoke.py --api http://127.0.0.1:8000`（单机演示部署，提交 9964fd0 之后）：12 项 PASS、0 FAIL、3 项 SKIP。
+SKIP：`coding`、`coding-review`（DeepSeek 账户余额不足，模型调用返回 402，待充值后用 `--with-agent --repo` 补跑；
+同类流程此前已现场通过，见 docs/scm.md）；`stripe-checkout`（未配置 Stripe 测试密钥，假 Stripe 现场验证见 docs/operations.md）。
