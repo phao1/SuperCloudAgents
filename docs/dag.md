@@ -11,6 +11,18 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/dag" \
 
 返回 `nodes` 和 `edges`。每条边包含 `from`、`to` 和 `kind`。五种边分别表示执行顺序（`sequence`）、子任务依赖（`dependency`）、派生（`spawn`）、候选选择（`select`）和合并（`merge`）。`merge` 节点的 `meta.action` 表示候选选择或子任务合并。`tool_group` 节点的 `meta` 包含工具列表和按名称统计的调用次数。费用单位为美元，耗时单位为秒。
 
+## 进行中的任务工作区
+
+更新 Worker 后，已有的子工作区继续使用原路径。以 `SCA_DATA_DIR/tasks/<id>/sub/` 为基准，
+规划器、普通子任务和任务级 Best-of-N 候选的目录分别为 `plan-<n>`、`<name>` 和
+`best-of-<n>`。子任务内的 Best-of-N 候选使用 `<name>/sub/best-of-<n>`。
+使用原任务 ID 查询状态，也可在 Portal 查看执行图。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
 ## 运行脚本化演示
 
 启动部署的 API 和 Worker，并提供可提交、插话和审核的租户令牌。使用 Worker 能读取的临时 Git 仓库。下例适用于 Worker 和脚本在同一台机器的场景。

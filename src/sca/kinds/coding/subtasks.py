@@ -130,6 +130,9 @@ class _CheckpointTransport:
 
 
 class ChildActivities(CodingActivities):
+    # Instances restored from before nested subtasks have no parent in their state.
+    _parent: ChildActivities | None = None
+
     def __init__(self, parent: CodingActivities, name: str) -> None:
         super().__init__(
             settings=parent.settings,
@@ -144,9 +147,13 @@ class ChildActivities(CodingActivities):
         )
         self.name = name
         self._parent = parent if isinstance(parent, ChildActivities) else None
-        self.scope = name
-        if self._parent is not None:
-            self.scope = "nested." + hashlib.sha256(f"{parent.name}/{name}".encode()).hexdigest()[:12]
+
+    @property
+    def scope(self) -> str:
+        if self._parent is None:
+            return self.name
+        names = f"{self._parent.name}/{self.name}".encode()
+        return "nested." + hashlib.sha256(names).hexdigest()[:12]
 
     async def run_step(self, inp: SubtaskInput) -> dict:
         if inp.action in {"run_setup", "destroy_sandbox"}:
