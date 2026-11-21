@@ -68,7 +68,38 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 
 ## Portal demo (OpenCode eval → fix → rebuild)
 
-在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Python 3.12、Git、Docker Compose、
+### Portal 快速启动
+
+两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
+用启动时生成的令牌登录。
+
+```bash
+# Docker 模式，首次安装并启动
+bash scripts/portal_demo.sh setup --mode docker
+# Docker 模式，后续启动
+bash scripts/portal_demo.sh up --mode docker
+
+# 源码模式，首次 up 会准备依赖并启动全部本机服务
+bash scripts/portal_demo.sh up --mode source
+bash scripts/portal_demo.sh status
+bash scripts/portal_demo.sh down
+```
+
+也可设置 `SCA_RUNTIME_MODE=docker` 或 `SCA_RUNTIME_MODE=source`。
+省略两种设置时，脚本优先使用可用的 Docker，否则会提示并进入源码模式。
+源码模式的系统依赖和 API 示例见 [运维文档](docs/operations.md#源码模式)。
+
+| 能力 | Docker 模式 | 源码模式 |
+| --- | --- | --- |
+| 任务隔离 | 每任务一个容器，支持出口白名单 | 本机进程，无隔离，出口白名单不生效 |
+| OpenCode 冠军覆盖 | 支持运行时覆盖和构建固化 | 支持运行时覆盖，固化需要 Docker |
+| Kubernetes | 独立部署可选用 K8s 沙箱驱动 | 使用本机沙箱 |
+
+**本地源码模式：任务在本机直接运行，无隔离，仅限个人试用**
+
+### Docker 演示环境
+
+在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Docker Compose、
 至少 15 GB 可用磁盘和足够内存（OpenCode 单次构建上限 2.5 GB，其他服务另需内存）。
 macOS 先安装 GNU timeout：`brew install coreutils`。Apple Silicon 使用 Linux arm64
 镜像和该架构的 OpenCode 构建。
@@ -94,7 +125,7 @@ make portal-down                     # 停止 API 与 worker
 bash scripts/portal_demo.sh down --all # 同时停止 Compose，保留数据库卷
 ```
 
-配置保存在 `.data/portal.env`，PID 与日志在 `.data/run/`，OpenCode 缓存、源码和版本在
+启动配置保存在 `.data/portal.env`，PID 与日志在 `.data/run/`，OpenCode 缓存、源码和版本在
 `.data/opencode/`。不要分享 `.env`、`.data/portal.env` 或日志。远程访问使用
 `ssh -L 8000:127.0.0.1:8000 host`，然后在本地浏览器打开 Portal。演示使用真实模型，会产生费用。
 

@@ -108,8 +108,8 @@ class Settings(BaseSettings):
     agent_backend: str = "codex"
     default_model: str = "gpt-6.1-sol"
 
-    # Which sandbox driver the worker uses. The model gateway is supported with docker only.
-    sandbox_driver: Literal["docker", "k8s"] = "docker"
+    # The model gateway is wired up for Docker and local sandboxes.
+    sandbox_driver: Literal["docker", "k8s", "local"] = "docker"
     kubectl_bin: str = "kubectl"
     k8s_pool_size: int = 0
     k8s_context: str | None = None
@@ -211,7 +211,7 @@ class Settings(BaseSettings):
                                            (self.model_gateway_url.rstrip("/") + "/v1"
                                             if self.model_gateway_url else None))
         root = self.data_dir.resolve() / "opencode"
-        self.opencode_versions_dir = self.opencode_versions_dir or root / "bin"
+        self.opencode_versions_dir = self.opencode_versions_dir or self._opencode_binary_root(root)
         self.opencode_repo_url = self.opencode_repo_url or str(root / "opencode.git")
         self.opencode_src_cache = self.opencode_src_cache or root / "src"
         return self
@@ -277,6 +277,25 @@ class Settings(BaseSettings):
         self.billing_success_url = self.billing_success_url or AnyHttpUrl(team_url)
         self.billing_cancel_url = self.billing_cancel_url or AnyHttpUrl(team_url)
         return self
+
+    # Local source mode
+    def _opencode_binary_root(self, root: Path) -> Path:
+        if self.sandbox_driver == "local":
+            return self.data_dir.resolve() / "bin" / "opencode"
+        return root / "bin"
+
+    @model_validator(mode="after")
+    def local_sandbox_defaults(self) -> Settings:
+        if self.sandbox_driver == "local":
+            self.state_transport = "sync"
+            if "opencode_default_version" not in self.model_fields_set:
+                self.opencode_default_version = SOURCE_OPENCODE_VERSION
+        return self
+
+
+# Local source mode
+SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"
+SOURCE_MODE_WARNING = "本地源码模式：任务在本机直接运行，无隔离，仅限个人试用"
 
 
 @lru_cache

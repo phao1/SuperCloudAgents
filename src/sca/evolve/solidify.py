@@ -21,7 +21,12 @@ from temporalio.exceptions import (
 with workflow.unsafe.imports_passed_through():
     from sqlalchemy.exc import NoResultFound
 
-    from sca.agents.opencode_build import records_dir, run_command, write_record
+    from sca.agents.opencode_build import (
+        records_dir,
+        reject_source_build,
+        run_command,
+        write_record,
+    )
     from sca.agents.opencode_prompt import version_commit
     from sca.config import Settings
     from sca.core.models import AgentOverlay
@@ -136,6 +141,7 @@ class ChampionSolidifyActivities:
     @activity.defn(name="champion_solidify_prepare")
     async def prepare(self, request: dict) -> dict:
         record = request["record"]
+        reject_source_build(self.settings, record)
         champion_id = UUID(record["labels"]["champion_id"])
         store = self.store.for_tenant(record["tenant_id"])
         failure = "无法读取冠军的基线版本或覆盖内容"

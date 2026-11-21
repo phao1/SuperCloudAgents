@@ -157,8 +157,8 @@ def create_app(
     from sca.api.portal import router as portal_router
 
     @app.get("/portal", include_in_schema=False)
-    async def portal() -> FileResponse:
-        return FileResponse(Path(__file__).parent / "static" / "portal.html")
+    async def portal() -> Response:
+        return _portal_page(settings)
 
     @app.get("/portal/architecture", include_in_schema=False)
     async def portal_architecture() -> FileResponse:
@@ -251,3 +251,17 @@ def _register_scm(app: FastAPI, settings: Settings) -> None:
     app.state.scm_service = ScmService(settings, make_secret_provider(settings))
     app.include_router(integrations_router)
     app.include_router(webhooks_router)
+
+
+# Local source mode
+def _portal_page(settings: Settings) -> Response:
+    path = Path(__file__).parent / "static" / "portal.html"
+    if getattr(settings, "sandbox_driver", "docker") == "local":
+        from fastapi.responses import HTMLResponse
+
+        from sca.config import SOURCE_MODE_WARNING
+
+        page = path.read_text(encoding="utf-8")
+        banner = f'<p class="provider-error-banner" role="alert">{SOURCE_MODE_WARNING}</p>'
+        return HTMLResponse(page.replace("<!-- source mode warning -->", banner))
+    return FileResponse(path)

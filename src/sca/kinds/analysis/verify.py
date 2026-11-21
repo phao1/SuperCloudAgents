@@ -11,7 +11,7 @@ import sys
 import tempfile
 from urllib.parse import unquote, urlsplit
 
-root = pathlib.Path('/workspace')
+root = pathlib.Path.cwd()
 def git(*args, cwd=root):
     return subprocess.check_output(['git', '-c', 'core.hooksPath=/dev/null',
         '-c', 'core.fsmonitor=false', *args], cwd=cwd)

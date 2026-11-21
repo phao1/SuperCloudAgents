@@ -13,7 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import NoResultFound
 from temporalio.service import RPCError
 
-from sca.agents.opencode_build import records_dir, reserve_build, write_record
+from sca.agents.opencode_build import (
+    DOCKER_BUILD_REQUIRED,
+    records_dir,
+    reserve_build,
+    write_record,
+)
 from sca.agents.opencode_prompt import (
     PROMPT_MODELS,
     PROMPT_PATH,
@@ -272,6 +277,8 @@ async def fixes_list(
 async def fixes(
     body: FixRequest, request: Request, user: Annotated[Principal, Depends(authorize("submit"))]
 ) -> Task:
+    settings = get_settings()
+    _require_docker_build(settings)
     store = request.app.state.store.for_tenant(user.tenant_id)
     task = await store.get_task(body.failing_task_id, user.tenant_id)
     if task.kind != "coding":
@@ -291,7 +298,6 @@ async def fixes(
         if len(batch) < 500:
             break
         cursor = batch[-1].seq
-    settings = get_settings()
     if run is None:
         spec = fix_spec(settings, task, events, body)
     else:
@@ -346,6 +352,7 @@ async def builds_start(
     body: BuildRequest, request: Request, user: Annotated[Principal, Depends(authorize("quota"))]
 ) -> dict:
     settings = get_settings()
+    _require_docker_build(settings)
     ref = body.ref or "main"
     labels = {}
     build_fields = {}
@@ -484,10 +491,11 @@ async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> d
 async def solidify(
     champion_id: UUID, request: Request, user: Admin, body: SolidifyRequest | None = None,
 ) -> dict:
+    settings = get_settings()
+    _require_docker_build(settings)
     champion = await _champion(request, user, champion_id)
     if not champion.get("candidate_id"):
         raise HTTPException(409, "冠军缺少原始评测记录")
-    settings = get_settings()
     source_version = champion["agent_version"]
     branch = champion_branch(champion_id)
     record = reserve_build(
@@ -520,3 +528,9 @@ async def set_default_version(version: str, request: Request, user: Admin) -> di
         raise NotFoundError("OpenCode 版本不存在或尚未完成构建") from None
     await store.set_default_opencode_version(version)
     return {"version": version}
+
+
+# Local source mode
+def _require_docker_build(settings: Settings) -> None:
+    if settings.sandbox_driver == "local":
+        raise HTTPException(409, DOCKER_BUILD_REQUIRED)

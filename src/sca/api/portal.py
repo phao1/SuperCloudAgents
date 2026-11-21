@@ -19,7 +19,7 @@ from sca.admission.order import tenant_slot_limit
 from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_PATH, PROMPT_SUITE
 from sca.api.authz import ForbiddenError, authorize, platform_admin_store, principal
 from sca.api.evals import can_rescore
-from sca.config import get_settings
+from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
 from sca.db.schema import plans, tasks, tenants, usage_daily
@@ -38,8 +38,8 @@ async def set_provider_key(body: ProviderKey, request: Request,
                            user: Annotated[Principal, Depends(authorize('quota'))]) -> dict:
     """Configure the local demo gateway; this capability is opt-in and administrator-only."""
     config = os.environ.get('SCA_PORTAL_LOCAL_CONFIG')
-    docker = os.environ.get('SCA_DOCKER_BIN')
-    if not config or not docker or not request.client or request.client.host not in ('127.0.0.1', '::1'):
+    command = _restart_gateway_command(config)
+    if not command or not request.client or request.client.host not in ('127.0.0.1', '::1'):
         raise HTTPException(status_code=403, detail='本地配置不可用')
     key = body.key.get_secret_value()
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,256}', key):
@@ -50,9 +50,7 @@ async def set_provider_key(body: ProviderKey, request: Request,
         path.chmod(0o600)
         try:
             process = await asyncio.create_subprocess_exec(
-                docker, 'compose', '--env-file', str(path), '-f',
-                str(path.parent / 'deploy/docker-compose.yml'), '--profile', 'gateway',
-                'up', '-d', '--no-deps', '--force-recreate', 'litellm',
+                *command,
                 stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
             )
         except OSError:
@@ -127,8 +125,9 @@ async def config(request: Request,
             "can_rescore": can_rescore(user),
             "prompt_evolution": {"suite": PROMPT_SUITE, "models": PROMPT_MODELS, "path": PROMPT_PATH},
             "can_configure_model": user.tenant_id == "eval" and user.role == "admin" and not user.scopes
-            and bool(os.environ.get("SCA_PORTAL_LOCAL_CONFIG") and os.environ.get("SCA_DOCKER_BIN"))
-            and bool(request.client and request.client.host in ("127.0.0.1", "::1"))}
+            and bool(_restart_gateway_command(os.environ.get("SCA_PORTAL_LOCAL_CONFIG")))
+            and bool(request.client and request.client.host in ("127.0.0.1", "::1")),
+            **(_source_config(settings) if settings.sandbox_driver == "local" else {})}
 
 
 # Phase 6 Portal
@@ -212,3 +211,31 @@ async def tenant_quota(
         slots_limit=tenant_slot_limit(plan["max_active_tasks"], plan["max_concurrent_tasks"]),
         queued=queued, queued_limit=request.app.state.settings.tenant_max_queued,
     )
+
+
+# Local source mode
+def _source_config(settings: Settings) -> dict:
+    from sca.agents.local import SOURCE_BACKENDS, host_agent_binary, unavailable_source_backend
+
+    backends, unavailable = [], {}
+    for name in SOURCE_BACKENDS:
+        if host_agent_binary(settings, name) is not None:
+            backends.append(name)
+        else:
+            unavailable[name] = unavailable_source_backend(name)
+    if settings.agent_backend == "fake":
+        backends.append("fake")
+    return {"agent_backends": backends, "unavailable_agent_backends": unavailable,
+            "warning": SOURCE_MODE_WARNING}
+
+
+def _restart_gateway_command(config: str | None) -> list[str]:
+    if not config:
+        return []
+    root = Path(config).parent
+    if os.environ.get("SCA_RUNTIME_MODE") == "source":
+        return ["bash", str(root / "scripts/portal_demo.sh"), "restart-gateway"]
+    if docker := os.environ.get("SCA_DOCKER_BIN"):
+        return [docker, "compose", "--env-file", config, "-f", str(root / "deploy/docker-compose.yml"),
+                "--profile", "gateway", "up", "-d", "--no-deps", "--force-recreate", "litellm"]
+    return []

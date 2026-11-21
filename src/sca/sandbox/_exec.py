@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import aclosing
 from uuid import uuid4
 
 from sca.core.errors import SandboxError
@@ -35,30 +36,6 @@ async def stream_exec(
         )
     except OSError as exc:
         raise SandboxError(str(exc)) from exc
-    queue: asyncio.Queue[ExecOutput | None] = asyncio.Queue()
-
-    async def read(stream: asyncio.StreamReader, name: str) -> None:
-        pending = b""
-        try:
-            while chunk := await stream.read(65536):
-                pending += chunk
-                while b"\n" in pending:
-                    line, pending = pending.split(b"\n", 1)
-                    await queue.put(ExecOutput(stream=name, text=line.decode(errors="replace")))
-            if pending:
-                await queue.put(ExecOutput(stream=name, text=pending.decode(errors="replace")))
-        finally:
-            await queue.put(None)
-
-    async def write() -> None:
-        try:
-            if stdin:
-                proc.stdin.write(stdin)
-                await proc.stdin.drain()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
-        finally:
-            proc.stdin.close()
 
     async def cleanup(kill: bool) -> None:
         script = (
@@ -79,6 +56,45 @@ async def stream_exec(
             except ProcessLookupError:
                 pass
         await proc.wait()
+
+    async with aclosing(stream_process(proc, cleanup, stdin=stdin, timeout_s=timeout_s)) as events:
+        async for event in events:
+            yield event
+
+
+async def stream_process(
+    proc: asyncio.subprocess.Process,
+    cleanup: Callable[[bool], Awaitable[None]],
+    *,
+    stdin: bytes | None = None,
+    timeout_s: float | None = None,
+) -> AsyncIterator[ExecEvent]:
+    assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+    writer = proc.stdin
+    queue: asyncio.Queue[ExecOutput | None] = asyncio.Queue()
+
+    async def read(stream: asyncio.StreamReader, name: str) -> None:
+        pending = b""
+        try:
+            while chunk := await stream.read(65536):
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    await queue.put(ExecOutput(stream=name, text=line.decode(errors="replace")))
+            if pending:
+                await queue.put(ExecOutput(stream=name, text=pending.decode(errors="replace")))
+        finally:
+            await queue.put(None)
+
+    async def write() -> None:
+        try:
+            if stdin:
+                writer.write(stdin)
+                await writer.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        finally:
+            writer.close()
 
     tasks = [
         asyncio.create_task(read(proc.stdout, "stdout")),

@@ -74,12 +74,14 @@ class CodexBackend:
     name = "codex"
     state_transport = "mount"
 
-    def __init__(self, bin_dir: Path, auth_file: Path | None, default_model: str):
+    def __init__(self, bin_dir: Path, auth_file: Path | None, default_model: str,
+                 *, executable: str = "/opt/codex/codex"):
         """auth_file=None is gateway mode: no credential is mounted, and each turn must
         carry a model_base_url and model_api_key in its context."""
         self.bin_dir = bin_dir.expanduser().resolve()
         self.auth_file = auth_file.expanduser().resolve() if auth_file else None
         self.default_model = default_model
+        self.executable = executable
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         home = Path(ctx.agent_home_host)
@@ -113,7 +115,7 @@ class CodexBackend:
         session_id: str | None,
         timeout_s: float,
     ) -> AsyncIterator[AgentEvent]:
-        argv = ["/opt/codex/codex", "exec"]
+        argv = [self.executable, "exec"]
         if session_id:
             argv += ["resume", session_id]
         argv += [

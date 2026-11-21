@@ -176,7 +176,7 @@ class PlanningActivities:
             )
             exit_event, output = await child._run(
                 sandbox_id,
-                ["bash", "-lc", "set -o pipefail; head -c 65537 .sca/plan.json | base64 -w0"],
+                ["bash", "-lc", "set -o pipefail; head -c 65537 .sca/plan.json | base64 | tr -d '\\n'"],
                 timeout_s=30,
             )
             if exit_event.exit_code:

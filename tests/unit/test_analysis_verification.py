@@ -71,9 +71,10 @@ def test_clean_checkout_verification(tmp_path, failure):
         [
             sys.executable,
             "-c",
-            SCRIPT.replace("pathlib.Path('/workspace')", f"pathlib.Path({str(root)!r})"),
+            SCRIPT,
             base,
         ],
+        cwd=root,
         check=False,
         capture_output=True,
         text=True,

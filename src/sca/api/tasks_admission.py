@@ -33,6 +33,13 @@ async def submit(
         spec = kind.spec_model.model_validate(body.spec)
     except ValidationError as exc:
         raise InvalidTaskError(str(exc)) from exc
+    settings = getattr(request.app.state, "settings", None)
+    if getattr(settings, "sandbox_driver", None) == "local":
+        from sca.agents.local import host_agent_binary, unavailable_source_backend
+
+        backend = spec.agent_backend or settings.agent_backend
+        if backend != "fake" and host_agent_binary(settings, backend) is None:
+            raise InvalidTaskError(unavailable_source_backend(backend))
     if body.kind == "analysis":
         from sca.core.errors import NotFoundError
 

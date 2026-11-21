@@ -8,11 +8,16 @@ from sca.api import portal
 
 
 @pytest.mark.asyncio
-async def test_provider_key_is_local_opt_in_and_restarts_gateway(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", ["docker", "source"])
+async def test_provider_key_is_local_opt_in_and_restarts_gateway(tmp_path, monkeypatch, mode):
     env_file = tmp_path / '.env'
     env_file.write_text('DEEPSEEK_API_KEY=REPLACE_ME\nOTHER=keep\n')
     monkeypatch.setenv('SCA_PORTAL_LOCAL_CONFIG', str(env_file))
-    monkeypatch.setenv('SCA_DOCKER_BIN', '/local/docker')
+    monkeypatch.setenv('SCA_RUNTIME_MODE', mode)
+    if mode == "docker":
+        monkeypatch.setenv('SCA_DOCKER_BIN', '/local/docker')
+    else:
+        monkeypatch.delenv('SCA_DOCKER_BIN', raising=False)
     commands = []
 
     class Process:
@@ -38,7 +43,12 @@ async def test_provider_key_is_local_opt_in_and_restarts_gateway(tmp_path, monke
     assert result == {'saved': True, 'gateway_restarted': True}
     assert dotenv_values(env_file) == {'DEEPSEEK_API_KEY': 'sk-test-key-123', 'OTHER': 'keep'}
     assert env_file.stat().st_mode & 0o777 == 0o600
-    assert commands[0][-1] == 'litellm'
+    if mode == "docker":
+        assert commands == [('/local/docker', 'compose', '--env-file', str(env_file), '-f',
+                             str(tmp_path / 'deploy/docker-compose.yml'), '--profile', 'gateway',
+                             'up', '-d', '--no-deps', '--force-recreate', 'litellm')]
+    else:
+        assert commands == [('bash', str(tmp_path / 'scripts/portal_demo.sh'), 'restart-gateway')]
     assert all('sk-test-key-123' not in arg for arg in commands[0])
 
 
