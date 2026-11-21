@@ -95,11 +95,15 @@ class LocalWorkflow:
         self.signal = asyncio.Event()
         monkeypatch.setattr(workflow, "patched", lambda name: True)
         monkeypatch.setattr(workflow, "execute_activity", self.execute_activity)
+        monkeypatch.setattr(workflow, "start_activity", self.start_activity)
         monkeypatch.setattr(workflow, "execute_child_workflow", self.execute_child)
         monkeypatch.setattr(workflow, "wait_condition", self.wait_condition)
 
     async def execute_activity(self, name, *arguments, args=None, **kwargs):
         return await ActivityEnvironment().run(self.activities[name], *(args if args is not None else arguments))
+
+    def start_activity(self, name, arg, **kwargs):
+        return asyncio.create_task(self.execute_activity(name, arg, **kwargs))
 
     async def execute_child(self, method, *, args, **kwargs):
         assert method == CodingSubtaskWorkflow.run

@@ -182,3 +182,29 @@ curl -fsS "$SCA_API_URL/v1/tenant/billing" -H "Authorization: Bearer $TENANT_TOK
 合法签名的 `checkout.session.completed` 将套餐切到 `team` 并记录订阅；连续 3 次 `invoice.payment_failed`
 暂停提交（提交返回 403 `tenant_suspended`），`invoice.paid` 后自动恢复并记录发票；平台管理员视图正确。
 真实 Stripe 测试模式尚未接入。
+
+## 运行中插话
+
+升级数据库到 `0023_task_messages`，然后重启 API 与 Worker。在 Portal 打开任务页，在事件记录下方的
+「插话」输入框补充要求。按回车发送，按 Shift + 回车换行。租户成员与管理员可以发送，查看者可以查看
+记录。终态任务只保留历史。
+
+`queue`（默认）把消息按发送顺序放到下一轮指令开头。若本轮已完成并通过验证，待处理的插话会触发
+一轮续跑。`interrupt` 会停止当前单代理轮次，保存已完成的文件编辑，再沿用可恢复的会话开启下一轮。
+审核中的插话会发起修改并重新提交审核。并行子任务或 Best-of-N 尝试期间收到的消息，会在合并或选定
+候选后交给主任务。恢复执行仍受任务的用量及费用上限约束。
+升级前已经开始的轮次会先执行到边界，再接收插话。
+
+```bash
+curl -fsS -X POST "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"text":"先补充空输入的回归测试，再继续。","mode":"queue"}'
+
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+每条消息最多 4000 字符。发送成功返回 201，终态任务返回 409。列表按发送顺序返回，`actor` 标明
+发送者。事件记录中的状态与列表一致，依次为待送达（`pending`）、已加入轮次指令（`delivered`）、
+该轮已完成（`applied`）。被打断轮次中的插话会带入下一轮，直到有一轮完成。

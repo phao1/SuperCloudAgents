@@ -9,7 +9,7 @@ from pathlib import Path
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
 
 VERSION_PATTERN = r"2\.3\.0-sca\.(0|[1-9][0-9]*)"
@@ -253,37 +253,39 @@ class OpenCodeBackend:
         final, seen_session, finished, failed = "", session_id, False, False
         result = None
         steps: dict[str, dict[str, int]] = {}
-        async for output in sandbox.exec(
+        stream = sandbox.exec(
             sandbox_id,
             argv,
             workdir=ctx.workdir,
             env=env,
             timeout_s=timeout_s,
             **exec_input,
-        ):
-            if isinstance(output, ExecExit):
-                result = output
-                continue
-            if output.stream != "stdout":
-                continue
-            line = output.text.replace(ctx.model_api_key, "[redacted]")
-            try:
-                raw = json.loads(line)
-            except ValueError:
-                continue
-            if isinstance(raw, dict) and raw.get("sessionID") and not seen_session:
-                seen_session = raw["sessionID"]
-                yield AgentEvent(type="session_started", data={"session_id": seen_session})
-            if secrets:
-                line = json.dumps(redact_mcp_output(raw, secrets))
-            for event in parse_opencode_line(line, steps):
-                if event.type == "message":
-                    final = event.data["text"]
-                if event.type == "error":
-                    failed = True
-                if event.type == "usage" and (raw.get("part") or {}).get("reason") == "stop":
-                    finished = True
-                yield event
+        )
+        async with closing_stream(stream):
+            async for output in stream:
+                if isinstance(output, ExecExit):
+                    result = output
+                    continue
+                if output.stream != "stdout":
+                    continue
+                line = output.text.replace(ctx.model_api_key, "[redacted]")
+                try:
+                    raw = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(raw, dict) and raw.get("sessionID") and not seen_session:
+                    seen_session = raw["sessionID"]
+                    yield AgentEvent(type="session_started", data={"session_id": seen_session})
+                if secrets:
+                    line = json.dumps(redact_mcp_output(raw, secrets))
+                for event in parse_opencode_line(line, steps):
+                    if event.type == "message":
+                        final = event.data["text"]
+                    if event.type == "error":
+                        failed = True
+                    if event.type == "usage" and (raw.get("part") or {}).get("reason") == "stop":
+                        finished = True
+                    yield event
         if not result or result.exit_code or result.timed_out or failed or not finished:
             raise AgentTurnError("OpenCode turn failed or ended without a completed step")
         yield AgentEvent(type="turn_completed", data={"final_message": final})

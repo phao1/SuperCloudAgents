@@ -138,6 +138,7 @@ make up-all    # also start the optional services (needs a .env with provider ke
 | Code hosting | GitHub / Gitea: tasks from issues, pull requests with review and CI status, outcomes written back. | `/v1/integrations/scm`, [docs/scm.md](docs/scm.md) |
 | Best-of-N | N independent attempts from one prepared snapshot; the platform picks the cheapest verified one, or a human picks. | `"best_of": {"n": 3}` |
 | Decoupled subtasks | Subtasks with `depends_on` and path scopes; auto planning; impact analysis of the published commit. | `subtasks`, `"plan": "auto"`, `/v1/tasks/{id}/impact` ([docs/decouple.md](docs/decouple.md)) |
+| 插话 | 在任务运行时补充要求，可立即打断当前轮，或在审核时要求继续修改。 | Portal → 任务 → 插话，`POST /v1/tasks/{id}/messages` ([使用说明](docs/operations.md#运行中插话)) |
 | Tools | Tenant MCP tool registry with team grants, and a built-in knowledge-base MCP server with citations. | `/v1/tools`, `/v1/knowledge`, `"tools": [...]` ([docs/tools.md](docs/tools.md)) |
 | Design intents | Figma, OpenAPI and screenshot intents turned into agent context and checks. | `intents` ([docs/intents.md](docs/intents.md)) |
 | Brain/hands | OpenCode brain outside the sandbox, shell over a PTY daemon, a live read-only terminal. | `opencode-brain`, `SCA_SANDBOX_HANDD=true`, `/v1/tasks/{id}/terminal` |

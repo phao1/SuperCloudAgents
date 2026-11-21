@@ -1,6 +1,6 @@
 /* The single-row timeline follows awesomeTelemetry's 2d0928d task reader. */
 const SCATaskTimeline = (() => {
-  const input = new Set(['task.created', 'agent.turn_started', 'review.submitted']);
+  const input = new Set(['task.created', 'agent.turn_started', 'review.submitted', 'user.message']);
   const model = new Set(['agent.message', 'agent.usage']);
   const tools = new Set(['agent.tool', 'agent.command', 'agent.file_change', 'verification.started',
     'verification.completed', 'acceptance.completed', 'ci.requested', 'ci.completed', 'intents.checked']);

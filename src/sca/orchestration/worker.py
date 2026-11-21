@@ -39,6 +39,7 @@ from sca.evolve.scheduler import (
 )
 from sca.evolve.workflow import EvolutionWorkflow
 from sca.kernel.activities import KernelActivities
+from sca.kernel.interjection import HEARTBEAT_INTERVAL
 from sca.kernel.kind import KindDeps
 from sca.kernel.kind import all as all_kinds
 from sca.maintenance import MaintenanceActivities, MaintenanceWorkflow
@@ -195,6 +196,8 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
                     + evolution.all() + [builds.build] + evolution_scheduler.all()
                     + solidification.all()),
         max_concurrent_activities=8,
+        # Task interjection receives activity cancellation on the next heartbeat.
+        max_heartbeat_throttle_interval=HEARTBEAT_INTERVAL,
     )
 
 

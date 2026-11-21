@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
 
 PI_VERSION = "1.5.2"
@@ -146,38 +146,40 @@ class PiBackend:
         result = None
         settled, failed, final, stopped = False, False, "", False
         tools: dict[str, dict] = {}
-        async for output in sandbox.exec(
+        stream = sandbox.exec(
             sandbox_id, argv, workdir=ctx.workdir, timeout_s=timeout_s, stdin=prompt.encode(),
             env={"HOME": ctx.agent_home, "PI_CODING_AGENT_DIR": f"{ctx.agent_home}/pi",
                  "PI_OFFLINE": "1", "PI_TELEMETRY": "0", KEY_ENV: ctx.model_api_key,
                  "SCA_PI_CONFIG": render_config(ctx.model_base_url, model)},
-        ):
-            if isinstance(output, ExecExit):
-                result = output
-                continue
-            if output.stream != "stdout":
-                continue
-            # Untrusted output can echo credentials, including inside tool arguments.
-            line = output.text.replace(ctx.model_api_key, "[REDACTED]")
-            try:
-                raw = json.loads(line)
-            except ValueError:
-                continue
-            if not isinstance(raw, dict):
-                continue
-            if raw.get("type") == "session" and not session_id:
-                yield AgentEvent(type="session_started", data={"session_id": sid})
-            if raw.get("type") == "agent_settled":
-                settled = raw.get("aborted") is False
-            if raw.get("type") == "message_end":
-                message = raw.get("message")
-                if isinstance(message, dict) and message.get("role") == "assistant":
-                    stopped = message.get("stopReason") == "stop"
-                    failed = message.get("stopReason") in ("error", "aborted")
-            for event in parse_pi_line(line, tools):
-                if event.type == "message":
-                    final = event.data["text"]
-                yield event
+        )
+        async with closing_stream(stream):
+            async for output in stream:
+                if isinstance(output, ExecExit):
+                    result = output
+                    continue
+                if output.stream != "stdout":
+                    continue
+                # Untrusted output can echo credentials, including inside tool arguments.
+                line = output.text.replace(ctx.model_api_key, "[REDACTED]")
+                try:
+                    raw = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(raw, dict):
+                    continue
+                if raw.get("type") == "session" and not session_id:
+                    yield AgentEvent(type="session_started", data={"session_id": sid})
+                if raw.get("type") == "agent_settled":
+                    settled = raw.get("aborted") is False
+                if raw.get("type") == "message_end":
+                    message = raw.get("message")
+                    if isinstance(message, dict) and message.get("role") == "assistant":
+                        stopped = message.get("stopReason") == "stop"
+                        failed = message.get("stopReason") in ("error", "aborted")
+                for event in parse_pi_line(line, tools):
+                    if event.type == "message":
+                        final = event.data["text"]
+                    yield event
         if not result or result.exit_code or result.timed_out or failed or not settled or not stopped:
             raise AgentTurnError("Pi turn failed, timed out, or ended without a completed response")
         yield AgentEvent(type="turn_completed", data={"final_message": final})

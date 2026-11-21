@@ -7,6 +7,7 @@ each; phase 2 swaps implementations without touching callers.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -14,6 +15,7 @@ from sca.core.models import (
     AgentContext,
     AgentEvent,
     ExecEvent,
+    MessageMode,
     Mount,
     Principal,
     RepoCredential,
@@ -142,6 +144,8 @@ class Orchestrator(Protocol):
         self, task_id: str, commit: str, passed: bool, summary: str | None, url: str | None
     ) -> None: ...
 
+    async def submit_task_message(self, task_id: str, message_id: str, mode: MessageMode) -> None: ...
+
 
 @runtime_checkable
 class ModelGateway(Protocol):
@@ -188,3 +192,14 @@ async def unpause_sandbox(provider: SandboxProvider, sandbox_id: str) -> None:
     method = getattr(provider, "unpause", None)
     if method is not None:
         await method(sandbox_id)
+
+
+# Task interjection
+@asynccontextmanager
+async def closing_stream[T](stream: AsyncIterator[T]) -> AsyncIterator[None]:
+    """Wait for a cancellable execution stream to release its resources."""
+    try:
+        yield
+    finally:
+        if close := getattr(stream, "aclose", None):
+            await close()

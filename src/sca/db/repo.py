@@ -5,14 +5,23 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import RowMapping, delete, func, insert, select, text, update
+from sqlalchemy import RowMapping, Select, delete, func, insert, select, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from sca.config import Settings
 from sca.core.errors import ConflictError, NotFoundError, ScaError
 from sca.core.interfaces import ObjectStore
-from sca.core.models import TERMINAL_STATES, Artifact, Event, Task, TaskState, can_transition
+from sca.core.models import (
+    TERMINAL_STATES,
+    Artifact,
+    Event,
+    Task,
+    TaskMessage,
+    TaskMessageInput,
+    TaskState,
+    can_transition,
+)
 from sca.db.schema import api_tokens, artifacts, events, sessions, tasks, tenants
 
 if TYPE_CHECKING:
@@ -337,7 +346,7 @@ class Store:
 
     async def set_state(
         self, task_id: str | UUID, new_state: TaskState, reason: str | None = None,
-        *, model_provider_error: dict | None = None,
+        *, model_provider_error: dict | None = None, wait_for_messages: bool = False,
     ) -> Task:
         async with self._transaction() as session:
             row = await self._task(session, task_id, True)
@@ -346,6 +355,8 @@ class Store:
                 return Task.model_validate(dict(row))
             if not can_transition(old, new_state):
                 raise ConflictError(f"Cannot transition from {old} to {new_state}")
+            if wait_for_messages and await self._has_unapplied_messages(session, row):
+                return Task.model_validate(dict(row))
             # Model provider errors are committed with the terminal reason.
             result = {**row["result"], "admission": {}}
             if model_provider_error is not None and new_state == TaskState.FAILED:
@@ -2508,3 +2519,97 @@ class Store:
         ).order_by(result.case_id, result.repeat))).mappings()
         return [{**row, "passed": None if row["infrastructure_error"] else overall_passed(dict(row))}
                 for row in rows]
+
+    # Task interjection
+
+    @staticmethod
+    def _task_messages(task: RowMapping) -> Select:
+        from sca.db.schema import task_messages
+
+        c = task_messages.c
+        return select(task_messages).where(
+            c.task_id == task["id"], c.tenant_id == task["tenant_id"],
+        ).order_by(c.seq)
+
+    async def _has_unapplied_messages(self, session: AsyncSession, task: RowMapping) -> bool:
+        from sca.db.schema import task_messages
+
+        query = self._task_messages(task).where(task_messages.c.status != "applied").order_by(None)
+        return bool(await session.scalar(select(query.exists())))
+
+    async def add_task_message(
+        self, task_id: UUID, message: TaskMessageInput, actor: str,
+    ) -> TaskMessage:
+        from sca.db.schema import task_messages
+
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            if task["state"] in TERMINAL_STATES:
+                raise ConflictError("任务已结束")
+            message_id = uuid4()
+            event = await self._event(
+                session, task_id, "user.message",
+                {"message_id": str(message_id), **message.model_dump(), "actor": actor,
+                 "status": "pending"},
+            )
+            assert event is not None
+            row = (await session.execute(insert(task_messages).values(
+                id=message_id, task_id=task_id, tenant_id=task["tenant_id"],
+                seq=event.seq, created_at=event.created_at, actor=actor, **message.model_dump(),
+            ).returning(task_messages))).mappings().one()
+            return TaskMessage.model_validate(dict(row))
+
+    async def list_task_messages(self, task_id: UUID) -> list[TaskMessage]:
+        async with self._transaction() as session:
+            task = await self._task(session, task_id)
+            rows = (await session.execute(self._task_messages(task))).mappings()
+            return [TaskMessage.model_validate(dict(row)) for row in rows]
+
+    async def deliver_task_messages(
+        self, task_id: str, turn: int, *, planning: bool = False,
+    ) -> list[TaskMessage]:
+        from sca.db.schema import task_messages
+
+        c = task_messages.c
+        position = {"turn": None if planning else turn, "plan_attempt": turn if planning else None}
+        event_position = {key: val for key, val in position.items() if val is not None}
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            rows = (await session.execute(self._task_messages(task).where(
+                c.status != "applied",
+            ))).mappings().all()
+            batch = []
+            for row in rows:
+                if row["status"] != "delivered" or any(row[k] != v for k, v in position.items()):
+                    await session.execute(update(task_messages).where(c.id == row["id"]).values(
+                        status="delivered", **position,
+                    ))
+                    await self._event(
+                        session, task["id"], "user.message.delivered",
+                        {"message_id": str(row["id"]), "status": "delivered", **event_position},
+                        f"user.message.{row['id']}.delivered.{planning}.{turn}",
+                    )
+                batch.append(TaskMessage.model_validate(
+                    {**row, **position, "status": "delivered"},
+                ))
+            return batch
+
+    async def apply_task_messages(self, task_id: str, message_ids: list[str]) -> None:
+        from sca.db.schema import task_messages
+
+        c = task_messages.c
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            rows = (await session.execute(self._task_messages(task).where(
+                c.status == "delivered", c.id.in_([UUID(mid) for mid in message_ids]),
+            ))).mappings().all()
+            for row in rows:
+                await session.execute(update(task_messages).where(c.id == row["id"]).values(
+                    status="applied",
+                ))
+                await self._event(
+                    session, task["id"], "user.message.applied",
+                    {"message_id": str(row["id"]), "status": "applied",
+                     "turn": row["turn"], "plan_attempt": row["plan_attempt"]},
+                    f"user.message.{row['id']}.applied",
+                )

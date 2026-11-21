@@ -479,3 +479,24 @@ billing_usage_reports = Table(
     Column("stripe_invoice_item_id", Text),
     timestamp("created_at"),
 )
+
+
+# Task interjection
+task_messages = Table(
+    "task_messages", metadata,
+    Column("id", UUID(as_uuid=True), primary_key=True),
+    Column("task_id", UUID(as_uuid=True), ForeignKey("tasks.id", ondelete="CASCADE"), nullable=False),
+    Column("tenant_id", Text, nullable=False),
+    Column("seq", BigInteger, nullable=False),
+    Column("text", Text, nullable=False),
+    Column("mode", Text, nullable=False),
+    Column("status", Text, nullable=False, server_default="pending"),
+    Column("actor", Text, nullable=False),
+    timestamp("created_at"),
+    Column("turn", Integer),
+    Column("plan_attempt", Integer),
+    UniqueConstraint("task_id", "seq"),
+    CheckConstraint("char_length(text) BETWEEN 1 AND 4000"),
+    CheckConstraint("mode IN ('queue', 'interrupt')"),
+    CheckConstraint("status IN ('pending', 'delivered', 'applied')"),
+)

@@ -21,6 +21,7 @@ from temporalio.exceptions import (
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
+    from sca.core.models import MessageMode
     from sca.intents.base import REMOTE_TYPES
     from sca.kernel.activities import (
         CheckpointResult,
@@ -31,6 +32,15 @@ with workflow.unsafe.imports_passed_through():
         TurnResult,
         VerifyResult,
         WorkspaceInfo,
+    )
+    from sca.kernel.interjection import (
+        CONTINUE_WITH_GUIDANCE,
+        MESSAGES_PENDING,
+        USER_MESSAGE_SIGNAL,
+        Guidance,
+        Interjections,
+        TurnInterrupted,
+        with_guidance,
     )
 REVIEW_SIGNAL = "submit_review"
 
@@ -52,6 +62,8 @@ class TaskWorkflow:
         self._admission = False
         self._task_spec: dict | None = None
         self._extension_signals: dict[tuple[str, str], tuple[str, list[Any]]] = {}
+        self._interjections = Interjections()
+        self._extension_name: str | None = None
 
     async def _extension_signal(self, name: str, key: str, args: list[Any]) -> None:
         self._extension_signals[name, key] = (name, args)
@@ -74,10 +86,13 @@ class TaskWorkflow:
             self._reviews.append((decision, feedback))
 
     async def _set_state(self, task_id: str, state: str, reason: str | None = None,
-                         *, model_provider_error: dict | None = None) -> None:
-        await workflow.execute_activity(
-            "set_state", SetStateInput(task_id, state, reason, model_provider_error), **_QUICK
+                         *, model_provider_error: dict | None = None,
+                         wait_for_messages: bool = False) -> bool:
+        result = await workflow.execute_activity(
+            "set_state", SetStateInput(task_id, state, reason, model_provider_error, wait_for_messages),
+            **_QUICK,
         )
+        return result != MESSAGES_PENDING
 
     @workflow.run
     async def run(self, task_id: str) -> str:
@@ -166,6 +181,8 @@ class TaskWorkflow:
     async def _run(self, task_id: str) -> str:
         spec: dict = await workflow.execute_activity("load_task", task_id, **_QUICK)
         self._task_spec = spec
+        if spec.get("_user_interjection"):
+            self._interjections.enable()
         spec.setdefault("_kind", "analysis" if "question" in spec else "coding")
         max_fixes: int = spec["max_fix_attempts"]
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
@@ -231,6 +248,9 @@ class TaskWorkflow:
         release_after = timedelta(seconds=spec.get("review_idle_release_s", 600))
         prompt = await workflow.execute_activity("render_initial_prompt" if spec.get("_versioned_prompts") else hooks["initial_prompt"], spec, **_QUICK)
         prompt += "\n" + "\n".join(intents.get("notes", [])) + "\n" + memory_note
+        if self._interjections.enabled:
+            prompt = with_guidance(prompt, extension.get("guidance", []))
+        initial_prompt = prompt
         turn, fixes, session_id = 0, 0, None
         skip_turn = extension.get("skip_turn", False)
         unresolved = extension.get("unresolved", [])
@@ -245,22 +265,19 @@ class TaskWorkflow:
             if not skip_turn:
                 await self._check_budget(task_id, turn - 1)
                 await self._set_state(task_id, "RUNNING")
+                messages = await self._interjections.deliver(task_id, turn)
+                interrupted = False
                 try:
-                    turn_result: TurnResult = await workflow.execute_activity(
-                        "run_agent_turn",
-                        TurnInput(task_id, turn, prompt, session_id),
-                        result_type=TurnResult,
-                        start_to_close_timeout=turn_timeout,
-                        heartbeat_timeout=timedelta(
-                            seconds=spec.get("turn_heartbeat_timeout_s", 120)
-                        ),
-                        retry_policy=_retry(2),
+                    turn_result = await self._run_agent_turn(
+                        task_id, spec, turn, prompt, session_id, messages,
                     )
+                    session_id = turn_result.session_id
+                except TurnInterrupted:
+                    interrupted = True
                 except ActivityError as exc:
                     if not patched_provider_account_error(exc):
                         await self._check_budget(task_id, turn)
                     raise
-                session_id = turn_result.session_id
                 await workflow.execute_activity(
                     hooks["checkpoint"],
                     StepInput(task_id, turn),
@@ -268,6 +285,10 @@ class TaskWorkflow:
                     start_to_close_timeout=timedelta(minutes=2),
                     retry_policy=_retry(3),
                 )
+                if interrupted:
+                    continue
+                if messages and not turn_result.skipped:
+                    await self._interjections.apply(task_id, messages)
             skip_turn = False
 
             over_budget: str | None = await workflow.execute_activity(
@@ -313,6 +334,10 @@ class TaskWorkflow:
                 )
                 continue
 
+            if self._interjections.pending:
+                prompt = CONTINUE_WITH_GUIDANCE if session_id else initial_prompt
+                continue
+
             passed = verify.passed
             if (
                 passed
@@ -324,6 +349,9 @@ class TaskWorkflow:
                 if not passed and fixes < max_fixes:
                     fixes += 1
                     prompt = outcome["prompt"]
+                    continue
+                if self._interjections.pending:
+                    prompt = CONTINUE_WITH_GUIDANCE if session_id else initial_prompt
                     continue
 
             await workflow.execute_activity(
@@ -346,19 +374,21 @@ class TaskWorkflow:
             await self._set_state(task_id, "AWAITING_REVIEW")
             if spec.get("auto_finish"):
                 state = "SUCCEEDED" if passed and not unresolved else "FAILED"
-                await self._set_state(task_id, state, None if state == "SUCCEEDED" else "verification failed")
-                return state
+                if await self._complete(
+                    task_id, state, None if state == "SUCCEEDED" else "verification failed",
+                ):
+                    return state
+                prompt = CONTINUE_WITH_GUIDANCE if session_id else initial_prompt
+                continue
             try:
-                await workflow.wait_condition(lambda: bool(self._reviews), timeout=release_after)
+                await workflow.wait_condition(self._review_ready, timeout=release_after)
             except TimeoutError:
                 # Nobody is looking: stop holding a sandbox. It is rebuilt if work continues.
                 await self._release_sandbox(task_id, turn)
-                await workflow.wait_condition(lambda: bool(self._reviews))
-            decision, feedback = self._reviews.pop(0)
-            self._reviews.clear()
+                await workflow.wait_condition(self._review_ready)
+            decision, feedback = self._next_review()
 
-            if decision == "approve":
-                await self._set_state(task_id, "SUCCEEDED")
+            if decision == "approve" and await self._complete(task_id, "SUCCEEDED"):
                 if spec.get('memory_enabled'):
                     try:
                         await workflow.execute_activity(
@@ -374,6 +404,8 @@ class TaskWorkflow:
                 "render_feedback_prompt" if spec.get("_versioned_prompts") else hooks["feedback_prompt"],
                 args=[spec, feedback or "", unresolved] if spec.get("_versioned_prompts") else [feedback or "", unresolved], **_QUICK
             )
+            if self._interjections.pending and session_id is None:
+                prompt += "\n\n" + initial_prompt
             fixes = 0
             unresolved = []
 
@@ -390,6 +422,69 @@ class TaskWorkflow:
                 await self._active_extension.signal(REVIEW_SIGNAL, args=[decision, feedback])
             for signal_name, values in self._extension_signals.values():
                 await self._active_extension.signal(signal_name, args=values)
-            return await self._active_extension
+            self._extension_name = name
+            if self._interjections.enabled and self._route_interjections(name):
+                for message_id, mode in self._interjections.notices():
+                    await self._forward_interjection(message_id, mode)
+            result = await self._active_extension
+            if self._interjections.enabled:
+                self._interjections.acknowledge(result.get("applied_messages", []))
+            return result
         finally:
             self._active_extension = None
+            self._extension_name = None
+
+    # Task interjection
+
+    @workflow.signal(name=USER_MESSAGE_SIGNAL)
+    async def user_message(self, message_id: str, mode: MessageMode) -> None:
+        if self._interjections.notify(message_id, mode) and self._route_interjections(self._extension_name):
+            await self._forward_interjection(message_id, mode)
+
+    def _route_interjections(self, name: str | None) -> bool:
+        return False
+
+    async def _forward_interjection(self, message_id: str, mode: MessageMode) -> None:
+        child = self._active_extension
+        if child is not None and not child.done():
+            try:
+                await child.signal(USER_MESSAGE_SIGNAL, args=[message_id, mode])
+            except ApplicationError:
+                # A child that finished before the signal can no longer take the message.
+                # The parent still owns it until the child reports that it was applied.
+                workflow.logger.info("Could not forward guidance to extension %s", child.id)
+
+    async def _run_agent_turn(
+        self, task_id: str, spec: dict, turn: int, prompt: str, session: str | None,
+        messages: list[Guidance],
+    ) -> TurnResult:
+        prompt = with_guidance(prompt, [message.text for message in messages])
+        return await self._interjections.run_activity(
+            "run_agent_turn",
+            TurnInput(task_id, turn, prompt, session, self._interjections.enabled),
+            result_type=TurnResult,
+            start_to_close_timeout=timedelta(seconds=spec["turn_timeout_s"] + 60),
+            heartbeat_timeout=timedelta(seconds=spec.get("turn_heartbeat_timeout_s", 120)),
+            retry_policy=_retry(2),
+        )
+
+    def _review_ready(self) -> bool:
+        return bool(self._reviews) or self._interjections.pending
+
+    def _next_review(self) -> tuple[str, str | None]:
+        if self._reviews and self._reviews[0][0] == "reject":
+            decision = self._reviews[0]
+        elif self._interjections.pending:
+            decision = ("request_changes", None)
+        else:
+            decision = self._reviews[0]
+        self._reviews.clear()
+        return decision
+
+    async def _complete(self, task_id: str, state: str, reason: str | None = None) -> bool:
+        if self._interjections.pending:
+            return False
+        if await self._set_state(task_id, state, reason, wait_for_messages=self._interjections.enabled):
+            return True
+        self._interjections.request_delivery()
+        return False

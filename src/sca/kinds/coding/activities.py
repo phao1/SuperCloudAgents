@@ -39,6 +39,7 @@ from sca.kernel.activities import (
     branch_name,
     sandbox_name,
 )
+from sca.kernel.interjection import MESSAGES_PENDING
 from sca.kinds.coding.spec import CodingSpec
 from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskInput
 from sca.observability import business_metrics, metric_guard
@@ -688,8 +689,9 @@ class CodingActivities(KernelActivities):
 
 class ScmStateActivities(KernelActivities):
     @activity.defn(name="set_state")
-    async def set_state(self, inp: SetStateInput) -> bool | None:
-        await super().set_state(inp)
+    async def set_state(self, inp: SetStateInput) -> bool | str | None:
+        if await super().set_state(inp) == MESSAGES_PENDING:
+            return MESSAGES_PENDING
         if inp.state not in TERMINAL_STATES and inp.state != TaskState.AWAITING_REVIEW:
             return None
         task = await self.store.get_task(inp.task_id)

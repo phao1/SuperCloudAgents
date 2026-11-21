@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import json
 import time
+from collections.abc import AsyncIterator
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -28,6 +29,7 @@ from sca.core.interfaces import (
     ObjectStore,
     SandboxProvider,
     SecretProvider,
+    closing_stream,
     unpause_sandbox,
 )
 from sca.core.model_provider import GatewayError, ModelProviderError
@@ -45,6 +47,13 @@ from sca.core.models import (
 )
 from sca.db.repo import Store
 from sca.gateway.health import ProviderHealth
+from sca.kernel.interjection import (
+    HEARTBEAT_INTERVAL,
+    MESSAGES_PENDING,
+    ApplyMessages,
+    DeliverMessages,
+    Guidance,
+)
 from sca.kernel.kind import ExecutionSpec, get
 from sca.kernel.prompts import EvaluationSettings, render_prompt
 from sca.observability import business_metrics, metric_guard
@@ -77,6 +86,7 @@ class SetStateInput:
     state: str
     reason: str | None = None
     model_provider_error: dict | None = None
+    wait_for_messages: bool = False
 
 
 @dataclass
@@ -91,12 +101,14 @@ class TurnInput:
     turn: int
     prompt: str
     session_id: str | None = None
+    interjectible: bool = False
 
 
 @dataclass
 class TurnResult:
     session_id: str | None
     final_message: str
+    skipped: bool = False
 
 
 @dataclass
@@ -196,6 +208,8 @@ class KernelActivities:
             self.distill_memories,
             self.compile_intents,
             self.verify_intents,
+            self.deliver_task_messages,
+            self.apply_task_messages,
         ]
 
     def _state(self, task_id: str) -> TaskStateStore:
@@ -314,16 +328,16 @@ class KernelActivities:
         chunks: list[str] = []
         size = 0
         exit_event = ExecExit(exit_code=-1)
-        async for ev in self.sandbox.exec(
-            sandbox_id, argv, workdir="/workspace", timeout_s=timeout_s
-        ):
-            if isinstance(ev, ExecExit):
-                exit_event = ev
-            else:
-                activity.heartbeat()
-                if size < MAX_CAPTURED_OUTPUT:
-                    chunks.append(ev.text)
-                    size += len(ev.text) + 1
+        stream = self.sandbox.exec(sandbox_id, argv, workdir="/workspace", timeout_s=timeout_s)
+        async with closing_stream(stream):
+            async for ev in stream:
+                if isinstance(ev, ExecExit):
+                    exit_event = ev
+                else:
+                    activity.heartbeat()
+                    if size < MAX_CAPTURED_OUTPUT:
+                        chunks.append(ev.text)
+                        size += len(ev.text) + 1
         return exit_event, "\n".join(chunks)
 
     @activity.defn
@@ -347,6 +361,7 @@ class KernelActivities:
                 "_kind": task.kind,
                 "_versioned_prompts": True,
                 "_admission": True,
+                "_user_interjection": True,
                 "memory_enabled": spec.get("memory_enabled") is not False,
                 "prompt_version": selected_version,
                 "hooks": asdict(get(task.kind).hooks),
@@ -604,14 +619,18 @@ class KernelActivities:
         await self.store.release_slot(task_id)
 
     @activity.defn
-    async def set_state(self, inp: SetStateInput) -> None:
+    async def set_state(self, inp: SetStateInput) -> str | None:
         try:
             previous_state = None
             if inp.state in TERMINAL_STATES:
                 with metric_guard():
                     previous_state = (await self.store.get_task(inp.task_id)).state
             metadata = {"model_provider_error": inp.model_provider_error} if inp.model_provider_error else {}
+            if inp.wait_for_messages:
+                metadata["wait_for_messages"] = True
             task = await self.store.set_state(inp.task_id, TaskState(inp.state), inp.reason, **metadata)
+            if inp.wait_for_messages and task.state != inp.state:
+                return MESSAGES_PENDING
             if task.state in TERMINAL_STATES and previous_state not in TERMINAL_STATES:
                 with metric_guard():
                     business_metrics.duration.labels(task.kind, task.state).observe(
@@ -624,6 +643,7 @@ class KernelActivities:
                     business_metrics.turns.labels(task.kind).observe(turns)
         except _NON_RETRYABLE as e:
             raise _non_retryable(e) from e
+        return None
 
     @activity.defn
     async def create_sandbox(self, task_id: str) -> str:
@@ -841,14 +861,32 @@ class KernelActivities:
 
     @activity.defn
     async def run_agent_turn(self, inp: TurnInput) -> TurnResult:
+        try:
+            async with self._turn_heartbeats(interjectible=inp.interjectible):
+                return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
+        except asyncio.CancelledError:
+            if inp.interjectible:
+                await self.store.append_event(
+                    inp.task_id, "agent.turn_interrupted", {"turn": inp.turn},
+                    dedup_key=f"turn{inp.turn}.interrupted",
+                )
+            raise
+
+    @contextlib.asynccontextmanager
+    async def _turn_heartbeats(self, *, interjectible: bool) -> AsyncIterator[None]:
+        interval = (
+            HEARTBEAT_INTERVAL.total_seconds() if interjectible
+            else min(20, self.settings.turn_heartbeat_timeout_s / 4)
+        )
+
         async def beat() -> None:
             while True:
                 activity.heartbeat()
-                await asyncio.sleep(min(20, self.settings.turn_heartbeat_timeout_s / 4))
+                await asyncio.sleep(interval)
 
         beater = asyncio.create_task(beat())
         try:
-            return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
+            yield
         finally:
             beater.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -879,7 +917,7 @@ class KernelActivities:
             task = await self.store.get_task(task_id)
             remaining = spec.max_cost_usd - task.usage.get("cost_micro_usd", 0) / 1e6
             if remaining <= 0:
-                return TurnResult(session_id=session_id, final_message="")
+                return TurnResult(session_id=session_id, final_message="", skipped=True)
             turn_budget = min(turn_budget, remaining)
 
         ctx = await self._attach_tools(task_id, spec, key, champion)
@@ -910,14 +948,6 @@ class KernelActivities:
                 ctx.model_base_url = await cast(ToolSandboxProvider, self.sandbox).mcp_model_url(
                     sandbox_id, ctx.model_base_url, self.settings.model_gateway_container,
                 )
-            ctx.model_api_key = await self.gateway.issue_key(
-                key_alias,
-                models=[ctx.model or self.settings.default_model],
-                ttl_s=spec.turn_timeout_s + 120,
-                max_budget_usd=turn_budget,
-                metadata={"task_id": task_id, "turn": turn},
-            )
-
         task_kind = "unknown"
         with metric_guard():
             task_kind = (await self.store.get_task(task_id)).kind
@@ -926,64 +956,79 @@ class KernelActivities:
         turn_error: AgentTurnError | ModelProviderError | None = None
         provider_error: ModelProviderError | None = None
         n = 0
+        issued = False
         try:
             if self.gateway:
+                # Wait for an in-progress issuance before revoking the alias on cancellation.
+                issue = asyncio.create_task(self.gateway.issue_key(
+                    key_alias,
+                    models=[ctx.model or self.settings.default_model],
+                    ttl_s=spec.turn_timeout_s + 120,
+                    max_budget_usd=turn_budget,
+                    metadata={"task_id": task_id, "turn": turn},
+                ))
+                try:
+                    ctx.model_api_key = await asyncio.shield(issue)
+                except asyncio.CancelledError:
+                    with contextlib.suppress(GatewayError):
+                        await issue
+                    issued = True
+                    raise
+                issued = True
                 await self.store.append_event(
                     task_id, EventType.MODEL_KEY_ISSUED, {"turn": turn, "model": ctx.model},
                     dedup_key=f"{key}.model_key_issued",
                 )
-            async for ev in agent.run_turn(
-                self.sandbox,
-                sandbox_id,
-                ctx,
-                inp.prompt,
-                session_id=session_id,
-                timeout_s=spec.turn_timeout_s,
-            ):
-                activity.heartbeat()
-                n += 1
-                if ev.type == AgentEventType.SESSION_STARTED:
-                    session_id = ev.data.get("session_id") or session_id
-                    if session_id:
-                        await self.store.set_session(task_id, agent.name, session_id)
-                    continue
-                if ev.type == AgentEventType.TURN_COMPLETED:
-                    final_message = ev.data.get("final_message", "")
-                    continue
-                if ev.model_call_succeeded:
-                    provider_error = None
-                    if self.provider_health is not None:
-                        self.provider_health.record(None)
-                if ev.type == AgentEventType.ERROR:
-                    caught = ModelProviderError.from_payload(ev.data.get("model_provider_error"))
-                    if caught is not None:
+            stream = agent.run_turn(
+                self.sandbox, sandbox_id, ctx, inp.prompt,
+                session_id=session_id, timeout_s=spec.turn_timeout_s,
+            )
+            async with closing_stream(stream):
+                async for ev in stream:
+                    activity.heartbeat()
+                    n += 1
+                    if ev.type == AgentEventType.SESSION_STARTED:
+                        session_id = ev.data.get("session_id") or session_id
+                        if session_id:
+                            await self.store.set_session(task_id, agent.name, session_id)
+                        continue
+                    if ev.type == AgentEventType.TURN_COMPLETED:
+                        final_message = ev.data.get("final_message", "")
+                        continue
+                    if ev.model_call_succeeded:
+                        provider_error = None
                         if self.provider_health is not None:
-                            self.provider_health.record(caught)
-                        if provider_error is None or caught.is_account_error or not provider_error.is_account_error:
-                            provider_error = caught
-                if ev.type == AgentEventType.USAGE and ev.data.get("summary") == "sandbox_transition":
-                    await self.store.append_event(task_id, "sandbox.transition", ev.data,
-                                                  dedup_key=f"{key}.{n}.suspend")
-                    continue
-                if ev.type == AgentEventType.USAGE:
-                    await self.store.add_usage(
-                        task_id, {k: v for k, v in ev.data.items() if isinstance(v, int)}
+                            self.provider_health.record(None)
+                    if ev.type == AgentEventType.ERROR:
+                        caught = ModelProviderError.from_payload(ev.data.get("model_provider_error"))
+                        if caught is not None:
+                            if self.provider_health is not None:
+                                self.provider_health.record(caught)
+                            if provider_error is None or caught.is_account_error or not provider_error.is_account_error:
+                                provider_error = caught
+                    if ev.type == AgentEventType.USAGE and ev.data.get("summary") == "sandbox_transition":
+                        await self.store.append_event(task_id, "sandbox.transition", ev.data,
+                                                      dedup_key=f"{key}.{n}.suspend")
+                        continue
+                    if ev.type == AgentEventType.USAGE:
+                        await self.store.add_usage(
+                            task_id, {k: v for k, v in ev.data.items() if isinstance(v, int)}
+                        )
+                        with metric_guard():
+                            for direction, field in (
+                                ("input", "input_tokens"),
+                                ("output", "output_tokens"),
+                                ("cached", "cached_input_tokens"),
+                            ):
+                                business_metrics.tokens.labels(task_kind, direction).inc(
+                                    ev.data.get(field, 0)
+                                )
+                    await self.store.append_event(
+                        task_id,
+                        _AGENT_EVENT_TYPES[ev.type],
+                        {"turn": turn, **ev.data},
+                        dedup_key=f"{key}.{n}",
                     )
-                    with metric_guard():
-                        for direction, field in (
-                            ("input", "input_tokens"),
-                            ("output", "output_tokens"),
-                            ("cached", "cached_input_tokens"),
-                        ):
-                            business_metrics.tokens.labels(task_kind, direction).inc(
-                                ev.data.get(field, 0)
-                            )
-                await self.store.append_event(
-                    task_id,
-                    _AGENT_EVENT_TYPES[ev.type],
-                    {"turn": turn, **ev.data},
-                    dedup_key=f"{key}.{n}",
-                )
         except (AgentTurnError, ModelProviderError) as e:
             if isinstance(e, ModelProviderError):
                 provider_error = e
@@ -1006,7 +1051,7 @@ class KernelActivities:
             if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
                 await self.store.append_event(task_id, "sandbox.transition",
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
-            if self.gateway:
+            if self.gateway and issued:
                 finalize = getattr(self.gateway, "finalize_key", None)
                 spend = None
                 try:
@@ -1272,3 +1317,14 @@ class KernelActivities:
             for attachment in attachments
         ]}, dedup_key=f"{key}.tools_attached")
         return McpAgentContext(**ctx.model_dump(), mcp_servers=servers)
+
+    # Task interjection
+
+    @activity.defn
+    async def deliver_task_messages(self, inp: DeliverMessages) -> list[Guidance]:
+        rows = await self.store.deliver_task_messages(inp.task_id, inp.turn, planning=inp.planning)
+        return [Guidance(str(row.id), row.text) for row in rows]
+
+    @activity.defn
+    async def apply_task_messages(self, inp: ApplyMessages) -> None:
+        await self.store.apply_task_messages(inp.task_id, inp.message_ids)
