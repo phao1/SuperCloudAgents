@@ -92,7 +92,9 @@ async def check_dag(client, root, child, grandchild, other):
     assert sum(edge["kind"] == "spawn" for edge in data["edges"]) >= 3
     assert any(node["kind"] == "turn" and node["task_id"] == str(grandchild.id) for node in data["nodes"])
     assert any(node["status"] == "pending" and node["label"] == "later" for node in data["nodes"])
-    assert any(node["meta"].get("child_task_id") == str(child.id) for node in data["nodes"])
+    branch, = [node for node in data["nodes"] if node["meta"].get("child_task_id") == str(child.id)]
+    assert next(node for node in data["nodes"] if node["id"] == f"task:{child.id}")["meta"]["parent"] == branch["id"]
+    assert next(node for node in data["nodes"] if node["kind"] == "turn")["meta"]["parent"] == f"task:{grandchild.id}"
 
 
 async def test_task_dag_http_contract_and_portal_assets_with_fake_store(tmp_path, monkeypatch):

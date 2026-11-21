@@ -4,16 +4,20 @@
 }
 .dag-controls { gap: 6px; }
 .dag-controls button { min-width: 38px; min-height: 38px; }
-.dag-legend { margin: 10px 0; color: var(--muted); font-size: 12px; }
+.dag-controls button[aria-pressed="true"] { background: var(--accent-bg); color: var(--accent); }
+.dag-orientation { display: flex; gap: 4px; margin-inline-end: 6px; }
+.dag-legend { color: var(--muted); font-size: 12px; }
 .dag-legend span { display: inline-flex; align-items: center; gap: 5px; }
 .dag-legend i { display: inline-block; width: 20px; border-top: 2px solid currentColor; }
 .dag-legend .dag-edge-dependency i, .dag-legend .dag-edge-select i { border-top-style: dashed; }
 .dag-legend .dag-edge-spawn i { border-top-style: dotted; }
+.dag-pan-hint { margin-inline-start: auto; }
+.dag-load-status:empty { display: none; }
 .dag-canvas {
-  display: block; width: 100%; height: clamp(280px, 48vh, 540px);
+  display: block; width: 100%; height: clamp(min(240px, 80vh), var(--dag-height, 240px), 80vh);
   border: 1px solid var(--line); border-radius: 10px;
   background: radial-gradient(circle, var(--line) 1px, transparent 1px) 0 0 / 16px 16px var(--subtle);
-  cursor: grab; touch-action: none; user-select: none;
+  cursor: grab; overflow: hidden; touch-action: none; user-select: none;
 }
 .dag-canvas:active { cursor: grabbing; }
 .dag-edge { fill: none; stroke: currentColor; stroke-width: 1.6; }
@@ -31,8 +35,14 @@
 .dag-node rect { fill: var(--node-bg); stroke: var(--node-ink); stroke-width: 1.5; }
 .dag-node[data-status="skipped"] rect { stroke-dasharray: 4 3; }
 .dag-node[aria-pressed="true"] rect, .dag-node:focus-visible rect { stroke-width: 3; }
-.dag-node-label { fill: var(--ink); font-size: 13px; font-weight: 650; }
-.dag-node-state { fill: var(--node-ink); font-size: 11px; }
+.dag-node foreignObject { pointer-events: none; }
+.dag-node-label, .dag-node-state, .dag-node-counts {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dag-node-label { color: var(--ink); font-size: 16px; font-weight: 650; line-height: 24px; }
+.dag-node-state, .dag-node-counts { color: var(--node-ink); font-size: 14px; line-height: 21px; }
+.dag-node-counts { color: var(--ink); }
+.dag-node-chevron { stroke: var(--node-ink); stroke-width: 1.8; fill: none; }
 .dag-node circle { fill: var(--node-ink); }
 .dag-node[data-status="running"] circle {
   transform-box: fill-box; transform-origin: center;
@@ -54,6 +64,5 @@
 .dag-detail summary { cursor: pointer; }
 .dag-detail code { white-space: pre-wrap; }
 @media (max-width: 550px) {
-  .dag-canvas { height: 310px; }
   .dag-controls button { min-height: 44px; }
 }

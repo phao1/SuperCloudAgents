@@ -11,7 +11,9 @@ const portalProjects = (() => {
   const documentsPath = '/knowledge/documents';
   const libraryPageSize = 50;
   const names = new Map();
+  const projectDialog = document.getElementById('project-dialog');
   let loadVersion = 0, loading = false;
+  let pressedBackdrop = false;
 
   const path = id => '/projects/' + enc(id);
   const href = (id, tab = 'threads') => '#' + path(id) + (tab === 'threads' ? '' : '/' + tab);
@@ -19,17 +21,36 @@ const portalProjects = (() => {
   const number = new Intl.NumberFormat('zh-CN');
 
   function closeDialog() {
-    const dialog = $('project-dialog');
-    if (dialog.open) dialog.close();
+    if (projectDialog.open) projectDialog.close();
+    clearDialog();
+  }
+
+  function clearDialog() {
+    $('project-dialog-title').textContent = '';
     $('project-dialog-content').replaceChildren();
   }
 
   function dialog(title, ...content) {
-    const element = $('project-dialog');
     $('project-dialog-title').textContent = title;
     $('project-dialog-content').replaceChildren(...content);
-    if (!element.open) element.showModal();
+    pressedBackdrop = false;
+    if (!projectDialog.open) projectDialog.showModal();
   }
+
+  function onBackdrop(event) {
+    if (event.target !== projectDialog) return false;
+    const {left, top, right, bottom} = projectDialog.getBoundingClientRect();
+    return event.clientX < left || event.clientX >= right || event.clientY < top || event.clientY >= bottom;
+  }
+
+  projectDialog.addEventListener('pointerdown', event => { pressedBackdrop = onBackdrop(event); });
+  projectDialog.addEventListener('click', event => {
+    if (pressedBackdrop && onBackdrop(event)) closeDialog();
+    pressedBackdrop = false;
+  });
+  projectDialog.addEventListener('close', () => {
+    if (!projectDialog.open) clearDialog();
+  });
 
   function leave() {
     loadVersion++;
@@ -97,7 +118,7 @@ const portalProjects = (() => {
     }))};
   }
 
-  function projectForm(project) {
+  function projectForm(project, afterSave) {
     const repos = editorRepositories(project?.repos || []);
     const instructions = ui.field('项目指令', 'instructions', {
       multiline: true, rows: 8, value: project?.instructions || '',
@@ -139,6 +160,9 @@ const portalProjects = (() => {
       if (!project) {
         closeDialog();
         location.hash = href(saved.id);
+      } else if (afterSave) {
+        await afterSave();
+        return '项目设置已保存。';
       } else if (location.hash === href(saved.id, 'settings')) {
         showHeader(saved, 'settings');
         return '项目设置已保存。';
@@ -160,13 +184,18 @@ const portalProjects = (() => {
     }));
     $('project-actions').replaceChildren();
     if (!ui.can('member')) return;
-    const actions = [evidenceLink('设置', href(project.id, 'settings'))];
+    const identity = portalIdentity, route = location.hash;
+    const actions = [button('设置', () => {
+      if (!ui.can('member')) return;
+      dialog('项目设置', projectForm(project, async () => {
+        if (identity === portalIdentity && route === location.hash) await load([project.id, tab], true);
+      }));
+    })];
     const stateActions = {
       active: [['pause', '暂停'], ['archive', '归档']],
       paused: [['resume', '恢复'], ['archive', '归档']],
       archived: [['unarchive', '取消归档']],
     };
-    const identity = portalIdentity, route = location.hash;
     if ($('project-actions').dataset.state !== project.status) $('project-menu').open = false;
     $('project-actions').dataset.state = project.status;
     for (const [action, label] of stateActions[project.status]) {
@@ -384,7 +413,7 @@ const portalProjects = (() => {
   }
 
   function poll(parts) {
-    if (loading || (parts[1] && parts[1] !== 'threads') || $('project-dialog').open || $('project-menu').open) return;
+    if (loading || (parts[1] && parts[1] !== 'threads') || projectDialog.open || $('project-menu').open) return;
     return load(parts, true);
   }
 
