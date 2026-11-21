@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import csv
 import os
+import re
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from io import StringIO
@@ -57,6 +58,7 @@ async def report(step: str, check: Callable[[], Awaitable[str]]) -> bool:
 class CommercialSmoke:
     def __init__(
         self, http: httpx.AsyncClient, operator_token: str, repo: str | None, wait_seconds: int,
+        stripe_sim: httpx.URL | None = None,
     ) -> None:
         self.http = http
         self.operator_token = operator_token
@@ -70,8 +72,18 @@ class CommercialSmoke:
         self.task_path: str | None = None
         self.task_terminal = False
         self.started_on = datetime.now(UTC).date()
+        self.stripe_sim = stripe_sim
+        self.stripe_checkout: str | None = None
+        self.stripe_subscription: str | None = None
+        self.stripe_invoice: str | None = None
 
     async def run(self) -> int:
+        stripe_steps = (
+            ("stripe-complete", self.complete_stripe_checkout),
+            ("stripe-payment-failed", self.check_stripe_payment_failures),
+            ("stripe-suspended-submit", self.check_stripe_suspension),
+            ("stripe-payment-succeeded", self.check_stripe_payment),
+        ) if self.stripe_sim is not None else ()
         steps = (
             ("tenant-create", self.create_tenant),
             ("tenant-bootstrap", self.bootstrap_tenant),
@@ -84,6 +96,7 @@ class CommercialSmoke:
             ("usage-csv", self.check_csv),
             ("knowledge", self.check_knowledge),
             ("stripe-checkout", self.check_stripe),
+            *stripe_steps,
             ("suspend", self.suspend_tenant),
             ("suspended-submit", self.check_suspension),
             ("resume", self.resume_tenant),
@@ -297,7 +310,73 @@ class CommercialSmoke:
                                       body={"plan": "team"})
         url = httpx.URL(checkout.json()["url"])
         require(url.scheme in {"https", "http"} and url.host, "missing checkout URL")
+        if self.stripe_sim is not None:
+            require(url.scheme == self.stripe_sim.scheme and url.netloc == self.stripe_sim.netloc
+                    and not url.userinfo and re.fullmatch(r"/_sim/checkout/cs_[a-zA-Z0-9_-]+", url.path),
+                    "checkout URL does not match --stripe-sim")
+            self.stripe_checkout = url.path
         return "received a checkout URL"
+
+    async def stripe_control(self, path: str) -> dict[str, Any]:
+        assert self.stripe_sim is not None
+        response = await self.http.post(self.stripe_sim.copy_with(path=path))
+        require(response.status_code == 200, f"Stripe simulator returned HTTP {response.status_code}")
+        return response.json()
+
+    def stripe_subscription_path(self) -> str:
+        if self.stripe_subscription is None:
+            raise CheckSkipped("Stripe is disabled on the API")
+        return f"/_sim/subscriptions/{self.stripe_subscription}"
+
+    async def check_stripe_tenant(self, status: str) -> dict[str, Any]:
+        tenant = (await self.request("GET", "/v1/tenant", self.admin_token)).json()
+        require(tenant["id"] == self.tenant_id and tenant["plan"] == "team"
+                and tenant["status"] == status, f"expected a {status} team tenant")
+        billing = (await self.request("GET", "/v1/tenant/billing", self.admin_token)).json()
+        require(billing["suspended_for_nonpayment"] is (status == "suspended"),
+                "tenant suspension did not match Stripe payment state")
+        return billing
+
+    async def complete_stripe_checkout(self) -> str:
+        if self.stripe_checkout is None:
+            raise CheckSkipped("Stripe is disabled on the API")
+        tenant = (await self.request("PATCH", self.tenant_path, self.operator_token,
+                                     body={"plan": "free"})).json()
+        require(tenant["plan"] == "free", "could not set the initial free plan")
+        checkout = await self.stripe_control(f"{self.stripe_checkout}/complete")
+        subscription = checkout["subscription"]
+        require(isinstance(subscription, str) and re.fullmatch(r"sub_[a-zA-Z0-9_-]+", subscription),
+                "completed checkout did not return a subscription")
+        self.stripe_subscription = subscription
+        billing = await self.check_stripe_tenant("active")
+        require(billing["subscription_status"] == "active", "subscription did not become active")
+        return "signed checkout activated the subscription and changed the plan to team"
+
+    async def check_stripe_payment_failures(self) -> str:
+        path = self.stripe_subscription_path()
+        for attempt in range(1, 4):
+            invoice = await self.stripe_control(f"{path}/payment_failed")
+            self.stripe_invoice = self.stripe_invoice or invoice["id"]
+            require(invoice["id"] == self.stripe_invoice and invoice["status"] == "open"
+                    and invoice["attempt_count"] == attempt, "expected retries on the same invoice")
+            await self.check_stripe_tenant("suspended" if attempt == 3 else "active")
+        return "three failed payments suspended the tenant"
+
+    async def check_stripe_suspension(self) -> str:
+        self.stripe_subscription_path()
+        return await self.check_suspension()
+
+    async def check_stripe_payment(self) -> str:
+        invoice = await self.stripe_control(f"{self.stripe_subscription_path()}/payment_succeeded")
+        billing = await self.check_stripe_tenant("active")
+        require(billing["subscription_status"] == "active", "subscription did not recover")
+        require(invoice["id"] == self.stripe_invoice and invoice["status"] == "paid"
+                and 0 < invoice["amount_paid"] == invoice["amount_due"], "expected the overdue invoice to be paid")
+        require(any(row["id"] == self.stripe_invoice and row["status"] == "paid"
+                    and row["subscription_id"] == self.stripe_subscription
+                    and row["amount_paid"] == invoice["amount_paid"] for row in billing["invoices"]),
+                "paid invoice missing from tenant billing")
+        return "payment resumed the tenant and the paid invoice is listed"
 
     async def set_tenant_status(self, action: str, status: str) -> None:
         response = await self.request("POST", f"{self.tenant_path}/{action}", self.operator_token)
@@ -322,6 +401,8 @@ class CommercialSmoke:
             if self.task_path and not self.task_terminal:
                 await self.request("POST", f"{self.task_path}/cancel", self.admin_token,
                                    expected=(200, 409))
+            if self.stripe_subscription is not None:
+                await self.stripe_control(f"{self.stripe_subscription_path()}/cancel")
         finally:
             response = await self.request("DELETE", self.tenant_path, self.operator_token,
                                           expected=(204, 404, 405, 501))
@@ -332,9 +413,11 @@ class CommercialSmoke:
         return "tenant deleted"
 
 
-async def run(api: httpx.URL, token: str, repo: str | None, wait_seconds: int) -> int:
+async def run(
+    api: httpx.URL, token: str, repo: str | None, wait_seconds: int, stripe_sim: httpx.URL | None = None,
+) -> int:
     async with httpx.AsyncClient(base_url=api, timeout=30, trust_env=False) as http:
-        return await CommercialSmoke(http, token, repo, wait_seconds).run()
+        return await CommercialSmoke(http, token, repo, wait_seconds, stripe_sim).run()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,6 +425,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--api", default="http://127.0.0.1:8000", help="SCA API base URL")
     parser.add_argument("--with-agent", action="store_true", help="run one verified coding task")
     parser.add_argument("--repo", help="bare repository path on the worker or Git clone URL")
+    parser.add_argument("--stripe-sim", metavar="URL", help="run the signed billing flow against this simulator")
     parser.add_argument("--wait-seconds", type=int, default=600, help="deadline for each polling step")
     args = parser.parse_args(argv)
     if args.with_agent and not args.repo:
@@ -357,7 +441,16 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--api requires an HTTP(S) base URL")
     if api.scheme not in {"http", "https"} or not api.host or api.userinfo:
         parser.error("--api requires an HTTP(S) base URL without credentials")
-    return asyncio.run(run(api, token, args.repo if args.with_agent else None, args.wait_seconds))
+    stripe_sim = None
+    if args.stripe_sim is not None:
+        try:
+            stripe_sim = httpx.URL(args.stripe_sim)
+        except httpx.InvalidURL:
+            parser.error("--stripe-sim requires an HTTP(S) origin")
+        if (stripe_sim.scheme not in {"http", "https"} or not stripe_sim.host or stripe_sim.userinfo
+                or stripe_sim.raw_path != b"/" or stripe_sim.fragment):
+            parser.error("--stripe-sim requires an HTTP(S) origin without credentials")
+    return asyncio.run(run(api, token, args.repo if args.with_agent else None, args.wait_seconds, stripe_sim))
 
 
 if __name__ == "__main__":

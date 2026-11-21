@@ -1,10 +1,7 @@
 import asyncio
-import hmac
 import json
-import time
-from datetime import UTC, date, datetime
+from datetime import date, datetime
 from decimal import Decimal
-from urllib.parse import parse_qs
 from uuid import uuid4
 
 import httpx
@@ -15,6 +12,7 @@ from test_api import FakeOrchestrator
 
 from sca.api.app import create_app
 from sca.billing.payments import StripePaymentProvider
+from sca.billing.stripe_sim import StripeSimulator, sign_webhook
 from sca.billing.usage_to_stripe import report_usage
 from sca.config import Settings
 from sca.storage.local import LocalObjectStore
@@ -26,78 +24,27 @@ OTHER = {"Authorization": "Bearer other-fixture"}
 VIEWER = {"Authorization": "Bearer viewer-fixture"}
 BILLING = "/v1/tenant/billing"
 TASK = {"kind": "coding", "spec": {"repo_url": "/tmp/repo", "instruction": "fix"}}
-PERIOD_END = 1796083200
 
 
-class FakeStripe:
-    def __init__(self):
-        self.calls = []
-        self.customers = {}
-        self.sessions = {}
-        self.subscriptions = {}
-        self.invoice_items = []
+class StripeRequests(httpx.ASGITransport):
+    def __init__(self, simulator: StripeSimulator) -> None:
+        super().__init__(app=simulator.app)
+        self.calls: list[tuple[str, str]] = []
         self.lose_item_response = False
+        self.skip_checkout_events = False
 
-    def request(self, request: httpx.Request) -> httpx.Response:
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         method, path = request.method, request.url.path
         self.calls.append((method, path))
         assert request.url.host == "stripe.example"
         if method == "POST":
             assert request.headers["Idempotency-Key"]
-        form = {key: value[0] for key, value in parse_qs(request.content.decode()).items()}
-        if path == "/v1/customers":
-            tenant = form["metadata[sca_tenant_id]"]
-            assert tenant not in self.customers
-            self.customers[tenant] = "cus_" + tenant
-            result = {"id": self.customers[tenant]}
-        elif path == "/v1/checkout/sessions":
-            customer = form["customer"]
-            assert customer in self.customers.values()
-            assert form["mode"] == "subscription" and form["line_items[0][quantity]"] == "1"
-            assert form["success_url"] == form["cancel_url"] == "https://sca.example/portal#/team"
-            session_id = "cs_" + str(len(self.sessions) + 1)
-            result = self.sessions[session_id] = {
-                "id": session_id, "status": "open", "customer": customer,
-                "url": "https://checkout.example/" + session_id,
-                "price": form["line_items[0][price]"],
-            }
-        elif path.startswith("/v1/checkout/sessions/"):
-            parts = path.split("/")
-            result = self.sessions[parts[4]]
-            if method == "POST":
-                assert parts[-1] == "expire"
-                result.update(status="expired", url=None)
-        elif path == "/v1/billing_portal/sessions":
-            assert form["customer"] in self.customers.values()
-            result = {"url": "https://billing.example/" + form["customer"]}
-        elif path.startswith("/v1/subscriptions/"):
-            result = self.subscriptions[path.rsplit("/", 1)[1]]
-        elif path == "/v1/invoiceitems" and method == "GET":
-            result = {"has_more": False, "data": [
-                row for row in self.invoice_items if row["customer"] == request.url.params["customer"]
-            ]}
-        elif path == "/v1/invoiceitems" and method == "POST":
-            assert form["currency"] == "usd"
-            assert form["metadata[sca_usage_key]"] == request.headers["Idempotency-Key"]
-            subscription = self.subscriptions[form["subscription"]]
-            assert form["customer"] == subscription["customer"]
-            result = {"id": "ii_" + str(len(self.invoice_items) + 1), "customer": form["customer"],
-                      "amount": int(form["amount"]), "metadata": {"sca_usage_key": request.headers["Idempotency-Key"]}}
-            self.invoice_items.append(result)
-            if self.lose_item_response:
-                self.lose_item_response = False
-                raise httpx.ReadTimeout("test response lost", request=request)
-        else:
-            raise AssertionError((method, path))
-        return httpx.Response(200, json=result)
-
-    def subscribe(self, tenant: str, subscription_id: str, price: str, status: str = "active") -> dict:
-        subscription = {
-            "id": subscription_id, "customer": self.customers[tenant], "status": status,
-            "items": {"data": [{"price": {"id": price}, "current_period_end": PERIOD_END}]},
-        }
-        self.subscriptions[subscription_id] = subscription
-        return subscription
+        response = await super().handle_async_request(request)
+        if self.lose_item_response and (method, path) == ("POST", "/v1/invoiceitems"):
+            assert response.status_code == 200
+            self.lose_item_response = False
+            raise httpx.ReadTimeout("test response lost", request=request)
+        return response
 
 
 @pytest.fixture
@@ -114,13 +61,30 @@ async def billing_api(store, api_store, tmp_path, monkeypatch):
     objects = LocalObjectStore(tmp_path)
     app = create_app(store=api_store, platform_store=store, object_store=objects,
                      orchestrator=FakeOrchestrator(store))
-    fake = FakeStripe()
-    provider = StripePaymentProvider(settings, httpx.MockTransport(fake.request))
+    webhook_path = "/v1/billing/stripe/webhook"
+    webhook_secret = settings.stripe_webhook_secret.get_secret_value()
+    api_transport = httpx.ASGITransport(app=app)
+
+    async def deliver(request: httpx.Request) -> httpx.Response:
+        if stripe.skip_checkout_events and json.loads(request.content)["type"] in {
+            "checkout.session.completed", "customer.subscription.created",
+        }:
+            return httpx.Response(200, json={"received": True})
+        return await api_transport.handle_async_request(request)
+
+    simulator = StripeSimulator(str(settings.stripe_api_url), settings.api_url + webhook_path,
+                                webhook_secret, webhook_transport=httpx.MockTransport(deliver))
+    stripe = StripeRequests(simulator)
+    provider = StripePaymentProvider(settings, stripe)
     app.state.payment_provider = provider
     async with store._transaction() as session:
         await session.execute(text("UPDATE plans SET stripe_price_id='price_team', included_usage_usd=20 WHERE name='team'"))
         await session.execute(text("UPDATE plans SET stripe_price_id='price_enterprise' WHERE name='enterprise'"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with (
+        httpx.AsyncClient(transport=api_transport, base_url=settings.api_url) as client,
+        httpx.AsyncClient(transport=httpx.ASGITransport(app=simulator.app),
+                          base_url=str(settings.stripe_api_url)) as sim,
+    ):
         for tenant in ("acme", "other"):
             created = await client.post("/v1/admin/tenants", headers=PLATFORM,
                                         json={"id": tenant, "display_name": tenant})
@@ -129,28 +93,21 @@ async def billing_api(store, api_store, tmp_path, monkeypatch):
         async def send(type_: str, obj: dict, *, event_id: str | None = None, valid: bool = True):
             payload = json.dumps({"id": event_id or "evt_" + uuid4().hex, "type": type_,
                                   "data": {"object": obj}}).encode()
-            timestamp = int(time.time())
-            secret = settings.stripe_webhook_secret.get_secret_value().encode()
-            digest = hmac.digest(secret, str(timestamp).encode() + b"." + payload, "sha256").hex()
-            return await client.post("/v1/billing/stripe/webhook", content=payload, headers={
-                "Stripe-Signature": f"t={timestamp},v1={digest if valid else 'bad'}",
+            return await client.post(webhook_path, content=payload, headers={
+                "Stripe-Signature": sign_webhook(payload, webhook_secret if valid else uuid4().hex),
             })
 
-        yield client, fake, provider, send
+        yield client, sim, stripe, provider, send
 
 
-def invoice(customer: str, subscription: str, invoice_id: str, attempt: int, *, paid: bool = False):
-    return {
-        "id": invoice_id, "customer": customer, "number": "SCA-0001", "status": "paid" if paid else "open",
-        "attempt_count": attempt, "amount_due": 2900, "amount_paid": 2900 if paid else 0, "currency": "usd",
-        "period_start": PERIOD_END - 86400 * 30, "period_end": PERIOD_END,
-        "hosted_invoice_url": "https://invoice.example/" + invoice_id,
-        "parent": {"type": "subscription_details", "subscription_details": {"subscription": subscription}},
-    }
+async def simulate(sim: httpx.AsyncClient, path: str, *, body: dict | None = None) -> dict:
+    result = await sim.post(path, json=body)
+    assert result.status_code == 200
+    return result.json()
 
 
 async def test_checkout_webhook_plan_changes_and_recovery(billing_api):
-    client, stripe, _, send = billing_api
+    client, sim, stripe, _, send = billing_api
 
     async def account():
         result = await client.get(BILLING, headers=TENANT)
@@ -170,40 +127,49 @@ async def test_checkout_webhook_plan_changes_and_recovery(billing_api):
     assert first.status_code == retry.status_code == 200 and first.json() == retry.json()
     assert stripe.calls.count(("POST", "/v1/customers")) == 1
     assert stripe.calls.count(("POST", "/v1/checkout/sessions")) == 1
-    assert (await checkout("team")).json() == {"url": "https://checkout.example/cs_2"}
-    assert stripe.sessions["cs_1"]["status"] == "expired"
-    assert stripe.sessions["cs_2"]["price"] == "price_team"
+    old_session = first.json()["url"].rsplit("/", 1)[1]
+    team = await checkout("team")
+    assert team.status_code == 200
+    checkout_url = httpx.URL(team.json()["url"])
+    session_id = checkout_url.path.rsplit("/", 1)[1]
+    assert checkout_url.host == "stripe.example" and checkout_url.path.startswith("/_sim/checkout/")
+    assert (await sim.get(f"/v1/checkout/sessions/{old_session}")).json()["status"] == "expired"
+    session = (await sim.get(f"/v1/checkout/sessions/{session_id}")).json()
+    assert session["price"] == "price_team"
+    assert session["success_url"] == session["cancel_url"] == "https://sca.example/portal#/team"
     assert (await account())["has_customer"] and (await account())["plan"] == "free"
     assert (await client.post(BILLING + "/portal", headers=OTHER)).status_code == 409
-    assert (await client.post(BILLING + "/portal", headers=TENANT)).json() == {
-        "url": "https://billing.example/cus_acme",
-    }
+    portal = await client.post(BILLING + "/portal", headers=TENANT)
+    assert portal.status_code == 200
+    assert (await sim.get(portal.json()["url"])).status_code == 200
 
-    live = stripe.subscribe("acme", "sub_acme", "price_team")
-    stripe.sessions["cs_2"].update(status="complete", subscription="sub_acme", url=None)
-    completed = {"id": "cs_2", "mode": "subscription", "customer": "cus_acme", "subscription": "sub_acme"}
-    assert (await send("checkout.session.completed", completed, valid=False)).status_code == 400
-    assert (await send("checkout.session.completed", completed)).status_code == 200
+    assert (await send("checkout.session.completed", session, valid=False)).status_code == 400
+    completed = await simulate(sim, f"{checkout_url.path}/complete")
+    sub_id = completed["subscription"]
+    subscription_url = f"/v1/subscriptions/{sub_id}"
+    subscription_control = f"/_sim/subscriptions/{sub_id}"
+    live = (await sim.get(subscription_url)).json()
     subscribed = await account()
     assert (subscribed["plan"], subscribed["subscription_status"]) == ("team", "active")
-    assert datetime.fromisoformat(subscribed["current_period_end"]) == datetime.fromtimestamp(PERIOD_END, UTC)
+    assert datetime.fromisoformat(subscribed["current_period_end"]).timestamp() == (
+        live["items"]["data"][0]["current_period_end"]
+    )
     assert (await checkout("enterprise")).status_code == 409
-    assert (await send("customer.subscription.created", live)).status_code == 200
-    changed = stripe.subscribe("acme", "sub_acme", "price_enterprise")
+    changed = await simulate(sim, f"{subscription_control}/update", body={"price_id": "price_enterprise"})
+    lookups = stripe.calls.count(("GET", subscription_url))
     for _ in range(2):
         assert (await send("customer.subscription.updated", changed, event_id="evt_plan_change")).status_code == 200
-    assert stripe.calls.count(("GET", "/v1/subscriptions/sub_acme")) == 3
+    assert stripe.calls.count(("GET", subscription_url)) == lookups + 1
     assert (await send("customer.subscription.updated", live)).status_code == 200
     assert (await account())["plan"] == "enterprise"
 
     for attempt in range(1, 4):
-        failed = invoice("cus_acme", "sub_acme", "in_acme", attempt)
-        assert (await send("invoice.payment_failed", failed)).status_code == 200
+        failed = await simulate(sim, f"{subscription_control}/payment_failed")
+        assert failed["attempt_count"] == attempt
         assert (await account())["suspended_for_nonpayment"] == (attempt == 3)
     blocked = await client.post("/v1/tasks", headers=TENANT, json=TASK)
     assert blocked.status_code == 403 and blocked.json()["error"]["code"] == "tenant_suspended"
-    paid = invoice("cus_acme", "sub_acme", "in_acme", 4, paid=True)
-    assert (await send("invoice.paid", paid)).status_code == 200
+    paid = await simulate(sim, f"{subscription_control}/payment_succeeded")
     assert (await send("invoice.payment_failed", failed)).status_code == 200
     resumed = await account()
     assert not resumed["suspended_for_nonpayment"]
@@ -212,21 +178,26 @@ async def test_checkout_webhook_plan_changes_and_recovery(billing_api):
     assert stored["hosted_invoice_url"] == paid["hosted_invoice_url"]
     assert (await client.post("/v1/tasks", headers=TENANT, json=TASK)).status_code == 201
 
-    assert (await send("invoice.payment_failed", invoice("cus_acme", "sub_acme", "in_manual", 3))).status_code == 200
+    for _ in range(3):
+        manual = await simulate(sim, f"{subscription_control}/payment_failed")
     assert (await client.post("/v1/admin/tenants/acme/suspend", headers=PLATFORM)).status_code == 200
-    assert (await send("invoice.paid", invoice("cus_acme", "sub_acme", "in_manual", 4, paid=True))).status_code == 200
+    assert (await simulate(sim, f"{subscription_control}/payment_succeeded"))["id"] == manual["id"]
     assert (await client.post("/v1/tasks", headers=TENANT, json=TASK)).status_code == 403
     assert not (await account())["suspended_for_nonpayment"]
     assert (await client.post("/v1/admin/tenants/acme/resume", headers=PLATFORM)).status_code == 200
 
-    canceled = stripe.subscribe("acme", "sub_acme", "price_enterprise", "canceled")
-    assert (await send("customer.subscription.deleted", canceled)).status_code == 200
+    canceled = await simulate(sim, f"{subscription_control}/cancel")
     view = await account()
     assert (view["plan"], view["subscription_status"]) == ("free", "canceled")
     assert view["suspended_for_nonpayment"] and view["can_checkout"]
-    assert (await checkout("team")).status_code == 200
-    stripe.subscribe("acme", "sub_new", "price_team")
-    assert (await send("invoice.paid", invoice("cus_acme", "sub_new", "in_new", 1, paid=True))).status_code == 200
+    replacement = await checkout("team")
+    assert replacement.status_code == 200
+    replacement_path = httpx.URL(replacement.json()["url"]).path
+    stripe.skip_checkout_events = True
+    new_subscription = (await simulate(sim, f"{replacement_path}/complete"))["subscription"]
+    stripe.skip_checkout_events = False
+    assert (await account())["subscription_status"] == "canceled"
+    new_paid = await simulate(sim, f"/_sim/subscriptions/{new_subscription}/payment_succeeded")
     assert (await send("customer.subscription.deleted", canceled)).status_code == 200
     assert (await account())["plan"] == "team" and not (await account())["suspended_for_nonpayment"]
 
@@ -235,15 +206,17 @@ async def test_checkout_webhook_plan_changes_and_recovery(billing_api):
     receipts = (await client.get("/v1/admin/billing?view=events&tenant_id=acme", headers=PLATFORM)).json()
     assert sum(row["id"] == "evt_plan_change" for row in receipts) == 1
     assert {row["id"] for row in (await client.get("/v1/admin/billing?view=invoices&tenant_id=acme",
-                                                 headers=PLATFORM)).json()} == {"in_acme", "in_manual", "in_new"}
+                                                 headers=PLATFORM)).json()} == {paid["id"], manual["id"], new_paid["id"]}
 
 
 async def test_monthly_overage_is_reported_once_after_a_lost_stripe_response(billing_api, store):
-    client, stripe, provider, send = billing_api
+    client, sim, stripe, provider, _ = billing_api
+    customers = {}
     for tenant, headers in [("acme", TENANT), ("other", OTHER)]:
-        assert (await client.post(BILLING + "/checkout", headers=headers, json={"plan": "team"})).status_code == 200
-        sub = stripe.subscribe(tenant, "sub_" + tenant, "price_team")
-        assert (await send("customer.subscription.created", sub)).status_code == 200
+        response = await client.post(BILLING + "/checkout", headers=headers, json={"plan": "team"})
+        assert response.status_code == 200
+        path = httpx.URL(response.json()["url"]).path
+        customers[tenant] = (await simulate(sim, f"{path}/complete"))["customer"]
     async with store._transaction() as session:
         await session.execute(text("""INSERT INTO usage_daily (tenant_id, day, cost_usd) VALUES
             ('acme', '2025-10-01', 19), ('acme', '2025-10-31', 2.01), ('acme', '2025-11-01', 10),
@@ -260,7 +233,8 @@ async def test_monthly_overage_is_reported_once_after_a_lost_stripe_response(bil
     assert second["reported"] + concurrent["reported"] == 1
     assert (await report_usage(store, provider, month, Decimal(2)))["reported"] == 0
     assert stripe.calls.count(("POST", "/v1/invoiceitems")) == 1
-    assert [(item["customer"], item["amount"]) for item in stripe.invoice_items] == [("cus_acme", 152)]
+    items = (await sim.get("/v1/invoiceitems")).json()["data"]
+    assert [(item["customer"], item["amount"]) for item in items] == [(customers["acme"], 152)]
 
 
 async def test_payment_tables_enforce_rls(store, api_store):

@@ -11,6 +11,7 @@ help() {
   down    按 PID 文件停止进程；--all 同时停止 Compose 服务（保留数据）
   status  查看服务、网关连接和已注册版本
   logs    查看 API 和 worker 最近日志
+设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 需要 Python 3.12、Git、Docker Compose 和至少 15 GB 可用磁盘。
 OpenCode 构建内存上限为 2.5 GB；macOS 需要 Docker Desktop 和 GNU timeout。
 HELP
@@ -29,6 +30,9 @@ run() { "$TIMEOUT" 900 "$@"; }
 fail() { echo "$1" >&2; exit 1; }
 mkdir -p .data/run
 PY="$ROOT/.venv/bin/python"
+STRIPE_SIM_PORT=12111
+STRIPE_SIM_URL="http://127.0.0.1:$STRIPE_SIM_PORT"
+STRIPE_SIM_MARKER=.data/run/stripe-sim.prices
 # Build and run images natively: arm64 on Apple silicon and ARM Linux, amd64 elsewhere.
 case "$(uname -m)" in
     arm64|aarch64) export DOCKER_DEFAULT_PLATFORM=linux/arm64 SCA_CONTAINER_ARCH=arm64;;
@@ -114,9 +118,102 @@ start() {
     run sleep 0.2
     run ps -p "$pid" -o lstart= -o args= > ".data/run/$name.identity"
 }
+stop() {
+    local name=$1 pid
+    if owned "$name"; then
+        read -r pid < ".data/run/$name.pid"
+        kill "$pid"
+        for ((i=0; i<30; i++)); do alive "$name" || break; run sleep 1; done
+        alive "$name" && fail '进程尚未退出，请检查日志后重试。'
+    elif alive "$name"; then fail 'PID 文件与进程不符，拒绝停止。'; fi
+    rm -f ".data/run/$name.pid" ".data/run/$name.identity"
+}
+stripe_sim_prices() {
+    run "$PY" - "$1" <<'PY'
+import asyncio
+import os
+import sys
+
+from sqlalchemy import text
+
+from sca.config import get_settings
+from sca.db.engine import make_engine
+
+
+async def configure_prices(install: bool) -> None:
+    engine = make_engine(get_settings().database_url)
+    try:
+        async with engine.begin() as conn:
+            for plan in ("team", "enterprise"):
+                params = {"plan": plan, "price": os.environ[f"SCA_STRIPE_SIM_{plan.upper()}_PRICE_ID"]}
+                if install:
+                    await conn.execute(text("""
+                        UPDATE plans SET stripe_price_id = :price WHERE name = :plan
+                        AND stripe_price_id IS NULL
+                    """), params)
+                else:
+                    await conn.execute(text("""
+                        UPDATE plans SET stripe_price_id = NULL WHERE name = :plan AND stripe_price_id = :price
+                    """), params)
+    finally:
+        await engine.dispose()
+
+
+try:
+    asyncio.run(configure_prices(sys.argv[1] == "install"))
+except Exception:
+    raise SystemExit("更新 Stripe 模拟套餐失败，请检查数据库连接和迁移。") from None
+PY
+}
+start_stripe_sim() {
+    run "$PY" - <<'PY'
+import secrets
+from pathlib import Path
+
+from dotenv import dotenv_values, set_key
+
+portal = Path(".data/portal.env")
+values = dotenv_values(portal, interpolate=False)
+for name, prefix in (
+    ("SCA_STRIPE_SIM_SECRET_KEY", "sk_test_sim_"),
+    ("SCA_STRIPE_SIM_WEBHOOK_SECRET", "whsec_"),
+    ("SCA_STRIPE_SIM_TEAM_PRICE_ID", "price_sim_team_"),
+    ("SCA_STRIPE_SIM_ENTERPRISE_PRICE_ID", "price_sim_enterprise_"),
+):
+    if not values.get(name):
+        set_key(portal, name, prefix + secrets.token_hex(32), export=True)
+portal.chmod(0o600)
+PY
+    load_env
+    export SCA_STRIPE_API_URL="$STRIPE_SIM_URL"
+    export SCA_STRIPE_SECRET_KEY="$SCA_STRIPE_SIM_SECRET_KEY"
+    export SCA_STRIPE_WEBHOOK_SECRET="$SCA_STRIPE_SIM_WEBHOOK_SECRET"
+    start stripe-sim "$PY" -m sca.billing.stripe_sim --port "$STRIPE_SIM_PORT" \
+        --webhook-url "${SCA_API_URL%/}/v1/billing/stripe/webhook"
+    local i
+    for ((i=0; i<20; i++)); do
+        owned stripe-sim || fail 'Stripe 模拟器启动失败，请查看 .data/run/stripe-sim.log。'
+        if run "$PY" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=1).close()' \
+            "$STRIPE_SIM_URL/_sim/health" >/dev/null 2>&1; then
+            touch "$STRIPE_SIM_MARKER"
+            stripe_sim_prices install
+            return
+        fi
+        run sleep 0.5
+    done
+    fail 'Stripe 模拟器启动超时，请查看 .data/run/stripe-sim.log。'
+}
 up() {
     load_env
+    if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
+        if [[ ! -f "$STRIPE_SIM_MARKER" ]] && { owned api || owned worker; }; then
+            fail '请先运行 down，再以 Stripe 模拟模式启动 Portal。'
+        fi
+    elif [[ -f "$STRIPE_SIM_MARKER" ]] || owned stripe-sim; then
+        fail '请先运行 down，再启动普通模式的 Portal。'
+    fi
     docker_access
+    if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then start_stripe_sim; fi
     start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --host 127.0.0.1 --port 8000
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
@@ -128,7 +225,11 @@ up() {
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
     printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"
-    echo '远程访问: ssh -L 8000:127.0.0.1:8000 host'
+    if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
+        echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"
+    else
+        echo '远程访问: ssh -L 8000:127.0.0.1:8000 host'
+    fi
 }
 setup() {
     for tool in python3.12 git; do command -v "$tool" >/dev/null || fail "缺少依赖: $tool"; done
@@ -183,6 +284,10 @@ settings = dict(
     # The brain backend runs `docker exec` itself; reuse the wrapper that falls back to `sg docker`.
     SCA_OPENCODE_BRAIN_DOCKER_PREFIX=json.dumps([str(Path(".data/run/docker").resolve())]),
 )
+for key in ("SCA_STRIPE_SIM_SECRET_KEY", "SCA_STRIPE_SIM_WEBHOOK_SECRET",
+            "SCA_STRIPE_SIM_TEAM_PRICE_ID", "SCA_STRIPE_SIM_ENTERPRISE_PRICE_ID"):
+    if previous.get(key):
+        settings[key] = previous[key]
 portal.write_text("".join(f"export {key}={shlex.quote(value)}\n" for key, value in settings.items()))
 portal.chmod(0o600)
 PY
@@ -210,24 +315,27 @@ case "$COMMAND" in
     setup) setup;;
     up) up;;
     down)
-        for name in worker api; do
-            if owned "$name"; then
-                read -r pid < ".data/run/$name.pid"
-                kill "$pid"
-                for ((i=0; i<30; i++)); do alive "$name" || break; run sleep 1; done
-                alive "$name" && fail '进程尚未退出，请检查日志后重试。'
-            elif alive "$name"; then fail 'PID 文件与进程不符，拒绝停止。'; fi
-            rm -f ".data/run/$name.pid" ".data/run/$name.identity"
-        done
+        for name in worker api stripe-sim; do stop "$name"; done
+        if [[ -f "$STRIPE_SIM_MARKER" ]]; then
+            load_env
+            stripe_sim_prices remove
+            rm -f "$STRIPE_SIM_MARKER"
+        fi
         if [[ ${1:-} == --all ]]; then docker_access; compose down; fi;;
     status)
         load_env
         for name in api worker; do
             if owned "$name"; then echo "$name: 运行中"; else echo "$name: 未运行或 PID 不匹配"; fi
         done
+        if [[ -f .data/run/stripe-sim.pid ]]; then
+            if owned stripe-sim; then echo 'stripe-sim: 运行中'; else echo 'stripe-sim: 未运行或 PID 不匹配'; fi
+        fi
         docker_access
         compose ps
         request /v1/portal/config
         request /v1/agents/opencode/versions;;
-    logs) run tail -n 100 .data/run/api.log .data/run/worker.log;;
+    logs)
+        log_files=(.data/run/api.log .data/run/worker.log)
+        if [[ -f .data/run/stripe-sim.pid ]]; then log_files+=(.data/run/stripe-sim.log); fi
+        run tail -n 100 "${log_files[@]}";;
 esac

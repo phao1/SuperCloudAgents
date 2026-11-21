@@ -126,6 +126,48 @@ sca admin report-usage-to-stripe --month 2026-10
 
 命令使用已有用量数据和当前订阅套餐的包含额度，把超出额度的网关成本乘以 `SCA_BILLING_MARKUP` 并四舍五入到美分，作为 USD 项目加入对应订阅的下一张发票。月订阅费由 Stripe Price 收取。金额大于 0 时，每个租户每月登记一项，登记后金额固定，重跑会跳过已报送的项目。返回的 `failed_tenants` 是可重跑的租户，任一报送失败时命令以非零状态退出。
 
+## Stripe 模拟器
+
+在已完成 Portal `setup` 和 `0022_payments` 迁移的演示数据库上启用模拟付款。启用前如有正在运行的
+Portal，先执行 `down`。脚本将模拟密钥和 `team`、`enterprise` 的占位 Price ID 保存到
+`.data/portal.env`，对本次运行设置 `SCA_STRIPE_API_URL=http://127.0.0.1:12111`。启动时为尚未配置
+Price 的套餐写入占位映射，已有映射继续可用。`down` 停止模拟器并移除本次使用的占位映射，保留生成的配置供下次启动。
+
+```bash
+SCA_STRIPE_SIMULATOR=1 bash scripts/portal_demo.sh up
+bash scripts/portal_demo.sh down
+```
+
+以新演示租户的管理员身份打开 Portal 的 **团队与用量 → 订阅与付款**，选择套餐，打开结账链接，点击
+**完成付款**。模拟器将结账和订阅事件签名发送到 SCA，收到确认后跳回结账会话的成功地址。
+「管理付款方式」打开模拟账单页，可查看模拟发票。状态保存在内存中，每次重启模拟器后请用新演示租户。
+远程浏览器访问时通过 SSH 转发 `8000` 和 `12111` 两个端口。
+
+也可单独启动。为 API 和模拟器注入同一个 `SCA_STRIPE_WEBHOOK_SECRET`，为 API 配置占位的
+`SCA_STRIPE_SECRET_KEY`、模拟器的 `SCA_STRIPE_API_URL` 和演示套餐的 Price 映射。
+
+```bash
+.venv/bin/python -m sca.billing.stripe_sim --port 12111 \
+  --webhook-url http://127.0.0.1:8000/v1/billing/stripe/webhook
+```
+
+`CHECKOUT_URL` 是 `POST /v1/tenant/billing/checkout` 返回的链接，`SUBSCRIPTION_ID` 取自模拟完成接口的
+`subscription` 字段。付款失败会重试同一张发票，默认第三次暂停提交。模拟付款成功后可在租户账单里核对
+发票与恢复状态。发票包含 29 美元的模拟月费和该订阅尚未入账的超额用量项目。
+
+```bash
+curl -fsS -X POST "$CHECKOUT_URL/complete"
+for attempt in 1 2 3; do
+  curl -fsS -X POST "http://127.0.0.1:12111/_sim/subscriptions/$SUBSCRIPTION_ID/payment_failed"
+done
+curl -fsS -X POST "http://127.0.0.1:12111/_sim/subscriptions/$SUBSCRIPTION_ID/payment_succeeded"
+curl -fsS "$SCA_API_URL/v1/tenant/billing" -H "Authorization: Bearer $TENANT_TOKEN"
+```
+
+同一订阅支持 `POST /_sim/subscriptions/{id}/update`（JSON 含 `price_id`）与
+`POST /_sim/subscriptions/{id}/cancel`，分别模拟换套餐和取消订阅。回调如返回失败，可重试同一个模拟操作。
+自动验收命令见 [基础商用验收](commercial-readiness.md#运行烟测)。
+
 ## 工作目录和缓存清理
 
 `SCA_TASK_RETENTION_DAYS` 默认 14 天。定时维护清理超过保留期的终态任务目录
