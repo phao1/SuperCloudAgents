@@ -1,3 +1,4 @@
+import json
 import re
 import shutil
 import subprocess
@@ -14,6 +15,15 @@ ASSETS = [
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
+TENANT_PORTAL_CONFIG = {
+    "guest_view": False,
+    "model_configured": True,
+    "models": ["model-a"],
+    "default_model": "model-a",
+    "agent_backends": ["codex"],
+    "default_agent_backend": "codex",
+}
+GUEST_PORTAL_CONFIG = {"guest_view": True, "guest_tenant": "eval", "model_configured": False}
 
 
 class PortalAssets(HTMLParser):
@@ -179,7 +189,7 @@ def test_portal_guest_history_bootstrap(tmp_path):
         pytest.skip("Node is unavailable")
     script = source.split('<script>')[1].split('</script>')[0]
     sections = [
-        ("function authHeaders()", "function options("),
+        ("function el(", "function table("),
         ("async function loadConfig(", "async function loadSuites("),
         ("const pages=", "async function route("),
         ("async function loadRecentTasks(", "$('refresh').onclick="),
@@ -188,20 +198,21 @@ def test_portal_guest_history_bootstrap(tmp_path):
 const assert=require('node:assert/strict');
 const elements=new Map(),location={hash:''},history={replaceState:(a,b,hash)=>{location.hash=hash}};
 function $(id){
-  if(!elements.has(id))elements.set(id,{hidden:true,textContent:'',querySelector:()=>$('save')});
+  if(!elements.has(id))elements.set(id,{
+    hidden:true,textContent:'',value:'',options:[],querySelector:()=>$('save'),
+    replaceChildren(){this.options=[]},append(option){this.options.push(option)},
+  });
   return elements.get(id);
 }
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
-const document={querySelectorAll:()=>controls};
+const document={querySelectorAll:()=>controls,createElement:()=>({})};
 const localStorage={removeItem:()=>{}};
 let portalToken='',portalConfig=null,portalIdentity=null,guestChecked=false,refreshing=false;
 let canRescore=false,savingKey=false,serverTasks=[],routeCount=0;
 const calls=[];
-const json=JSON.stringify;
 function error(e){throw e}
 function displayConnection(){}
 function updateRescoreButton(){}
-function options(){}
 function renderProviderError(){}
 function renderTaskChoices(){}
 async function loadVersions(){}
@@ -211,8 +222,7 @@ global.fetch=async (path,request)=>{
   calls.push([path,request.headers.Authorization]);
   if(path==='/v1/portal/whoami')return {ok:true,json:async()=>({tenant_id:'customer',role:'member'})};
   if(path==='/v1/portal/config')return {ok:true,json:async()=>request.headers.Authorization
-    ?{guest_view:false,model_configured:true,models:[],agent_backends:[]}
-    :{guest_view:true,guest_tenant:'eval',model_configured:false}};
+    ?config.tenant:config.guest};
   return {ok:true,json:async()=>[]};
 };
 '''
@@ -237,14 +247,18 @@ global.fetch=async (path,request)=>{
     ['/v1/tasks?limit=100','Bearer fixture-member'],
   ]);
   assert.equal(pageRoute().current,'projects');
+  assert.deepEqual($('models').options.map(option=>option.value),config.tenant.models);
   assert.equal($('guest-view-banner').hidden,true);
   assert.equal($('model-not-configured').hidden,true);
   assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
 })().catch(error=>{console.error(error);process.exitCode=1});
 '''
     snippets = "\n".join(script[script.index(start):script.index(end)] for start, end in sections)
+    config = json.dumps({"tenant": TENANT_PORTAL_CONFIG, "guest": GUEST_PORTAL_CONFIG})
     path = tmp_path / "guest.cjs"
-    path.write_text(harness + (STATIC / "portal-ui.js").read_text() + snippets + checks)
+    path.write_text(
+        f"const config = {config};\n" + harness + (STATIC / "portal-ui.js").read_text() + snippets + checks
+    )
     subprocess.run([str(node), str(path)], check=True, timeout=20)
 
 
@@ -348,16 +362,32 @@ def test_projects_browser_shared_modal_lifecycle():
         path = urlsplit(req.url).path
         if serve_portal(route, path):
             return
+        if path == "/v1/tasks":
+            return route.fulfill(json=[])
+        authenticated = req.header_value("authorization") == "Bearer fixture-admin"
+        if path == "/v1/portal/config":
+            config = TENANT_PORTAL_CONFIG if authenticated else GUEST_PORTAL_CONFIG
+            return route.fulfill(json=config)
+        if not authenticated:
+            return route.fulfill(status=401)
         if path == endpoint and req.method == "PATCH":
             project.update(req.post_data_json)
         fixtures = {
-            "/v1/portal/whoami": {"tenant_id": "acme", "role": "admin"},
-            "/v1/portal/config": {"agent_backends": ["codex"], "default_agent_backend": "codex"},
-            "/v1/projects": [project], endpoint: project,
+            "/v1/portal/whoami": {
+                "tenant_id": "acme", "subject": "fixture-admin", "role": "admin",
+                "platform_admin": False,
+            },
+            "/v1/agents/opencode/versions": [],
+            "/v1/tools/available": [],
+            "/v1/projects": [project],
+            endpoint: project,
+            endpoint + "/threads": [],
             endpoint + "/library": {"documents": [document], "artifacts": []},
             "/v1/knowledge/documents/fixture-doc": document,
         }
-        route.fulfill(status=200, json=fixtures.get(path, []))
+        if path in fixtures:
+            return route.fulfill(json=fixtures[path])
+        route.fulfill(status=404)
 
     with portal_browser() as browser:
         page = browser.new_page()
@@ -412,3 +442,12 @@ def test_projects_browser_shared_modal_lifecycle():
         dialog.get_by_role("button", name="确认删除").wait_for()
         page.mouse.click(3, 3)
         dialog.wait_for(state="hidden")
+        page.close()
+
+        guest = browser.new_page()
+        guest.route("**/*", handle)
+        guest.goto("http://portal.test/portal#/projects")
+        guest.wait_for_url("**/portal#/tasks")
+        guest.locator("#trace").wait_for()
+        assert guest.locator("#guest-view-banner").is_visible()
+        assert not guest.locator('nav a[href="#/projects"]').is_visible()
