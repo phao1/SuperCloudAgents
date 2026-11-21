@@ -135,14 +135,15 @@ make up-all    # also start the optional services (needs a .env with provider ke
 | Self-evolution | OpenCode prompts and tool descriptions evolve as overlays: reflect on dev failures, propose candidates, gate on a holdout split for quality or cost, promote a champion. Schedules, approvals, percentage rollouts, rollback, solidifying a champion into a built version, and harvesting real tasks as cases. | `/v1/evolutions`, `/v1/champions`, `/v1/evolution-schedules`, Portal → 自动演进 |
 | Multi-tenant business | Tenants on plans (cost and concurrency limits), suspension, members and roles, tenant API tokens, operator-issued first tokens, per-tenant usage metering and monthly CSV billing export. | `SCA_PLATFORM_ADMIN_TOKEN`, `/v1/admin/*`, `/v1/tenant`, `/v1/usage` ([docs/operations.md](docs/operations.md)) |
 | Payments | Stripe Checkout for monthly plans, a billing portal, invoice history, and monthly usage overages. | `/v1/tenant/billing`, `/v1/admin/billing`, `sca admin report-usage-to-stripe` ([setup](docs/operations.md#stripe-订阅与付款)) |
-| Code hosting | GitHub / Gitea: tasks from issues, pull requests with review and CI status, outcomes written back. | `/v1/scm`, [docs/scm.md](docs/scm.md) |
+| Code hosting | GitHub / Gitea: tasks from issues, pull requests with review and CI status, outcomes written back. | `/v1/integrations/scm`, [docs/scm.md](docs/scm.md) |
 | Best-of-N | N independent attempts from one prepared snapshot; the platform picks the cheapest verified one, or a human picks. | `"best_of": {"n": 3}` |
 | Decoupled subtasks | Subtasks with `depends_on` and path scopes; auto planning; impact analysis of the published commit. | `subtasks`, `"plan": "auto"`, `/v1/tasks/{id}/impact` ([docs/decouple.md](docs/decouple.md)) |
 | Tools | Tenant MCP tool registry with team grants, and a built-in knowledge-base MCP server with citations. | `/v1/tools`, `/v1/knowledge`, `"tools": [...]` ([docs/tools.md](docs/tools.md)) |
 | Design intents | Figma, OpenAPI and screenshot intents turned into agent context and checks. | `intents` ([docs/intents.md](docs/intents.md)) |
 | Brain/hands | OpenCode brain outside the sandbox, shell over a PTY daemon, a live read-only terminal. | `opencode-brain`, `SCA_SANDBOX_HANDD=true`, `/v1/tasks/{id}/terminal` |
 
-Benchmarks for evolution live in `evals/opencode-evolve*`. The Portal at `/portal` covers all of the above.
+Benchmarks for evolution live in `evals/opencode-evolve*`. See [Basic commercial readiness](docs/commercial-readiness.md)
+for the acceptance checklist, API and Portal entry points, and live smoke commands.
 
 ## Tests
 
