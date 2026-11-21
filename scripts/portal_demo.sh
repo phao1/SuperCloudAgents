@@ -5,15 +5,17 @@ umask 077
 
 help() {
     cat <<'HELP'
-用法: bash scripts/portal_demo.sh {setup|up|down [--all]|status|logs|--help}
+用法: bash scripts/portal_demo.sh {setup|up} [--mode docker|source]
+      bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
   up      启动本地 API 和 worker，打印网址和登录令牌
-  down    按 PID 文件停止进程；--all 同时停止 Compose 服务（保留数据）
-  status  查看服务、网关连接和已注册版本
-  logs    查看 API 和 worker 最近日志
+  down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
+  status  查看运行模式、服务、网关连接和已注册版本
+  logs    查看当前模式的服务日志
+也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
-需要 Python 3.12、Git、Docker Compose 和至少 15 GB 可用磁盘。
-OpenCode 构建内存上限为 2.5 GB；macOS 需要 Docker Desktop 和 GNU timeout。
+Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
+源码模式需要本机 PostgreSQL、Node.js 和 npm。两种模式均需 Python 3.12 和 Git。
 HELP
 }
 case "${1:---help}" in -h|--help) help; exit 0;; esac
@@ -21,12 +23,17 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 COMMAND=$1
 shift
-case "$COMMAND" in setup|up|status|logs) [[ $# == 0 ]] || { help; exit 2; };;
+REQUESTED_MODE=''
+case "$COMMAND" in
+    setup|up)
+        if [[ $# == 2 && $1 == --mode && ( $2 == docker || $2 == source ) ]]; then
+            REQUESTED_MODE=$2
+        elif [[ $# != 0 ]]; then help; exit 2; fi;;
+    status|logs|restart-gateway) [[ $# == 0 ]] || { help; exit 2; };;
     down) [[ $# == 0 || ( $# == 1 && $1 == --all ) ]] || { help; exit 2; };;
     *) help; exit 2;; esac
 TIMEOUT=$(command -v timeout || command -v gtimeout || true)
-[[ -n "$TIMEOUT" ]] || { echo '请安装 GNU timeout（macOS: brew install coreutils）。'; exit 1; }
-run() { "$TIMEOUT" 900 "$@"; }
+run() { if [[ -n "$TIMEOUT" ]]; then "$TIMEOUT" 900 "$@"; else "$@"; fi; }
 fail() { echo "$1" >&2; exit 1; }
 mkdir -p .data/run
 PY="$ROOT/.venv/bin/python"
@@ -40,7 +47,32 @@ case "$(uname -m)" in
 esac
 BUN_DIR=.data/tools/bun-linux-$SCA_CONTAINER_ARCH
 
+docker_probe() {
+    if [[ -n "$TIMEOUT" ]]; then "$TIMEOUT" 10 "$@"; else "$@"; fi
+}
+docker_available() {
+    command -v docker >/dev/null || return 1
+    if docker_probe docker info >/dev/null 2>&1 && docker_probe docker compose version >/dev/null 2>&1; then
+        return
+    fi
+    command -v sg >/dev/null && docker_probe sg docker -c 'docker info && docker compose version' >/dev/null 2>&1
+}
+select_mode() {
+    local choice="${REQUESTED_MODE:-${SCA_RUNTIME_MODE:-}}"
+    case "$choice" in
+        docker|source) printf '%s\n' "$choice";;
+        '')
+            if docker_available; then
+                echo docker
+            else
+                echo 'Docker 或 Docker Compose 不可用，自动切换到源码模式。' >&2
+                echo source
+            fi;;
+        *) fail 'SCA_RUNTIME_MODE 必须为 docker 或 source。';;
+    esac
+}
 docker_access() {
+    [[ -n "$TIMEOUT" ]] || fail '请安装 GNU timeout（macOS: brew install coreutils）。'
     command -v docker >/dev/null || fail '请安装并启动 Docker。'
     if run docker info >/dev/null 2>&1; then
         :
@@ -70,15 +102,37 @@ WRAPPER
 compose() { run "$SCA_DOCKER_BIN" compose --env-file "$ROOT/.env" -f deploy/docker-compose.yml --profile gateway "$@"; }
 load_env() {
     [[ -f .data/portal.env ]] || fail '请先运行 setup。'
+    unset SCA_RUNTIME_MODE
     # Only this generated file contains shell syntax; .env is never sourced.
     # shellcheck disable=SC1091
     source .data/portal.env
+    export SCA_RUNTIME_MODE="${SCA_RUNTIME_MODE:-docker}"
+    if [[ "$SCA_RUNTIME_MODE" == source ]]; then load_source_env; fi
+}
+saved_mode() (
+    unset SCA_RUNTIME_MODE
+    # shellcheck disable=SC1091
+    if [[ -f .data/portal.env ]]; then source .data/portal.env; fi
+    printf '%s\n' "${SCA_RUNTIME_MODE:-docker}"
+)
+save_mode() {
+    run "$PY" - "$1" <<'PY'
+import sys
+from pathlib import Path
+
+from dotenv import set_key
+
+portal = Path(".data/portal.env")
+set_key(portal, "SCA_RUNTIME_MODE", sys.argv[1], export=True)
+portal.chmod(0o600)
+PY
 }
 alive() {
     [[ -f ".data/run/$1.pid" ]] || return 1
     local pid
     read -r pid < ".data/run/$1.pid"
-    [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && kill -0 "$pid" 2>/dev/null
+    [[ $pid =~ ^[0-9]+$ && $pid -gt 1 ]] && kill -0 "$pid" 2>/dev/null &&
+        [[ $(ps -p "$pid" -o stat=) != *Z* ]]
 }
 owned() {
     alive "$1" || return 1
@@ -116,13 +170,16 @@ start() {
     local pid=$!
     echo "$pid" > ".data/run/$name.pid"
     run sleep 0.2
-    run ps -p "$pid" -o lstart= -o args= > ".data/run/$name.identity"
+    run ps -p "$pid" -o lstart= -o args= > ".data/run/$name.identity" ||
+        fail "$name 启动失败，请查看 .data/run/$name.log。"
 }
 stop() {
     local name=$1 pid
     if owned "$name"; then
         read -r pid < ".data/run/$name.pid"
-        kill "$pid"
+        if ! kill "$pid" 2>/dev/null && alive "$name"; then
+            fail '无法停止进程，请检查 .data/run/。'
+        fi
         for ((i=0; i<30; i++)); do alive "$name" || break; run sleep 1; done
         alive "$name" && fail '进程尚未退出，请检查日志后重试。'
     elif alive "$name"; then fail 'PID 文件与进程不符，拒绝停止。'; fi
@@ -212,7 +269,6 @@ up() {
     elif [[ -f "$STRIPE_SIM_MARKER" ]] || owned stripe-sim; then
         fail '请先运行 down，再启动普通模式的 Portal。'
     fi
-    docker_access
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then start_stripe_sim; fi
     start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --host 127.0.0.1 --port 8000
     start worker "$PY" -m sca.orchestration.worker
@@ -231,12 +287,9 @@ up() {
         echo '远程访问: ssh -L 8000:127.0.0.1:8000 host'
     fi
 }
-setup() {
+prepare_app() {
     for tool in python3.12 git; do command -v "$tool" >/dev/null || fail "缺少依赖: $tool"; done
     run python3.12 -c 'import sys; assert sys.version_info[:2] == (3, 12)'
-    run python3.12 -c 'import shutil; assert shutil.disk_usage(".").free >= 15 * 1024**3, "需要至少 15 GB 可用磁盘"'
-    echo 'OpenCode 构建内存上限为 2.5 GB；请为系统及其他服务预留额外内存。'
-    docker_access
     [[ -x "$PY" ]] || run python3.12 -m venv .venv
     run "$PY" -m pip install -q -e '.[dev]'
     run "$PY" - <<'PY'
@@ -291,6 +344,14 @@ for key in ("SCA_STRIPE_SIM_SECRET_KEY", "SCA_STRIPE_SIM_WEBHOOK_SECRET",
 portal.write_text("".join(f"export {key}={shlex.quote(value)}\n" for key, value in settings.items()))
 portal.chmod(0o600)
 PY
+}
+setup_docker() {
+    command -v python3.12 >/dev/null || fail '缺少依赖: python3.12'
+    run python3.12 -c 'import shutil; assert shutil.disk_usage(".").free >= 15 * 1024**3, "需要至少 15 GB 可用磁盘"'
+    echo 'OpenCode 构建内存上限为 2.5 GB；请为系统及其他服务预留额外内存。'
+    docker_access
+    prepare_app
+    save_mode docker
     load_env
     compose up -d --wait postgres temporal
     # LiteLLM expects its own database; never remove existing databases or volumes.
@@ -309,33 +370,94 @@ SQL
     mv "$BUN_DIR/bun.tmp" "$BUN_DIR/bun"
     chmod 700 "$BUN_DIR/bun"
     "$TIMEOUT" 3600 "$PY" scripts/opencode_setup.py --execute-docker
-    up
 }
+
+# Local source mode
+# shellcheck source=scripts/portal_source.sh
+source "$ROOT/scripts/portal_source.sh"
+
+ensure_mode_switch() {
+    local name
+    if [[ $(saved_mode) != "$1" ]]; then
+        for name in worker api stripe-sim litellm temporal postgres; do
+            if alive "$name"; then fail '请先运行 down 停止当前模式的服务，再切换模式。'; fi
+        done
+    fi
+}
+
+print_status() {
+    local name
+    for name in "$@"; do
+        if owned "$name"; then echo "$name: 运行中"; else echo "$name: 未运行或 PID 不匹配"; fi
+    done
+}
+
 case "$COMMAND" in
-    setup) setup;;
-    up) up;;
+    setup|up)
+        mode=$(select_mode)
+        ensure_mode_switch "$mode"
+        if [[ "$mode" == source ]]; then
+            find_postgres
+            if [[ $COMMAND == setup || ! -x "$PY" || ! -f .data/portal.env || ! -f .env ]]; then
+                prepare_app
+            fi
+            source_port temporal 7233
+            source_port litellm 4000
+            save_mode source
+            load_env
+            start_source_services
+        elif [[ $COMMAND == setup ]]; then
+            setup_docker
+        else
+            [[ -f .data/portal.env ]] || fail '请先运行 setup。'
+            docker_access
+            save_mode docker
+        fi
+        up;;
     down)
+        mode=$(saved_mode)
+        cleanup_failed=0
         for name in worker api stripe-sim; do stop "$name"; done
         if [[ -f "$STRIPE_SIM_MARKER" ]]; then
             load_env
-            stripe_sim_prices remove
-            rm -f "$STRIPE_SIM_MARKER"
+            if stripe_sim_prices remove; then
+                rm -f "$STRIPE_SIM_MARKER"
+            elif [[ $mode == source ]]; then
+                cleanup_failed=1
+            else
+                exit 1
+            fi
         fi
-        if [[ ${1:-} == --all ]]; then docker_access; compose down; fi;;
+        if [[ $mode == source ]]; then
+            stop_source_services
+        elif [[ ${1:-} == --all ]]; then docker_access; compose down; fi
+        exit "$cleanup_failed";;
     status)
         load_env
-        for name in api worker; do
-            if owned "$name"; then echo "$name: 运行中"; else echo "$name: 未运行或 PID 不匹配"; fi
-        done
-        if [[ -f .data/run/stripe-sim.pid ]]; then
-            if owned stripe-sim; then echo 'stripe-sim: 运行中'; else echo 'stripe-sim: 未运行或 PID 不匹配'; fi
+        echo "运行模式: $SCA_RUNTIME_MODE"
+        print_status api worker
+        if [[ -f .data/run/stripe-sim.pid ]]; then print_status stripe-sim; fi
+        if [[ $SCA_RUNTIME_MODE == source ]]; then
+            print_status postgres temporal litellm
+            if ! owned api; then exit 0; fi
+        else
+            docker_access
+            compose ps
         fi
-        docker_access
-        compose ps
         request /v1/portal/config
         request /v1/agents/opencode/versions;;
     logs)
         log_files=(.data/run/api.log .data/run/worker.log)
         if [[ -f .data/run/stripe-sim.pid ]]; then log_files+=(.data/run/stripe-sim.log); fi
+        if [[ $(saved_mode) == source ]]; then
+            for name in postgres temporal litellm; do
+                if [[ -f ".data/run/$name.log" ]]; then log_files+=(".data/run/$name.log"); fi
+            done
+        fi
         run tail -n 100 "${log_files[@]}";;
+    restart-gateway)
+        load_env
+        [[ $SCA_RUNTIME_MODE == source ]] || fail '此命令用于源码模式网关。'
+        stop litellm
+        start_litellm 80;;
 esac

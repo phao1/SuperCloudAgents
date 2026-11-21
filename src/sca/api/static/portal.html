@@ -488,6 +488,7 @@ body[data-trace-expanded] { overflow: hidden; }
         <button id="refresh" type="button">刷新数据</button>
       </div>
     </header>
+    <!-- source mode warning -->
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
       <p>请先在概览连接 Portal 工作空间。</p>
@@ -989,7 +990,7 @@ async function loadConfig(){
     :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
   if(!$('model').value)$('model').value=c.default_model;
   options('models',c.models,x=>x,x=>x);
-  options('backend',[...new Set([...c.agent_backends,'pi'])],x=>x,x=>({opencode:'OpenCode',codex:'Codex',fake:'脚本后端'})[x]||x)
+  options('backend',c.agent_backends,x=>x,x=>({opencode:'OpenCode',codex:'Codex',fake:'脚本后端'})[x]||x)
 }
 async function loadSuites(){
   const first=!suites.length;

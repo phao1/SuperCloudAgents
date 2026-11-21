@@ -168,6 +168,56 @@ curl -fsS "$SCA_API_URL/v1/tenant/billing" -H "Authorization: Bearer $TENANT_TOK
 `POST /_sim/subscriptions/{id}/cancel`，分别模拟换套餐和取消订阅。回调如返回失败，可重试同一个模拟操作。
 自动验收命令见 [基础商用验收](commercial-readiness.md#运行烟测)。
 
+## 源码模式
+
+**本地源码模式：任务在本机直接运行，无隔离，仅限个人试用。** Agent、准备命令和验证命令
+都以当前用户身份在宿主机运行。只提交信任的仓库和命令。任务的 `image`、容器资源限制与
+`SCA_EGRESS_ALLOW` 在此模式下不生效。
+
+- **Linux x86_64 或 arm64（glibc）**：准备 Git、Python 3.12（含 `venv`）和 OpenSSL。Debian/Ubuntu
+  可运行 `sudo apt install postgresql nodejs npm`。使用普通用户启动。
+- **macOS Intel 或 Apple Silicon**：运行 `brew install python@3.12 postgresql@16 node git`，
+  确保 `python3.12`、`node` 和 `npm` 在 `PATH` 中。源码模式支持系统 Bash，无需 GNU timeout。
+
+在仓库根目录运行下列命令。首次启动会从 PyPI、GitHub 和 Prisma 的发布服务下载依赖。
+
+```bash
+bash scripts/portal_demo.sh up --mode source
+bash scripts/portal_demo.sh status
+bash scripts/portal_demo.sh logs
+bash scripts/portal_demo.sh down
+```
+
+脚本用 `initdb` 和 `pg_ctl` 管理 `.data/pg`，优先监听本机 5432，端口占用时选择空闲端口。
+它为 API 和 Worker 设置 `SCA_DATABASE_URL`、执行 `alembic upgrade head`，并为网关创建独立的
+`litellm` 数据库。原生 Postgres 可选安装 pgvector，缺少扩展时记忆检索使用近期记录。
+Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/temporal/dev.db`。LiteLLM 1.110.2 在
+`.data/litellm-venv` 中运行，监听 `127.0.0.1:4000`。可以在 Portal 概览保存 DeepSeek API Key，
+保存会重启本机网关。 [Temporal 发布包](https://github.com/temporalio/cli/releases/tag/v1.5.0) [LiteLLM 版本](https://pypi.org/project/litellm/1.110.2/)
+
+脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
+停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
+`bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
+
+在 Portal 的「提交任务」页面选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
+`2.3.0-sca.0`，支持该版本和模型对应的运行时冠军覆盖。OpenCode 源码修复、构建和冠军固化
+需要 Docker。Codex 和 Pi 仅在找到本机可执行文件时提供。Pi 使用兼容 1.5.2 的 CLI，各 Agent
+使用对应接口支持的网关模型。
+验证和准备命令使用本机的 Git、Python 和其他项目依赖，文件路径可使用当前工作目录、
+`$HOME` 和 `$TMPDIR`。临时任务目录在 `.data/sandboxes/`。使用 MCP `tools` 的任务仍需受限出口的
+Docker 沙箱。视觉 Intent 的 Playwright 检查依赖预设的浏览器和工具路径。
+
+使用 Portal 登录令牌查询运行信息，也可以直接提交任务。以下示例中的仓库为本机路径。
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/portal/config -H "Authorization: Bearer $PORTAL_TOKEN"
+curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"kind":"coding","spec":{"repo_url":"/path/to/repo","instruction":"修复失败的测试","verify_command":"python -m pytest -q","use_champion":true}}'
+```
+
+配置接口返回 `sandbox_driver: "local"`、`warning` 和 `unavailable_agent_backends`。
+
 ## 工作目录和缓存清理
 
 `SCA_TASK_RETENTION_DAYS` 默认 14 天。定时维护清理超过保留期的终态任务目录

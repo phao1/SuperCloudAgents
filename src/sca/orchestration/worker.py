@@ -7,6 +7,7 @@ import logging
 import signal
 from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 from prometheus_client import start_http_server
 from temporalio.client import (
@@ -53,6 +54,8 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
         from sca.agents.fake import FakeBackend
 
         return FakeBackend()
+    if settings.sandbox_driver == "local":
+        return _make_local_agent_backend(settings)
     if settings.agent_backend == "opencode-brain":
         from sca.agents.opencode_brain import OpenCodeBrainBackend
 
@@ -89,6 +92,10 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
 
 
 def make_sandbox_provider(settings: Settings) -> SandboxProvider:
+    if settings.sandbox_driver == "local":
+        from sca.sandbox.local import LocalSandboxProvider
+
+        return LocalSandboxProvider(settings.data_dir / "sandboxes")
     if settings.sandbox_driver == "k8s":
         from sca.sandbox.k8s import K8sSandboxProvider
 
@@ -111,20 +118,26 @@ def make_sandbox_provider(settings: Settings) -> SandboxProvider:
     )
 
 
-async def make_gateway(settings: Settings, sandbox: DockerSandboxProvider) -> ModelGateway | None:
-    """Attach the gateway to the sandbox network and build its client."""
+async def make_gateway(settings: Settings, sandbox: SandboxProvider) -> ModelGateway | None:
+    """Build the gateway client and attach container sandboxes to the gateway network."""
     if not settings.model_gateway_url:
         return None
     # Model provider errors
     from sca.gateway.health import ProviderHealth
     from sca.gateway.litellm import LiteLLMGateway
 
-    await sandbox.ensure_egress()
-    address = await sandbox.address_of(settings.model_gateway_container)
+    if settings.sandbox_driver == "local":
+        local_url = settings.gateway_limiter_url if settings.gateway_limiter else None
+        sandbox_url = (local_url or settings.model_gateway_url).rstrip("/") + "/v1"
+    else:
+        docker = cast(DockerSandboxProvider, sandbox)
+        await docker.ensure_egress()
+        address = await docker.address_of(settings.model_gateway_container)
+        sandbox_url = f"http://{address}:{settings.model_gateway_port}/v1"
     return LiteLLMGateway(
         settings.model_gateway_url,
         settings.model_gateway_master_key,
-        sandbox_url=f"http://{address}:{settings.model_gateway_port}/v1",
+        sandbox_url=sandbox_url,
         provider_health=ProviderHealth(settings.data_dir),
     )
 
@@ -266,6 +279,27 @@ async def main() -> None:
             await BrainPool.close_all()
         finally:
             loop.remove_signal_handler(signal.SIGTERM)
+
+
+# Local source mode
+def _make_local_agent_backend(settings: Settings) -> AgentBackend:
+    from sca.agents.codex import CodexBackend
+    from sca.agents.local import host_agent_binary, unavailable_source_backend
+    from sca.agents.opencode import OpenCodeBackend
+    from sca.agents.pi import PiBackend
+
+    name = settings.agent_backend
+    binary = host_agent_binary(settings, name)
+    if binary is None:
+        raise FileNotFoundError(unavailable_source_backend(name))
+    if name == "opencode":
+        return OpenCodeBackend(settings.opencode_versions_dir, settings.opencode_default_version,
+                               settings.default_model, host_release=True)
+    if name == "codex":
+        return CodexBackend(binary.parent, None if settings.model_gateway_url else settings.codex_auth_file,
+                            settings.default_model, executable=str(binary))
+    return PiBackend(settings.default_model, settings.pi_version, settings.pi_sandbox_image,
+                     executable=str(binary))
 
 
 if __name__ == "__main__":

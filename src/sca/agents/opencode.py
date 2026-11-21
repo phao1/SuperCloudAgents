@@ -131,10 +131,12 @@ class OpenCodeBackend:
     name = "opencode"
     state_transport = "mount"
 
-    def __init__(self, versions_dir: Path, default_version: str, default_model: str):
+    def __init__(self, versions_dir: Path, default_version: str, default_model: str,
+                 *, host_release: bool = False):
         self.versions_dir = versions_dir.resolve()
         self.default_version = validate_version(default_version)
         self.default_model = default_model
+        self.host_release = host_release
         if not self.versions_dir.is_dir():
             raise FileNotFoundError("OpenCode versions directory does not exist")
 
@@ -166,6 +168,8 @@ class OpenCodeBackend:
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         directory = self.version_dir(ctx.agent_version)
+        if self.host_release:
+            return SandboxAdditions()
         if self.state_transport != "mount":
             raise AgentTurnError("OpenCode requires mount state transport")
         home = Path(ctx.agent_home_host)
@@ -188,7 +192,7 @@ class OpenCodeBackend:
         session_id: str | None,
         timeout_s: float,
     ) -> AsyncIterator[AgentEvent]:
-        self.version_dir(ctx.agent_version)
+        directory = self.version_dir(ctx.agent_version)
         if not (ctx.model_base_url and ctx.model_api_key):
             raise AgentTurnError("OpenCode requires model_base_url and model_api_key")
         model = ctx.model or self.default_model
@@ -207,6 +211,13 @@ class OpenCodeBackend:
             # restricted anyway).
             "permission": {"websearch": "deny", "webfetch": "deny"},
         }
+        overlay_env = self._overlay_env(ctx)
+        if self.host_release and overlay_env:
+            config["plugins"] = [{
+                "package": str(Path(__file__).with_name("opencode_overlay").resolve()),
+                "options": {"path": str(Path(ctx.agent_home_host) / "sca-overlay.json")},
+            }]
+            overlay_env = {}
         # MCP tool registry
         from sca.tools.runtime import McpAgentContext, redact_mcp_output
 
@@ -223,7 +234,7 @@ class OpenCodeBackend:
                                  "oauth": False}
             config["mcp"] = {"servers": servers}
         argv = [
-            "/opt/opencode/opencode",
+            str(directory / "opencode") if self.host_release else "/opt/opencode/opencode",
             "run",
             "--standalone",
             "--auto",
@@ -236,10 +247,10 @@ class OpenCodeBackend:
         if session_id:
             argv += ["--session", session_id]
         argv += ["--", prompt]
-        env = {**self._overlay_env(ctx), "HOME": ctx.agent_home, "SCA_MODEL_KEY": ctx.model_api_key}
+        env = {**overlay_env, "HOME": ctx.agent_home, "SCA_MODEL_KEY": ctx.model_api_key}
         serialized_config = json.dumps(config)
         exec_input = {}
-        if secrets:
+        if secrets and not self.host_release:
             # Docker passes exec environment values on its command line.
             read_config = (
                 "import os, sys\n"

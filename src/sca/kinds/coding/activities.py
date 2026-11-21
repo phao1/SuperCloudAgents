@@ -137,7 +137,8 @@ class CodingActivities(KernelActivities):
 
     def _backend(self, spec: CodingSpec) -> AgentBackend:
         backend = super()._backend(spec)
-        if (spec.repo_url == self.settings.opencode_repo_url
+        if (self.settings.sandbox_driver != "local"
+                and spec.repo_url == self.settings.opencode_repo_url
                 and spec.image == self.settings.opencode_sandbox_image):
             if self.settings.state_transport != "mount":
                 raise InvalidTaskError("OpenCode fix tasks require mount state transport")

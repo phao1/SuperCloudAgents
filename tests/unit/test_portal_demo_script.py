@@ -1,8 +1,10 @@
 """Static checks that never start demo services or inspect local credentials."""
 
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -12,14 +14,15 @@ SCRIPT = ROOT / "scripts/portal_demo.sh"
 
 
 def test_bash_syntax() -> None:
-    subprocess.run(["bash", "-n", str(SCRIPT)], check=True, timeout=10)
+    for script in (SCRIPT, SCRIPT.with_name("portal_source.sh")):
+        subprocess.run(["bash", "-n", str(script)], check=True, timeout=10)
 
 
 def test_shellcheck() -> None:
     executable = shutil.which("shellcheck")
     if executable is None:
         pytest.skip("shellcheck is not installed")
-    subprocess.run([executable, str(SCRIPT)], check=True, timeout=20)
+    subprocess.run([executable, "-x", str(SCRIPT)], check=True, timeout=20)
 
 
 def test_help_without_docker(tmp_path: Path) -> None:
@@ -57,3 +60,86 @@ def test_secret_output_and_process_contracts() -> None:
     assert "-o lstart= -o args=" in source
     assert "secrets.token_hex(32)" in source
     assert 'SCA_OPENCODE_BUILD_MEMORY="2500m"' in source
+
+
+@pytest.fixture
+def demo(tmp_path, monkeypatch):
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    script = scripts / SCRIPT.name
+    shutil.copyfile(SCRIPT, script)
+    (scripts / "portal_source.sh").write_text(
+        'find_postgres() { :; }\nsource_port() { :; }\nload_source_env() { :; }\n'
+        'start_source_services() { echo "started native services"; }\n'
+        'stop_source_services() { echo "stopped native services"; }\n'
+        'up() { load_env; echo "started $SCA_RUNTIME_MODE"; }\n'
+    )
+    portal_env = tmp_path / ".data" / "portal.env"
+    portal_env.parent.mkdir()
+    portal_env.touch()
+    (tmp_path / ".env").touch()
+    (tmp_path / ".venv" / "bin").mkdir(parents=True)
+    python = tmp_path / ".venv" / "bin" / "python"
+    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.chmod(0o700)
+    binaries = tmp_path / "bin"
+    binaries.mkdir()
+    for name, body in {
+        "timeout": 'shift\nexec "$@"',
+        "docker": 'printf "%s\n" "$*" >> docker-calls\n'
+                  'if [ "$1" = info ]; then exit "${DEMO_INFO_STATUS:-0}"; fi\n'
+                  'exit "${DEMO_COMPOSE_STATUS:-0}"',
+        "sg": "exit 1",
+    }.items():
+        binary = binaries / name
+        binary.write_text("#!/bin/sh\n" + body + "\n")
+        binary.chmod(0o700)
+    monkeypatch.setenv("PATH", str(binaries), prepend=":")
+    monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("SCA_STRIPE_SIMULATOR", raising=False)
+
+    def run(*args):
+        return subprocess.run(
+            ["bash", str(script), *args], check=False, capture_output=True, text=True, timeout=10,
+        )
+
+    return run, portal_env
+
+
+@pytest.mark.parametrize(
+    ("args", "env_mode", "down_mode", "info_code", "compose_code", "expected"),
+    [
+        ([], "", "", "0", "0", "docker"),
+        ([], "", "", "1", "0", "source"),
+        ([], "", "", "0", "1", "source"),
+        ([], "source", "docker", "0", "0", "source"),
+        (["--mode", "source"], "docker", "docker", "0", "0", "source"),
+        (["--mode", "docker"], "source", "", "0", "0", "docker"),
+    ],
+)
+def test_mode_selection(demo, monkeypatch, args, env_mode, down_mode, info_code, compose_code, expected):
+    run, portal_env = demo
+    monkeypatch.setenv("SCA_RUNTIME_MODE", env_mode)
+    monkeypatch.setenv("DEMO_INFO_STATUS", info_code)
+    monkeypatch.setenv("DEMO_COMPOSE_STATUS", compose_code)
+    result = run("up", *args)
+    assert result.returncode == 0, result.stderr
+    assert f"started {expected}" in result.stdout
+    assert f"SCA_RUNTIME_MODE='{expected}'" in portal_env.read_text()
+    fallback = not args and not env_mode and expected == "source"
+    assert ("自动切换到源码模式" in result.stderr) is fallback
+    if down_mode:
+        monkeypatch.setenv("SCA_RUNTIME_MODE", down_mode)
+        status = run("status")
+        assert status.returncode == 0
+        assert "运行模式: source" in status.stdout
+        assert all(name in status.stdout for name in ("postgres", "temporal", "litellm", "api", "worker"))
+        assert run("down", "--all").stdout.strip() == "stopped native services"
+        assert not (portal_env.parents[1] / "docker-calls").exists()
+
+
+def test_invalid_mode_is_rejected(demo, monkeypatch):
+    run, _ = demo
+    monkeypatch.setenv("SCA_RUNTIME_MODE", "other")
+    assert run("up").returncode != 0
+    assert run("up", "--mode", "other").returncode == 2

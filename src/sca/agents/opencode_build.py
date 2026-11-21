@@ -12,6 +12,7 @@ from typing import Protocol
 
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
+from temporalio.exceptions import ApplicationError
 
 with workflow.unsafe.imports_passed_through():
     from sca.agents.opencode import validate_version
@@ -21,6 +22,17 @@ with workflow.unsafe.imports_passed_through():
 
 class Runner(Protocol):
     async def __call__(self, argv: list[str], log: Path) -> str: ...
+
+
+DOCKER_BUILD_REQUIRED = "OpenCode 源码修复、构建与冠军固化需要 Docker 模式"
+
+
+def reject_source_build(settings: Settings, record: dict) -> None:
+    if settings.sandbox_driver == "local":
+        path = records_dir(settings) / f"{record['id']}.json"
+        if path.is_file():
+            write_record(path, {**record, "status": "failed", "error": DOCKER_BUILD_REQUIRED})
+        raise ApplicationError(DOCKER_BUILD_REQUIRED, non_retryable=True)
 
 
 async def run_command(argv: list[str], log: Path, timeout_s: float = 900) -> str:
@@ -153,6 +165,7 @@ def reserve_build(settings: Settings, build_id: str, tenant_id: str, **fields) -
 
 
 async def perform_build(settings: Settings, record: dict, runner: Runner | None = None) -> dict:
+    reject_source_build(settings, record)
     lock_path = records_dir(settings) / "build.lock"
     with lock_path.open("a") as lock:
         try:

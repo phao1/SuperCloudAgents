@@ -7,13 +7,14 @@ import httpx
 import pytest
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import NoResultFound
+from temporalio.exceptions import ApplicationError
 
-from sca.agents.opencode_build import reserve_build
+from sca.agents.opencode_build import DOCKER_BUILD_REQUIRED, OpenCodeBuildActivities, reserve_build
 from sca.api import agents
 from sca.api import app as api_app
 from sca.api.auth import StaticTokenAuthenticator
 from sca.config import Settings
-from sca.evolve.solidify import ChampionSolidifyWorkflow
+from sca.evolve.solidify import ChampionSolidifyActivities, ChampionSolidifyWorkflow
 
 
 @pytest.fixture
@@ -104,3 +105,34 @@ async def test_release_routes_require_the_eval_admin(api, user):
     assert (await client.post(route, headers=headers)).status_code == 403
     temporal.start_workflow.assert_not_called()
     tenant.set_default_opencode_version.assert_not_called()
+
+
+async def test_source_mode_rejects_builds_before_dispatch(api):
+    client, settings, tenant, temporal, champion = api
+    settings.sandbox_driver = "local"
+    for path in ("/v1/agents/opencode/builds", f"/v1/champions/{champion['id']}/solidify"):
+        response = await client.post(path, json={})
+        assert response.status_code == 409
+        assert response.json()["error"]["message"] == DOCKER_BUILD_REQUIRED
+    tenant.get_champion.assert_not_called()
+    temporal.start_workflow.assert_not_called()
+    assert not settings.opencode_versions_dir.exists()
+
+
+async def test_source_worker_fails_existing_builds_without_retry(tmp_path):
+    settings = Settings(_env_file=None, sandbox_driver="local", data_dir=tmp_path)
+    database = SimpleNamespace(for_tenant=AsyncMock())
+    activities = [
+        (OpenCodeBuildActivities(settings).build, lambda record: record),
+        (ChampionSolidifyActivities(settings, database).prepare, lambda record: {"record": record}),
+    ]
+    for run, request in activities:
+        record = reserve_build(settings, str(uuid4()), "eval", ref="main", labels={})
+        with pytest.raises(ApplicationError, match=DOCKER_BUILD_REQUIRED) as failure:
+            await run(request(record))
+        assert failure.value.non_retryable
+        path = settings.opencode_versions_dir / "builds" / f"{record['id']}.json"
+        failed = json.loads(path.read_text())
+        assert failed["status"] == "failed"
+        assert failed["error"] == DOCKER_BUILD_REQUIRED
+    database.for_tenant.assert_not_called()
