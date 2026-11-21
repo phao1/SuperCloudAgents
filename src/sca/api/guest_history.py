@@ -3,13 +3,15 @@ from typing import Any, cast
 from urllib.parse import quote
 
 from sca.api.authz import ForbiddenError, GuestPrincipal
-from sca.core.models import Artifact, Event, Principal, Task
+from sca.core.models import Artifact, Event, Principal, Task, TaskMessage
+from sca.core.task_dag import TaskDAG
 from sca.secrets import redact
 
 _PRIVATE_FIELD = re.compile(
     r"(?:^|_)(?:secret|secrets|credentials?|password|passwd|token|authorization|"
     r"cookies?|email|api_?key|private_key|master_key|access_key|signing_key|"
-    r"customer_?id|idempotency_key)(?:_|$)"
+    r"(?:customer|invoice(?:_item)?|subscription)_?id|(?:stripe|billing)_(?:[a-z0-9]+_)*id|"
+    r"idempotency_key)(?:_|$)"
 )
 _PRIVATE_OBJECTS = {
     "actor", "created_by", "updated_by", "reviewed_by", "approved_by",
@@ -19,6 +21,7 @@ _EMAIL_LOCAL = r"[\w.!#$%&'*+/=?^`{|}~-]"
 _PRIVATE_TEXT = re.compile(
     rf"(?<!{_EMAIL_LOCAL}){_EMAIL_LOCAL}+@[\w-]+(?:\.[\w-]+)+"
     r"|\b(?:sk[-_]|gh[pousr]_|github_pat_|cus_)[A-Za-z0-9_-]{8,}\b"
+    r"|\b(?:sub|sub_sched|in|ii|price|pi|pm|cs|bps|ch)_(?:(?:test|live)_)?[A-Za-z0-9]{8,}\b"
     r"|\bsca_[A-Za-z0-9_-]{43}(?![A-Za-z0-9_-])"
     r"|(?i:\bbearer[ \t]+|\bauthorization[\"']?[ \t]*[:=][ \t]*[\"']?basic[ \t]+)[A-Za-z0-9._~+/=-]+"
 )
@@ -26,6 +29,7 @@ _FIELD_VALUE = re.compile(
     r"(?<![\w.-])(?P<key>[\w.-]+)(?P<separator>[\"']?[ \t]*[:=][ \t]*)"
     r"(?P<value>\"(?:\\.|[^\"\\\n])*\"|'[^'\n]*'|[^\s,;\"'}]+)"
 )
+_QUERY_VALUE = re.compile(r"(?<=[?&])(?P<key>[\w.-]+)(?P<separator>=)(?P<value>[^&#\s\"']+)")
 _PRIVATE_KEY = re.compile(
     r"-----BEGIN [^-\n]*PRIVATE KEY-----.*?(?:-----END [^-\n]*PRIVATE KEY-----|\Z)", re.DOTALL,
 )
@@ -49,6 +53,7 @@ def _text(value: str) -> str:
     value = _BINARY_PATCH.sub("Binary files differ\n", value)
     value = _PRIVATE_KEY.sub("[redacted]", redact(value))
     value = _PRIVATE_TEXT.sub("[redacted]", value)
+    value = _QUERY_VALUE.sub(_redact_assignment, value)
     return _FIELD_VALUE.sub(_redact_assignment, value)
 
 
@@ -101,3 +106,32 @@ def guest_artifact_text(data: bytes) -> str:
         except UnicodeDecodeError:
             pass
     raise ForbiddenError("访客只能读取文本制品")
+
+
+# Guest task details
+def history_message(user: Principal, message: TaskMessage) -> TaskMessage:
+    if not isinstance(user, GuestPrincipal):
+        return message
+    return message.model_copy(update={"actor": "[redacted]", "text": _text(message.text)})
+
+
+def history_dag(user: Principal, dag: TaskDAG) -> TaskDAG:
+    if not isinstance(user, GuestPrincipal):
+        return dag
+    # Subtask names can appear in IDs referenced by edges and parent links.
+    aliases = {node.id: f"guest:{i}" for i, node in enumerate(dag.nodes) if _text(node.id) != node.id}
+    nodes = []
+    for node in dag.nodes:
+        meta = _payload(node.meta)
+        parent = node.meta.get("parent")
+        if isinstance(parent, str) and parent in aliases:
+            meta["parent"] = aliases[parent]
+        nodes.append(node.model_copy(update={
+            "id": aliases.get(node.id, node.id), "label": _text(node.label), "meta": meta,
+        }))
+    return TaskDAG(
+        nodes=nodes,
+        edges=[edge.model_copy(update={
+            "source": aliases.get(edge.source, edge.source), "target": aliases.get(edge.target, edge.target),
+        }) for edge in dag.edges],
+    )

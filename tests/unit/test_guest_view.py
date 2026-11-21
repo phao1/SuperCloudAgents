@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Annotated
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import httpx
@@ -14,9 +14,11 @@ from starlette.responses import Response
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
 from sca.api.authz import GuestPrincipal, authorize
+from sca.api.guest_history import history_dag
 from sca.config import Settings
 from sca.core.errors import AuthError, NotFoundError
-from sca.core.models import Artifact, Event, Principal, Task, TaskState
+from sca.core.models import Artifact, Event, Principal, Task, TaskMessage, TaskState
+from sca.core.task_dag import DAGEdge, DAGNode, TaskDAG
 from sca.storage.local import LocalObjectStore, key_for
 
 
@@ -80,6 +82,7 @@ def test_guest_default_and_risk_acknowledgement(monkeypatch):
 
 async def test_guest_fallback_respects_tokens_and_deleted_tenants(monkeypatch):
     monkeypatch.delenv("SCA_PORTAL_LOCAL_CONFIG", raising=False)
+    monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
     settings = Settings(_env_file=None, guest_view="local", guest_tenant=None)
     app = auth_app(settings)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
@@ -91,6 +94,19 @@ async def test_guest_fallback_respects_tokens_and_deleted_tenants(monkeypatch):
         assert response.json()["guest"] is False
         app.state.store.tenant_deleted.return_value = True
         assert (await client.get("/history")).status_code == 401
+
+
+@pytest.mark.parametrize("mode", ["docker", "source"])
+async def test_guest_tenant_defaults_to_eval_in_legacy_demo(monkeypatch, mode):
+    monkeypatch.delenv("SCA_PORTAL_LOCAL_CONFIG", raising=False)
+    monkeypatch.delenv("SCA_GUEST_TENANT", raising=False)
+    monkeypatch.setenv("SCA_RUNTIME_MODE", mode)
+    app = auth_app(Settings(_env_file=None, guest_view="local"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get("/history")).json()["tenant_id"] == "eval"
+        monkeypatch.setenv("SCA_GUEST_TENANT", "custom")
+        app.state.settings = Settings(_env_file=None, guest_view="local")
+        assert (await client.get("/history")).json()["tenant_id"] == "custom"
 
 
 @pytest.fixture
@@ -121,7 +137,8 @@ async def demo_api(monkeypatch, tmp_path):
 
     scoped = SimpleNamespace(
         list_tasks=AsyncMock(return_value=[task]), get_task=get_task,
-        list_events=AsyncMock(return_value=[event]), list_artifacts=AsyncMock(return_value=artifacts),
+        list_events=AsyncMock(return_value=[event]), list_task_children=AsyncMock(return_value=[]),
+        list_artifacts=AsyncMock(return_value=artifacts),
         get_artifact=AsyncMock(side_effect=lambda _, name: next(a for a in artifacts if a.name == name)),
         get_eval_run=AsyncMock(return_value={"variant": {"api_key": "fixture-eval"}, "results": [],
                                             "created_by": "owner@example.org"}),
@@ -129,9 +146,10 @@ async def demo_api(monkeypatch, tmp_path):
         get_evolution=AsyncMock(return_value={"status": "finished", "config": {"credential": "fixture-evo"}}),
         usage_rows=AsyncMock(return_value=[{"tenant_id": "eval", "tokens_in": 2, "tasks": 1}]),
         create_task=AsyncMock(), create_eval_run=AsyncMock(), create_evolution=AsyncMock(),
+        add_task_message=AsyncMock(),
     )
     store = SimpleNamespace(
-        for_tenant=lambda _: scoped, tenant_deleted=AsyncMock(return_value=False),
+        for_tenant=Mock(side_effect={"eval": scoped}.__getitem__), tenant_deleted=AsyncMock(return_value=False),
         sessionmaker=SimpleNamespace(kw={"bind": SimpleNamespace(url=make_url("postgresql+asyncpg://localhost/sca"))}),
     )
     objects = LocalObjectStore(tmp_path / "objects")
@@ -183,6 +201,89 @@ async def test_guest_history_and_credential_fields(demo_api):
     assert (await client.get("/v1/evolutions", headers={"Authorization": "Bearer viewer"})).status_code == 403
 
 
+async def test_guest_dag_and_message_history(demo_api):
+    client, store, task_id, other_id = demo_api
+    task = await store.get_task(task_id, "eval")
+    names = ["member@example.org", "reviewer@example.org"]
+    task.spec["subtasks"] = [{"name": name} for name in names]
+    raw_text = (
+        "Review for member@example.org\nTOKEN=fixture-message\nInvoice in_fixture123\n"
+        "https://ci.example.org/job?access_token=fixture-query"
+    )
+    guest_text = (
+        "Review for [redacted]\nTOKEN=[redacted]\nInvoice [redacted]\n"
+        "https://ci.example.org/job?access_token=[redacted]"
+    )
+    message = TaskMessage(
+        id=uuid4(), task_id=task_id, seq=1, text=raw_text, mode="interrupt", status="pending", actor="fixture-subject",
+        created_at=task.created_at, turn=None, plan_attempt=None,
+    )
+    store.list_events.return_value = [Event(
+        task_id=task_id, seq=1, type="user.message", created_at=task.created_at,
+        payload={"message_id": str(message.id), "text": message.text, "mode": message.mode, "actor": message.actor},
+    )]
+
+    async def list_messages(id_):
+        await store.get_task(id_, "eval")
+        return [message]
+
+    store.list_task_messages = list_messages
+    path = f"/v1/tasks/{task_id}"
+    auth = {"Authorization": "Bearer viewer"}
+    response = await client.get(path + "/messages")
+    assert response.status_code == 200
+    assert response.json() == [{**message.model_dump(mode="json"), "actor": "[redacted]", "text": guest_text}]
+    assert (await client.get(path + "/messages", headers=auth)).json() == [message.model_dump(mode="json")]
+    assert (await client.post(path + "/messages", json={"text": "Follow up"})).status_code == 401
+    store.add_task_message.assert_not_called()
+
+    response = await client.get(path + "/dag")
+    assert response.status_code == 200
+    graph = response.json()
+    ids = {node["id"] for node in graph["nodes"]}
+    assert len(ids) == len(graph["nodes"])
+    assert all(edge["from"] in ids and edge["to"] in ids for edge in graph["edges"])
+    assert [node["label"] for node in graph["nodes"] if node["kind"] == "subtask"] == ["[redacted]"] * 2
+    interjection = next(node for node in graph["nodes"] if node["kind"] == "interjection")
+    assert interjection["meta"]["text"] == guest_text
+    assert "actor" not in interjection["meta"]
+    assert all(name not in response.text for name in names)
+    response = await client.get(path + "/dag", headers=auth)
+    assert all(name in response.text for name in names)
+    assert message.actor in response.text and "fixture-message" in response.text
+    for suffix in ("/dag", "/messages"):
+        assert (await client.get(f"/v1/tasks/{other_id}" + suffix)).status_code == 404
+        assert (await client.get(path + suffix, headers={"Authorization": "Bearer invalid"})).status_code == 401
+
+
+def test_guest_dag_preserves_redacted_parent_links():
+    task_id = uuid4()
+    parent = DAGNode(id=f"task:{task_id}/subtask:member@example.org", label="member@example.org",
+                     kind="subtask", task_id=task_id)
+    child = DAGNode(id=f"{parent.id}/turn:1", kind="turn", label="Execute", task_id=task_id,
+                    meta={"parent": parent.id})
+    graph = history_dag(GuestPrincipal(tenant_id="eval"), TaskDAG(
+        nodes=[parent, child], edges=[DAGEdge(source=parent.id, target=child.id, kind="spawn")],
+    ))
+    assert graph.nodes[1].meta["parent"] == graph.edges[0].source == graph.nodes[0].id
+    assert graph.edges[0].target == graph.nodes[1].id
+    assert "member@example.org" not in graph.model_dump_json()
+
+
+async def test_guest_project_reads_and_writes_require_a_token(demo_api):
+    client, _, _, _ = demo_api
+    path = f"/v1/projects/{uuid4()}"
+    for url in ("/v1/projects", path, path + "/threads", path + "/usage", path + "/library"):
+        assert (await client.get(url)).status_code == 401
+    writes = [
+        ("POST", "/v1/projects", {"name": "New"}), ("PATCH", path, {"name": "Edited"}),
+        ("DELETE", path, None),
+    ]
+    writes.extend(("POST", f"{path}/{action}", None) for action in ("pause", "resume", "archive", "unarchive"))
+    for method, url, body in writes:
+        assert (await client.request(method, url, json=body)).status_code == 401
+
+
 @pytest.mark.parametrize(
     ("method", "path"),
     [
@@ -190,6 +291,7 @@ async def test_guest_history_and_credential_fields(demo_api):
         ("POST", "/v1/portal/provider-key"), ("DELETE", "/v1/admin/tenants/other"),
         ("GET", "/v1/tenant/members"), ("GET", "/v1/tenant/billing"),
         ("GET", "/v1/integrations/scm"), ("GET", "/v1/tokens"), ("GET", "/v1/admin/usage"),
+        ("GET", "/v1/knowledge/documents"),
     ],
 )
 async def test_guest_cannot_use_other_routes(demo_api, method, path):

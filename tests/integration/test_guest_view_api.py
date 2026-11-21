@@ -8,7 +8,7 @@ import pytest
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
 from sca.config import Settings
-from sca.core.models import TaskState
+from sca.core.models import TaskMessageInput, TaskState
 from sca.storage.local import LocalObjectStore, key_for
 
 
@@ -41,6 +41,9 @@ async def test_guest_reads_demo_history_with_tenant_rls(store, api_store, tmp_pa
         tenant_id="other", kind="coding", idempotency_key=None, spec={"instruction": "other history"},
     )
     await eval_store.append_event(task.id, "agent.message", {"text": "finished", "token": "fixture-event"})
+    message = await eval_store.add_task_message(
+        task.id, TaskMessageInput(text="Review with member@example.org"), "member@example.org",
+    )
     await eval_store.add_usage(task.id, {"cost_micro_usd": 1_000})
     await eval_store.set_state(task.id, TaskState.CANCELLED)
     patch = b"+demo change\n+contact = 'member@example.org'\n"
@@ -78,6 +81,17 @@ async def test_guest_reads_demo_history_with_tenant_rls(store, api_store, tmp_pa
             response = await client.get(root + path)
             assert response.status_code == 200 and "finished" in response.text
             assert "fixture-event" not in response.text
+        response = await client.get(root + "/dag")
+        assert response.status_code == 200
+        node = next(node for node in response.json()["nodes"] if node["kind"] == "interjection")
+        assert node["meta"]["text"] == "Review with [redacted]" and "actor" not in node["meta"]
+        response = await client.get(root + "/messages")
+        assert response.status_code == 200 and response.json() == [{
+            **message.model_dump(mode="json"), "actor": "[redacted]", "text": "Review with [redacted]",
+        }]
+        for suffix in ("/dag", "/messages"):
+            assert (await client.get(f"/v1/tasks/{other.id}" + suffix)).status_code == 404
+        assert (await client.post(root + "/messages", json={"text": "Follow up"})).status_code == 401
         artifact = (await client.get(root + "/artifacts")).json()[0]
         assert artifact["uri"] == root + "/artifacts/changes.patch"
         response = await client.get(artifact["uri"])

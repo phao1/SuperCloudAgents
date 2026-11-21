@@ -150,6 +150,7 @@ button:disabled { color: var(--muted); background: var(--subtle); opacity: .7; c
 .badge.problem { background: var(--bad-bg); color: var(--bad); }
 .badge.waiting { background: var(--warn-bg); color: var(--warn); }
 #connect-prompt { margin-bottom: 16px; }
+#guest-view-banner { display: block; padding: 10px 14px; margin-bottom: 16px; }
 #error, .provider-error-banner { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
 #error:empty, #recent-loop:empty, .status-text:empty { display: none; }
 .status-text { min-height: 1.5em; overflow-wrap: anywhere; }
@@ -1723,9 +1724,10 @@ function renderTimeline(){
       }
       if(!patches.length&&event.type==='agent.file_change')field('编辑详情（服务端未提供统一差异）',p)
     } else if(guidance){
+      const actor=p.actor?p.actor+' · ':'';
       card.append(
         el('p',p.text,'task-message-bubble'),
-        el('small',p.actor+' · '+(p.mode==='interrupt'?'立即打断':'排队送达')),
+        el('small',actor+(p.mode==='interrupt'?'立即打断':'排队送达')),
       );
     } else if(event.type==='agent.message')field('内容',p.text??p.message);
     else if(event.type==='acceptance.completed'||event.type==='verification.completed'){
