@@ -177,6 +177,8 @@ make up-all    # also start the optional services (needs a .env with provider ke
 
 ## Phase 6: evolution and commercial basics
 
+[2026-11-22 发布说明与现场验证记录](docs/release-1122.md)
+
 | Area | What it adds | Enable with |
 | --- | --- | --- |
 | Self-evolution | OpenCode prompts and tool descriptions evolve as overlays: reflect on dev failures, propose candidates, gate on a holdout split for quality or cost, promote a champion. Schedules, approvals, percentage rollouts, rollback, solidifying a champion into a built version, and harvesting real tasks as cases. | `/v1/evolutions`, `/v1/champions`, `/v1/evolution-schedules`, Portal → 自动演进 |
