@@ -78,9 +78,11 @@ async def read_run(request: Request, run_id: UUID) -> dict:
 
 def summary(run: dict) -> dict:
     rows = run["results"]
+    scored = [row for row in rows if not row.get("infrastructure_error")]
     return {**{k: v for k, v in run.items() if k != "results"},
-            "passed": sum(overall_passed(row) for row in rows),
-            "failed": sum(not overall_passed(row) for row in rows),
+            "passed": sum(overall_passed(row) for row in scored),
+            "failed": sum(not overall_passed(row) for row in scored),
+            "infrastructure_errors": len(rows) - len(scored),
             "result_count": len(rows), "cost_usd": sum(row["cost_usd"] for row in rows)}
 
 

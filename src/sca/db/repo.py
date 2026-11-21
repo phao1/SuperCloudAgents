@@ -336,7 +336,8 @@ class Store:
             return [Task.model_validate(dict(row)) for row in rows]
 
     async def set_state(
-        self, task_id: str | UUID, new_state: TaskState, reason: str | None = None
+        self, task_id: str | UUID, new_state: TaskState, reason: str | None = None,
+        *, model_provider_error: dict | None = None,
     ) -> Task:
         async with self._transaction() as session:
             row = await self._task(session, task_id, True)
@@ -345,6 +346,10 @@ class Store:
                 return Task.model_validate(dict(row))
             if not can_transition(old, new_state):
                 raise ConflictError(f"Cannot transition from {old} to {new_state}")
+            # Model provider errors are committed with the terminal reason.
+            result = {**row["result"], "admission": {}}
+            if model_provider_error is not None and new_state == TaskState.FAILED:
+                result["model_provider_error"] = model_provider_error
             updated = (
                 (
                     await session.execute(
@@ -352,7 +357,7 @@ class Store:
                         .where(tasks.c.id == row["id"])
                         .values(state=new_state, state_reason=reason, updated_at=func.now(),
                                 **({"slot_held": False, "slot_requested_at": None,
-                                    "result": {**row["result"], "admission": {}}}
+                                    "result": result}
                                    if new_state in TERMINAL_STATES | {TaskState.AWAITING_REVIEW, TaskState.PAUSED}
                                    else {}))
                         .returning(tasks)
@@ -1000,19 +1005,14 @@ class Store:
             ).values(trajectory_passed=passed, trajectory_findings=findings))
 
     async def get_eval_run(self, run_id: str) -> dict:
-        from sca.db.schema import eval_results, eval_runs
+        from sca.db.schema import eval_runs
 
         async with self._transaction() as session:
             run = (await session.execute(select(eval_runs).where(
                 eval_runs.c.id == task_uuid(run_id), eval_runs.c.tenant_id == 'eval',
             ))).mappings().one()
-            results = (await session.execute(select(eval_results).where(
-                eval_results.c.run_id == task_uuid(run_id), eval_results.c.tenant_id == 'eval',
-            ).order_by(eval_results.c.case_id, eval_results.c.repeat))).mappings().all()
-            from sca.eval.trajectory import overall_passed
-
             return {**run, 'reason': run['variant'].get('reason'),
-                    'results': [{**row, 'passed': overall_passed(dict(row))} for row in results]}
+                    'results': await self._eval_result_rows(session, run_id)}
 
     async def complete_acceptance(self, task_id: str, passed: bool,
                                   exit_code: int, output_tail: str) -> None:
@@ -2491,3 +2491,20 @@ class Store:
             "status": "failed", "spent_usd": spent_usd,
             "config": evolutions.c.config.concat({"reason": reason}),
         })
+
+    # Model provider errors
+
+    async def _eval_result_rows(self, session: AsyncSession, run_id: str) -> list[dict]:
+        from sca.db.schema import eval_results
+        from sca.eval.trajectory import overall_passed
+
+        # A case stopped by an account error has nullable scores and a failure on its task.
+        result = eval_results.c
+        rows = (await session.execute(select(
+            eval_results, tasks.c.result["model_provider_error"].label("infrastructure_error"),
+        ).outerjoin(tasks, (tasks.c.id == result.task_id) & (tasks.c.tenant_id == result.tenant_id)
+                    & result.acceptance_passed.is_(None)).where(
+            result.run_id == task_uuid(run_id), result.tenant_id == "eval",
+        ).order_by(result.case_id, result.repeat))).mappings()
+        return [{**row, "passed": None if row["infrastructure_error"] else overall_passed(dict(row))}
+                for row in rows]

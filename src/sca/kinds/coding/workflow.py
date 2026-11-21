@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable
 from dataclasses import asdict
 from datetime import timedelta
 
@@ -18,6 +19,8 @@ from temporalio.exceptions import (
     ChildWorkflowError,
     is_cancelled_exception,
 )
+
+from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
     from sca.intents.base import TICKET_TYPES
@@ -113,12 +116,13 @@ class CodingTaskWorkflow(TaskWorkflow):
                 workflow.logger.warning("could not record ticket write-back for %s", task_id)
 
     # SCM
-    async def _set_state(self, task_id: str, state: str, reason: str | None = None) -> None:
+    async def _set_state(self, task_id: str, state: str, reason: str | None = None,
+                         *, model_provider_error: dict | None = None) -> None:
         if self._scm_review and state in {"SUCCEEDED", "CANCELLED"}:
             await self._sync_scm(task_id, "approve" if state == "SUCCEEDED" else "reject")
         # Earlier histories return None from set_state and need no further activity.
         enabled = await workflow.execute_activity(
-            "set_state", SetStateInput(task_id, state, reason), **_QUICK,
+            "set_state", SetStateInput(task_id, state, reason, model_provider_error), **_QUICK,
         )
         if state == "AWAITING_REVIEW":
             self._scm_review = bool(enabled)
@@ -127,9 +131,10 @@ class CodingTaskWorkflow(TaskWorkflow):
         elif enabled and state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             await self._sync_scm(task_id, "terminal")
 
-    async def _finish(self, task_id: str, state: str, reason: str) -> None:
+    async def _finish(self, task_id: str, state: str, reason: str,
+                      *, model_provider_error: dict | None = None) -> None:
         self._scm_review = False  # An external cancellation is distinct from a review decision.
-        await super()._finish(task_id, state, reason)
+        await super()._finish(task_id, state, reason, model_provider_error=model_provider_error)
 
     async def _sync_scm(self, task_id: str, phase: ScmPhase) -> None:
         try:
@@ -198,7 +203,7 @@ class CodingTaskWorkflow(TaskWorkflow):
                     cancellation_type=workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
                 )
             except ChildWorkflowError as exc:
-                if is_cancelled_exception(exc):
+                if is_cancelled_exception(exc) or patched_provider_account_error(exc):
                     raise
                 result = SubtaskResult(attempt.name, reason=str(exc.cause))
             return await workflow.execute_activity(
@@ -359,7 +364,9 @@ class CodingBeforeTurn(TaskWorkflow):
                         heartbeat_timeout=timedelta(minutes=5),
                         retry_policy=_NO_RETRY,
                     )
-                except ActivityError:
+                except ActivityError as exc:
+                    if patched_provider_account_error(exc):
+                        raise
                     await workflow.execute_activity(
                         "coding.reject_plan",
                         PlanningInput(task_id, attempt, "planning activity failed"),
@@ -411,7 +418,7 @@ class CodingBeforeTurn(TaskWorkflow):
                 results = await _run_subtask_dag(task_id, subtasks, spec)
             else:
                 handles = [await _start_subtask(task_id, sub, spec) for sub in subtasks]
-                results = await asyncio.gather(
+                results = await _gather_subtasks(
                     *(_collect_subtask(handle, task_id, sub)
                       for handle, sub in zip(handles, subtasks, strict=True))
                 )
@@ -584,7 +591,7 @@ class CodingSubtaskWorkflow:
                     **_QUICK,
                 )
         except (ActivityError, ApplicationError) as exc:
-            if is_cancelled_exception(exc):
+            if is_cancelled_exception(exc) or patched_provider_account_error(exc):
                 raise
             cause = exc.cause if isinstance(exc, ActivityError) else exc
             result.reason = str(cause)
@@ -617,7 +624,7 @@ async def _collect_subtask(
     try:
         return await handle
     except ChildWorkflowError as exc:
-        if is_cancelled_exception(exc):
+        if is_cancelled_exception(exc) or patched_provider_account_error(exc):
             raise
         return SubtaskResult(
             subtask["name"],
@@ -625,6 +632,19 @@ async def _collect_subtask(
             reason=str(exc.cause),
             depends_on=subtask.get("depends_on", []),
         )
+
+
+async def _gather_subtasks(*steps: Awaitable[SubtaskResult]) -> list[SubtaskResult]:
+    running = [asyncio.ensure_future(step) for step in steps]
+    try:
+        return await asyncio.gather(*running)
+    except ChildWorkflowError as exc:
+        if patched_provider_account_error(exc):
+            # Let the other child workflows release their sandboxes and virtual keys.
+            for task in running:
+                task.cancel()
+            await asyncio.gather(*running, return_exceptions=True)
+        raise
 
 
 async def _run_subtask_dag(task_id: str, subtasks: list[dict], spec: dict) -> list[SubtaskResult]:
@@ -648,4 +668,4 @@ async def _run_subtask_dag(task_id: str, subtasks: list[dict], spec: dict) -> li
 
     for name in subtask_order(dependencies):
         running[name] = asyncio.create_task(run(name))
-    return await asyncio.gather(*running.values())
+    return await _gather_subtasks(*running.values())

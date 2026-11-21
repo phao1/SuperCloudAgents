@@ -57,7 +57,8 @@ def static_check(overlay: dict, texts: list[str], surfaces: list[str], parent: d
 
 def metrics(run: dict) -> dict:
     rows = run['results']
-    return {'pass_rate': mean(overall_passed(r) for r in rows) if rows else 0,
+    scored = [r for r in rows if not r.get('infrastructure_error')]
+    return {'pass_rate': mean(overall_passed(r) for r in scored) if scored else 0,
             'cost_usd': sum(float(r['cost_usd']) for r in rows),
             'turns': mean(r['turns'] for r in rows) if rows else 0}
 

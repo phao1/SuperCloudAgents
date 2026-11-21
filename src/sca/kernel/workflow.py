@@ -18,6 +18,8 @@ from temporalio.exceptions import (
     is_cancelled_exception,
 )
 
+from sca.orchestration.provider_errors import patched_provider_account_error
+
 with workflow.unsafe.imports_passed_through():
     from sca.intents.base import REMOTE_TYPES
     from sca.kernel.activities import (
@@ -71,9 +73,10 @@ class TaskWorkflow:
         else:
             self._reviews.append((decision, feedback))
 
-    async def _set_state(self, task_id: str, state: str, reason: str | None = None) -> None:
+    async def _set_state(self, task_id: str, state: str, reason: str | None = None,
+                         *, model_provider_error: dict | None = None) -> None:
         await workflow.execute_activity(
-            "set_state", SetStateInput(task_id, state, reason), **_QUICK
+            "set_state", SetStateInput(task_id, state, reason, model_provider_error), **_QUICK
         )
 
     @workflow.run
@@ -84,6 +87,10 @@ class TaskWorkflow:
             if is_cancelled_exception(e):
                 await self._finish(task_id, "CANCELLED", "cancelled by user")
             elif isinstance(e, (ActivityError, ChildWorkflowError)):
+                if provider := patched_provider_account_error(e):
+                    await self._finish(task_id, "FAILED", provider.reason,
+                                       model_provider_error=provider.payload())
+                    raise ApplicationError(provider.reason, type="TaskFailed", non_retryable=True) from e
                 failure = e
                 while isinstance(failure, ChildWorkflowError):
                     failure = failure.cause
@@ -110,9 +117,10 @@ class TaskWorkflow:
             await workflow.sleep(delay * workflow.random().uniform(0.8, 1.0))
             delay = min(10.0, delay * 2)
 
-    async def _finish(self, task_id: str, state: str, reason: str) -> None:
+    async def _finish(self, task_id: str, state: str, reason: str,
+                      *, model_provider_error: dict | None = None) -> None:
         try:
-            await self._set_state(task_id, state, reason)
+            await self._set_state(task_id, state, reason, model_provider_error=model_provider_error)
         except ActivityError:
             workflow.logger.exception("could not record final state %s", state)
 
@@ -248,8 +256,9 @@ class TaskWorkflow:
                         ),
                         retry_policy=_retry(2),
                     )
-                except ActivityError:
-                    await self._check_budget(task_id, turn)
+                except ActivityError as exc:
+                    if not patched_provider_account_error(exc):
+                        await self._check_budget(task_id, turn)
                     raise
                 session_id = turn_result.session_id
                 await workflow.execute_activity(

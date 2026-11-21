@@ -238,3 +238,26 @@ curl -fsS "$SCA_API_URL/v1/champions/$CHAMPION_ID" \
 相关单测 89 项通过，模拟 I/O 验证了套件中途变更时评测和演进一起结束。Temporal Replayer
 通过了两份合成的旧版评测历史回放。当前沙箱拒绝 Postgres 和 Temporal 的套接字连接，
 真实服务上的集成测试仍待验证。
+
+### 6.6 模型服务账户故障
+
+升级后重启 API 和 Worker。两者应使用同一个 `SCA_DATA_DIR`，以共享模型网关状态，无需数据库迁移。
+模型服务余额或额度耗尽、密钥无效时，Portal 的概览和任务页会显示红色横幅及故障时间。
+充值、恢复额度或更新 LiteLLM 的上游密钥后，下一次成功的模型调用会清除横幅。
+
+任务遇到 `billing` 或 `auth` 时立即结束为 `FAILED`。详情的 `state_reason` 给出处理方式，
+`model.provider_error` 事件提供类别和可用的 HTTP 状态码。评测详情用 `infrastructure_error`
+标记受影响的用例，摘要通过率和配对对比会排除这些用例。评测停止提交后续批次，已经提交的任务
+可以独立完成。评测与演进的 `reason` 会保留故障原因。恢复服务后可重新提交任务、评测或演进。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/portal/config" -H "Authorization: Bearer $TOKEN"
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID" -H "Authorization: Bearer $TOKEN"
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" -H "Authorization: Bearer $TOKEN"
+curl -fsS "$SCA_API_URL/v1/evals/runs/$EVAL_RUN_ID" -H "Authorization: Bearer $EVAL_ADMIN_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" -H "Authorization: Bearer $EVAL_ADMIN_TOKEN"
+```
+
+`gateway_provider_error` 提供最近一次已识别故障的 `kind` 和 UTC 时间 `at`。
+`gateway_provider_account_error` 保留账户故障，直到成功调用。`rate_limit` 和 `unavailable`
+继续走原有重试流程。

@@ -7,6 +7,7 @@ from temporalio import workflow
 from temporalio.exceptions import ActivityError
 
 from sca.eval.errors import eval_failure_reason
+from sca.orchestration.provider_errors import patched_provider_account_error
 
 
 @workflow.defn
@@ -18,9 +19,12 @@ class EvalRunWorkflow:
         try:
             status = await self.evaluate(request, options)
         except ActivityError as exc:
-            reason = eval_failure_reason(exc)
-            if reason is None or not workflow.patched("eval-suite-change-nonretryable"):
-                raise
+            if provider := patched_provider_account_error(exc):
+                reason = provider.reason
+            else:
+                reason = eval_failure_reason(exc)
+                if reason is None or not workflow.patched("eval-suite-change-nonretryable"):
+                    raise
             # Submitted tasks have their own workflows and can finish independently.
             status = "failed"
             finish["reason"] = reason

@@ -54,8 +54,8 @@ def test_errors_and_tail():
         {"type": "error", "message": "failed"},
     ]:
         (event,) = parse_codex_line(json.dumps(raw))
-        assert event.data == {"message": "failed"}
-        assert event.raw == raw
+        assert event.data == {"message": "Codex turn reported an error"}
+        assert event.raw is None
     output = "中" * 5000
     (event,) = parse_codex_line(
         json.dumps(
@@ -87,14 +87,14 @@ async def test_abnormal_turn(tmp_path, exit_code, timed_out, complete):
 
     backend = CodexBackend(tmp_path, tmp_path / "auth", "model")
     ctx = AgentContext(task_id="test", agent_home_host=str(tmp_path))
-    with pytest.raises(AgentTurnError, match="diagnostic") as exc:
+    with pytest.raises(AgentTurnError, match="Codex turn reported an error") as exc:
         _ = [
             event
             async for event in backend.run_turn(
                 Sandbox(), "id", ctx, "prompt", session_id=None, timeout_s=10
             )
         ]
-    assert "failure" in str(exc.value)
+    assert "diagnostic" not in str(exc.value)
 
 
 async def test_success_and_additions(tmp_path):

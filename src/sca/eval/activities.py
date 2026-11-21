@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from temporalio import activity
 
 from sca.config import Settings
+from sca.core.model_provider import ModelProviderError
 from sca.core.models import TERMINAL_STATES
 from sca.db.repo import Store
 from sca.eval.errors import invalid_eval_input, suite_changed
@@ -21,6 +22,7 @@ from sca.eval.suites import (
     select_cases,
 )
 from sca.eval.trajectory import evaluate
+from sca.orchestration.provider_errors import account_failure
 
 
 async def load_activity_suite(path: Path) -> dict:
@@ -179,6 +181,8 @@ class EvalActivities:
         from datetime import datetime
 
         result, usage = task["result"], task["usage"]
+        provider = ModelProviderError.from_payload(result.get("model_provider_error"))
+        infrastructure_error = task["state"] == "FAILED" and provider is not None and provider.is_account_error
         events, cursor = [], 0
         async with self.http() as http:
             while True:
@@ -193,24 +197,28 @@ class EvalActivities:
         if turns is None:
             turns = max((event["payload"].get("turn", 0) for event in events
                          if event["type"] == "agent.turn_started"), default=0)
-        try:
-            trajectory_passed, trajectory_findings = evaluate(
-                events, request["case"].get("trajectory_checks", []))
-        except ValueError:
-            raise invalid_eval_input("Evaluation trajectory data is invalid") from None
+        trajectory_passed, trajectory_findings = None, []
+        if not infrastructure_error:
+            try:
+                trajectory_passed, trajectory_findings = evaluate(
+                    events, request["case"].get("trajectory_checks", []))
+            except ValueError:
+                raise invalid_eval_input("Evaluation trajectory data is invalid") from None
         cost = usage.get("cost_micro_usd", 0) / 1e6
         await self.store.record_eval_result({
             "run_id": UUID(request["id"]), "tenant_id": "eval", "case_id": request["case"]["id"],
             "repeat": request["iteration"], "task_id": UUID(task["id"]),
-            "acceptance_passed": result.get("acceptance_passed", False),
+            "acceptance_passed": None if infrastructure_error else result.get("acceptance_passed", False),
             "trajectory_passed": trajectory_passed, "trajectory_findings": trajectory_findings,
-            "verification_passed": result.get("verification_passed", False),
+            "verification_passed": None if infrastructure_error else result.get("verification_passed", False),
             "turns": turns,
             "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             "cost_usd": cost,
             "duration_s": (datetime.fromisoformat(task["updated_at"]) -
                            datetime.fromisoformat(task["created_at"])).total_seconds(),
         })
+        if infrastructure_error and provider is not None:
+            raise account_failure(provider)
         return cost
 
     @activity.defn(name="eval_finish")

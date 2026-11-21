@@ -23,6 +23,7 @@ from sca.kinds.coding.prompts import planning_prompt
 from sca.kinds.coding.spec import SubtaskSpec, path_scope, subtask_order, validate_shared_paths
 from sca.kinds.coding.subtask_inputs import PlanningInput
 from sca.kinds.coding.subtasks import ChildActivities, SubtaskActivities
+from sca.orchestration.provider_errors import provider_account_error
 from sca.storage.local import key_for
 
 MAX_PLAN_BYTES = 64 * 1024
@@ -217,7 +218,9 @@ class PlanningActivities:
             )
             await self.reject_plan(PlanningInput(inp.task_id, inp.attempt, reason))
             return None
-        except Exception:  # noqa: BLE001 — planning failures must fall back
+        except Exception as exc:
+            if provider_account_error(exc):
+                raise
             # Backend and sandbox failures may contain credentials or arbitrary output.
             await self.reject_plan(
                 PlanningInput(

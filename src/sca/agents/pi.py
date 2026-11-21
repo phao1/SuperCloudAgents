@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
@@ -73,6 +74,7 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
         message = raw.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":
             return []
+        failed = message.get("stopReason") in ("error", "aborted")
         text = _text(message.get("content"))
         if text:
             events.append(AgentEvent(type="message", data={"text": text}))
@@ -87,12 +89,12 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
                 "input_tokens": number("input") + number("cacheRead") + number("cacheWrite"),
                 "output_tokens": number("output"), "cached_input_tokens": number("cacheRead"),
                 "cost": total if type(total) in (int, float) and 0 <= total < float("inf") else 0,
-            }))
+            }, model_call_succeeded=not failed))
         duration = message.get("durationMs")
         if events and events[-1].type == "usage" and type(duration) in (int, float) and duration >= 0:
             events[-1].data["model_call_duration_ms"] = duration
-        if message.get("stopReason") in ("error", "aborted"):
-            events.append(AgentEvent(type="error", data={"message": "Pi model response failed"}))
+        if failed:
+            events.append(model_error_event(message, "Pi model response failed"))
     return events
 
 

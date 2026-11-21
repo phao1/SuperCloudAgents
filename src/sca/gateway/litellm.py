@@ -13,16 +13,15 @@ import math
 
 import httpx
 
-from sca.core.errors import ScaError
-
-
-class GatewayError(ScaError):
-    pass
+from sca.core.model_provider import GatewayError, ModelProviderError, classify_model_error
+from sca.gateway.health import ProviderHealth
 
 
 class LiteLLMGateway:
-    def __init__(self, admin_url: str, master_key: str, sandbox_url: str, timeout_s: float = 20):
+    def __init__(self, admin_url: str, master_key: str, sandbox_url: str, timeout_s: float = 20,
+                 *, provider_health: ProviderHealth | None = None):
         self._master_key = master_key
+        self._provider_health = provider_health
         self.sandbox_url = sandbox_url  # what a sandbox uses as its OpenAI-compatible base URL
         self._http = httpx.AsyncClient(
             base_url=admin_url.rstrip("/"),
@@ -56,10 +55,39 @@ class LiteLLMGateway:
             raise GatewayError(f"model gateway {path} failed: {r.status_code}")
         return r.json()
 
+    def _observe_model(self, error: ModelProviderError | None) -> None:
+        if self._provider_health is not None:
+            self._provider_health.record(error)
+
+    async def _post_model(self, path: str, body: dict) -> dict:
+        try:
+            response = await self._request("POST", path, json=body)
+        except GatewayError:
+            error = ModelProviderError("unavailable")
+            self._observe_model(error)
+            raise error from None
+        if response.status_code >= 400:
+            error = classify_model_error(response.text, status=response.status_code)
+            if error is not None:
+                self._observe_model(error)
+                raise error
+            raise GatewayError(f"model gateway {path} failed: {response.status_code}")
+        try:
+            data = response.json()
+        except ValueError:
+            raise GatewayError("invalid model gateway response") from None
+        if isinstance(data, dict):
+            if data.get("error") is None:
+                return data
+            if error := classify_model_error(data):
+                self._observe_model(error)
+                raise error
+        raise GatewayError("invalid model gateway response")
+
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         if not texts:
             return []
-        data = await self._post("/v1/embeddings", {"model": model, "input": texts})
+        data = await self._post_model("/v1/embeddings", {"model": model, "input": texts})
         try:
             rows = sorted(data["data"], key=lambda row: row["index"])
             if [row["index"] for row in rows] != list(range(len(texts))):
@@ -69,22 +97,24 @@ class LiteLLMGateway:
                     any(len(v) != len(vectors[0]) or
                         not all(math.isfinite(x) for x in v) for v in vectors)):
                 raise ValueError("invalid vectors")
-            return vectors
-        except (KeyError, TypeError, ValueError) as exc:
-            raise GatewayError("invalid embedding response") from exc
+        except (KeyError, TypeError, ValueError):
+            raise GatewayError("invalid embedding response") from None
+        self._observe_model(None)
+        return vectors
 
     async def complete(self, messages: list[dict[str, str]], model: str, *,
                        max_tokens: int = 1024) -> str:
-        data = await self._post('/v1/chat/completions', {
+        data = await self._post_model('/v1/chat/completions', {
             'model': model, 'messages': messages, 'max_tokens': max_tokens, 'temperature': 0,
         })
         try:
             content = data['choices'][0]['message']['content']
             if not isinstance(content, str):
                 raise TypeError('missing content')
-            return content
-        except (KeyError, IndexError, TypeError, ValueError) as exc:
-            raise GatewayError('invalid completion response') from exc
+        except (KeyError, IndexError, TypeError, ValueError):
+            raise GatewayError('invalid completion response') from None
+        self._observe_model(None)
+        return content
 
     async def issue_key(
         self,

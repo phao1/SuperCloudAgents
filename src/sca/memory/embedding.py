@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 
 from sca.config import Settings, get_settings
 from sca.core.interfaces import ModelGateway
+from sca.gateway.health import ProviderHealth
 from sca.gateway.litellm import LiteLLMGateway
 
 logger = logging.getLogger(__name__)
@@ -14,7 +15,8 @@ logger = logging.getLogger(__name__)
 async def embedding_gateway(settings: Settings, gateway: ModelGateway | None = None):
     owned = None
     if gateway is None and settings.model_gateway_url:
-        owned = LiteLLMGateway(settings.model_gateway_url, settings.model_gateway_master_key, "")
+        owned = LiteLLMGateway(settings.model_gateway_url, settings.model_gateway_master_key, "",
+                               provider_health=ProviderHealth(settings.data_dir))
         gateway = owned
     try:
         yield gateway

@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
 from sca.api.evals import suite_path
+from sca.core.model_provider import ModelProviderError
 from sca.core.models import TaskState
 from sca.storage.local import LocalObjectStore
 
@@ -98,6 +99,31 @@ async def test_detail_list_compare(eval_api, store):
     assert (await client.get(
         f'/v1/evals/compare?a={ids[0]}&b={mismatch}')).status_code == 422
     await store.set_state(task.id, TaskState.CANCELLED)
+
+
+async def test_failed_provider_case_is_excluded_from_evaluation_scores(eval_api, store):
+    client, _ = eval_api
+    provider = ModelProviderError('billing', 402)
+    task, _ = await store.create_task(tenant_id='eval', kind='coding', spec={}, idempotency_key=None)
+    await store.set_state(task.id, TaskState.FAILED, provider.reason, model_provider_error=provider.payload())
+    run_id = uuid4()
+    await store.create_eval_run({'id': run_id, 'tenant_id': 'eval', 'suite': 'coding-basic',
+                                'suite_hash': 'same', 'variant': {},
+                                'created_by': 'test', 'status': 'running'})
+    await store.record_eval_result({'run_id': run_id, 'tenant_id': 'eval', 'case_id': 'case',
+        'repeat': 0, 'task_id': task.id, 'acceptance_passed': None, 'verification_passed': None,
+        'turns': 1, 'tokens': 0, 'cost_usd': 0, 'duration_s': 1})
+    await store.finish_eval_run(str(run_id), 'failed', reason=provider.reason)
+    response = await client.get(f'/v1/evals/runs/{run_id}')
+    assert response.status_code == 200
+    run = response.json()
+    assert run['status'] == 'failed' and run['reason'] == provider.reason
+    assert (run['passed'], run['failed'], run['infrastructure_errors']) == (0, 0, 1)
+    (case,) = run['results']
+    assert case['infrastructure_error'] == provider.payload() and case['passed'] is None
+    report = (await client.get(f'/v1/evals/compare?a={run_id}&b={run_id}')).json()
+    assert report['A'] == report['B'] == {}
+    assert report['infrastructure_errors'] == {'A': 1, 'B': 1}
 
 
 def test_suite_path_rejects_symlinks(tmp_path, monkeypatch):

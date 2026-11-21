@@ -149,7 +149,7 @@ button:disabled { color: var(--muted); background: var(--subtle); opacity: .7; c
 .badge.problem { background: var(--bad-bg); color: var(--bad); }
 .badge.waiting { background: var(--warn-bg); color: var(--warn); }
 #connect-prompt { margin-bottom: 16px; }
-#error { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
+#error, .provider-error-banner { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
 #error:empty, #recent-loop:empty, .status-text:empty { display: none; }
 .status-text { min-height: 1.5em; overflow-wrap: anywhere; }
 .empty-state { padding: 14px; }
@@ -495,6 +495,7 @@ body[data-trace-expanded] { overflow: hidden; }
     </div>
 
     <section id="overview" class="page">
+      <p id="overview-provider-error" class="provider-error-banner" role="alert" hidden></p>
       <div class="panel" id="workspace-settings">
         <div class="panel-head"><div><h2>工作空间连接</h2><p id="connection-status" role="status">尚未连接</p></div><span id="health" class="badge" hidden></span></div>
         <div class="settings">
@@ -591,6 +592,7 @@ body[data-trace-expanded] { overflow: hidden; }
     </section>
 
     <section id="trace" class="page" hidden>
+      <p id="task-provider-error" class="provider-error-banner" role="alert" hidden></p>
       <div class="panel">
         <div class="task-picker">
           <label>最近任务<select id="task-picker"><option value="">选择任务</option></select></label>
@@ -844,7 +846,10 @@ const pendingActions=new Set();
 $('token').value=portalToken;
 let canRescore=false;
 function overallPassed(row){return row.acceptance_passed===true&&row.trajectory_passed!==false}
-function resultLabel(row){return row.acceptance_passed===true&&row.trajectory_passed===false?'⚠ 验收通过 · 过程未通过':overallPassed(row)?'✓ 总体通过':row.acceptance_passed===false?'✕ 验收失败':'◷ 待验收'}
+function resultLabel(row){
+  if(row.infrastructure_error)return '⚠ 基础设施错误 · '+providerAccountLabel(row.infrastructure_error.kind);
+  return row.acceptance_passed===true&&row.trajectory_passed===false?'⚠ 验收通过 · 过程未通过':overallPassed(row)?'✓ 总体通过':row.acceptance_passed===false?'✕ 验收失败':'◷ 待验收';
+}
 function error(e){
   $('error').textContent=e.message||String(e)
 }
@@ -953,6 +958,19 @@ function extractPatches(payload){
   if(!patches.length&&typeof input.oldString==='string'&&typeof input.newString==='string')patches.push('--- '+(input.filePath||'文件')+'\n+++ '+(input.filePath||'文件')+'\n@@ 工具编辑 @@\n'+input.oldString.split('\n').map(l=>'-'+l).join('\n')+'\n'+input.newString.split('\n').map(l=>'+'+l).join('\n'));
   return [...new Set(patches)];
 }
+function providerAccountLabel(kind){
+  return kind==='billing'?'模型服务账户余额不足':kind==='auth'?'模型密钥无效':'';
+}
+function renderProviderError(error){
+  const label=providerAccountLabel(error?.kind);
+  const at=Date.parse(error?.at);
+  const message=label&&Number.isFinite(at)?label+' · '+new Date(at).toLocaleString('zh-CN'):label;
+  for(const id of ['overview-provider-error','task-provider-error']){
+    const banner=$(id);
+    if(banner.textContent!==message)banner.textContent=message;
+    banner.hidden=!label;
+  }
+}
 async function loadConfig(){
   const c=await data('/portal/config');
   portalConfig=c;
@@ -963,6 +981,7 @@ async function loadConfig(){
   $('health').hidden=false;
   $('health').className='badge '+(ready?'complete':'waiting');
   $('health').textContent=ready?'网关与工作流在线':!c.temporal_reachable?'工作流暂不可用':'模型网关暂不可用';
+  renderProviderError(c.gateway_provider_account_error);
   $('provider-key-form').querySelector('button').disabled=!c.can_configure_model||savingKey;
   $('provider-key').disabled=!c.can_configure_model||savingKey;
   $('provider-key-note').textContent=c.can_configure_model
@@ -1078,6 +1097,7 @@ function renderRunProgress(run,total){
   const links=el('div',undefined,'result-links');
   for(const task of running)links.append(evidenceLink(taskChoice(task)+' ↗','#/tasks/'+enc(task.id)));
   $('run-progress').replaceChildren(caption,progress,links);
+  if(run.reason)$('run-progress').append(el('p',run.reason,'bad'));
 }
 async function loadRuns(){
   runs=await data('/evals/runs?limit=200');
@@ -1131,9 +1151,9 @@ async function matrix(){
   $('optimize-prompt').hidden=!allowPrompt;
   $('matrix').replaceChildren(table(['用例',...Array.from({length:repeat},(_,i)=>'第 '+(i+1)+' 次')],cases.map(id=>[id,...Array.from({length:repeat},(_,i)=>{
     const row=rows.find(r=>r.case_id===id&&r.repeat===i),box=el('div');
-    if(!row){box.append(el('small',run.status==='completed'?'无结果':'等待结果'));return box}
-    box.className=row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
-    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(row.verification_passed?'✓ 通过':'✕ 未通过')));
+    if(!row){box.append(el('small',['queued','running'].includes(run.status)?'等待结果':'无结果'));return box}
+    box.className=row.infrastructure_error?'bad cell':row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
+    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(row.infrastructure_error?'未执行':row.verification_passed?'✓ 通过':'✕ 未通过')));
     if(allowPrompt)box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
     else if(portalUI.can('member')&&!overallPassed(row)&&typeof row.acceptance_passed==='boolean')box.append(button('诊断与修复 →',()=>selectCase(run,row,true)));
     return box;
@@ -1170,7 +1190,8 @@ async function showComparison(a,b){
     box.append(button('以 B 继续第 '+promptRoundForRun(newRun)+' 轮',()=>continuePrompt(newRun,oldRun)));
   }
   const am=dimensions(oldRun.results),bm=dimensions(newRun.results),cards=el('div',undefined,'metrics');
-  for(const [label,key,note] of [['准 · 总通过率','rate','仅验收 '+am.acceptanceRate+' → '+bm.acceptanceRate+' · 总通过 B − A '+signed(bm.rateValue-am.rateValue)+' pp'],['快 · 平均时长','duration','B − A '+signed(bm.mean-am.mean)+' 秒'],['稳 · 重复一致性','stability','通过率极差 '+am.spread+' → '+bm.spread],['省 · 总费用','cost','B − A '+money(bm.totalCost-am.totalCost)+' · Token '+am.tokens+' → '+bm.tokens+' · 缓存 '+cachedTokens(oldRun)+' → '+cachedTokens(newRun)]])cards.append(metric(label,am[key]+' → '+bm[key],note));
+  const delta=am.rateValue===null||bm.rateValue===null?'—':signed(bm.rateValue-am.rateValue)+' pp';
+  for(const [label,key,note] of [['准 · 总通过率','rate','仅验收 '+am.acceptanceRate+' → '+bm.acceptanceRate+' · 总通过 B − A '+delta],['快 · 平均时长','duration','B − A '+signed(bm.mean-am.mean)+' 秒'],['稳 · 重复一致性','stability','通过率极差 '+am.spread+' → '+bm.spread],['省 · 总费用','cost','B − A '+money(bm.totalCost-am.totalCost)+' · Token '+am.tokens+' → '+bm.tokens+' · 缓存 '+cachedTokens(oldRun)+' → '+cachedTokens(newRun)]])cards.append(metric(label,am[key]+' → '+bm[key],note));
   const pair=el('div',undefined,'scroll');
   pair.tabIndex=0;
   pair.setAttribute('aria-label','逐用例对比');
@@ -1878,6 +1899,8 @@ function verdictFor(a,b){
   const processFailures=b.results.filter(row=>row.acceptance_passed===true&&row.trajectory_passed===false).length;
   const signal=processFailures?'验收通过但过程检查未通过 '+processFailures+' 项，属于过程回归信号。':'';
   const result=(adopt,reason)=>({adopt,fixed,regressions,reason:signal+reason});
+  if([a,b].some(run=>run.results.some(row=>row.infrastructure_error)))
+    return result(false,'评测遇到基础设施错误。'+[a.reason,b.reason].filter(Boolean).join(' · '));
   if(!comparable)return result(false,'套件、模型或运行参数不同，无法直接归因。');
   if(missing||!complete(a)||!complete(b))return result(false,'等待完整的配对评测结果。');
   const promptSuite=a.suite===portalConfig?.prompt_evolution?.suite;
@@ -2044,11 +2067,11 @@ function renderTaskObservability(t){
   );
   renderSwimlane(t);
   for(const run of runDetails.values()){
-    const row=run.results.find(r=>r.task_id===t.id&&!overallPassed(r));
+    const row=run.results.find(r=>r.task_id===t.id&&!r.infrastructure_error&&!overallPassed(r));
     if(row&&!fixSelection&&!flow.fixTask){chooseFix(run,row,canOptimize(run)?'system_prompt':'source',false);break}
   }
   const result=[...runDetails.values()].flatMap(r=>r.results).find(r=>r.task_id===t.id);
-  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(result.acceptance_passed?'通过':'未通过')))}
+  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(result.infrastructure_error?'未执行':result.acceptance_passed?'通过':'未通过')))}
   renderTaskDiagnostics();
 }
 
@@ -2555,6 +2578,7 @@ function resetPortalSession(){
     $(id).replaceChildren();
   }
   $('health').hidden=true;
+  renderProviderError(null);
   $('provider-key').value='';
   $('provider-key').disabled=true;
   $('provider-key-form').querySelector('button').disabled=true;
@@ -2586,7 +2610,7 @@ async function refresh(manual=false){
     }
     const {current:page,parts}=pageRoute();
     if(portalUI.can('tenant')){
-      if(page==='overview'&&!connect)await loadConfig();
+      if(['overview','tasks'].includes(page)&&!connect)await loadConfig();
       if(portalUI.can('eval')&&['overview','evals','runs','compare','loop'].includes(page)){
         await loadRuns();
         if(page==='overview'||page==='loop')await updateFlow();
