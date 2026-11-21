@@ -82,7 +82,11 @@ def test_dependency_diamond_has_stable_pending_nodes():
     for name in ("fx", "tax"):
         assert linked(graph, branches["schema"], branches[name], "dependency")
         assert linked(graph, branches[name], branches["pricing"], "dependency")
-    assert len(nodes(graph, "plan")) == 1
+    planned, = nodes(graph, "plan")
+    plan_turn, schema_turn = nodes(graph, "turn")
+    assert plan_turn.meta["parent"] == planned.id
+    assert schema_turn.meta["parent"] == nodes(graph, "verification")[0].meta["parent"] == branches["schema"].id
+    assert all("parent" not in node.meta for node in [planned, *branches.values()])
     assert all(node.status == "pending" for node in nodes(graph, "finish"))
 
 
@@ -114,6 +118,8 @@ def test_attempt_scopes_allocate_pick_and_count_only_their_turns():
     assert [n.tokens for n in attempts] == [4, 15, None]
     assert [n.meta.get("selected") for n in attempts] == [None, True, None]
     assert attempts[0].cost_usd == .12
+    assert [n.meta["parent"] for n in nodes(graph, "turn")] == [n.id for n in attempts[:2]]
+    assert all("parent" not in n.meta for n in attempts)
     select, = nodes(graph, "merge")
     assert select.meta == {"action": "select", "attempt": 2, "actor": "reviewer"}
     assert sum(edge.kind == "select" and edge.target == select.id for edge in graph.edges) == 3
@@ -167,7 +173,12 @@ def test_fix_tools_cost_and_interjection_are_linked_to_the_correct_turn():
         assert linked(graph, source, target)
     assert len(nodes(graph, "ci")) == len(nodes(graph, "pr")) == len(nodes(graph, "review")) == 1
     assert nodes(graph, "finish")[0].finished_at == rows[-1].created_at
-    assert nodes(graph, "task")[0].tokens == 15
+    root, = nodes(graph, "task")
+    assert root.tokens == 15
+    assert all(step.meta["parent"] == root.id for step in (turn, tools, first, fix, second))
+    assert all("parent" not in node.meta for node in graph.nodes if node.kind in (
+        "ci", "pr", "review", "interjection", "finish",
+    ))
 
 
 def test_old_task_without_started_events_does_not_invent_timings():
@@ -221,6 +232,8 @@ def test_real_descendants_link_recursively_and_ignore_another_tenant():
     assert render.status == "failed"
     assert linked(graph, actual[child.id], render, "spawn")
     assert linked(graph, render, actual[grandchild.id], "spawn")
+    assert actual[child.id].meta["parent"] == branch.id
+    assert actual[grandchild.id].meta["parent"] == nodes(graph, "turn")[0].meta["parent"] == render.id
 
 
 def test_legacy_cycle_does_not_break_topological_layout():

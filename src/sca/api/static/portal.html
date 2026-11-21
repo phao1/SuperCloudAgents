@@ -675,6 +675,10 @@ body[data-trace-expanded] { overflow: hidden; }
           <div class="panel-head">
             <h2 id="task-dag-title">执行图 DAG</h2>
             <div class="dag-controls">
+              <div class="dag-orientation" role="group" aria-label="布局方向">
+                <button data-dag-orientation="vertical" type="button" aria-pressed="true">纵向</button>
+                <button data-dag-orientation="horizontal" type="button" aria-pressed="false">横向</button>
+              </div>
               <button class="dag-zoom-out" type="button" aria-label="缩小执行图">−</button>
               <button class="dag-zoom-in" type="button" aria-label="放大执行图">＋</button>
               <button class="dag-fit" type="button">查看全图</button>
@@ -686,10 +690,11 @@ body[data-trace-expanded] { overflow: hidden; }
             <span class="dag-edge-spawn"><i aria-hidden="true"></i>派生</span>
             <span class="dag-edge-select"><i aria-hidden="true"></i>选择</span>
             <span class="dag-edge-merge"><i aria-hidden="true"></i>合并</span>
+            <span class="dag-pan-hint" hidden>滚动或拖动查看其余节点</span>
           </div>
           <p class="dag-load-status" role="status"></p>
           <svg class="dag-canvas" tabindex="0" role="group"
-               aria-label="执行图。拖动或按方向键平移，使用滚轮、双指或加减键缩放，选择节点查看详情。">
+               aria-label="执行图。滚动、拖动或按方向键平移，按住 Ctrl 或 ⌘ 滚动、用双指或加减键缩放。选择节点展开或查看详情。">
             <g class="dag-world"></g>
           </svg>
           <aside class="dag-detail" aria-label="节点详情" aria-live="polite" hidden></aside>

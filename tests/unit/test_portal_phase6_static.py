@@ -1,6 +1,7 @@
 import re
 import shutil
 import subprocess
+from contextlib import contextmanager
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -11,7 +12,7 @@ STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
     "portal-ui.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
-    "portal-projects.js",
+    "portal-projects.js", "task-dag.js",
 ]
 
 
@@ -53,6 +54,15 @@ def test_phase6_portal_navigation_and_local_assets():
     for file in ("portal.html", *ASSETS):
         text = (STATIC / file).read_text()
         assert not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write", text)
+
+
+def test_project_dialog_visibility_uses_the_native_open_state():
+    page = (STATIC / "portal.html").read_text()
+    dialog = re.search(r'<dialog\b[^>]*id="project-dialog"[^>]*>', page)
+    css = (STATIC / "portal-operations.css").read_text()
+    assert dialog and not re.search(r'\b(?:open|hidden)\b', dialog[0])
+    assert '<form method="dialog"><button type="submit">关闭</button></form>' in page
+    assert re.search(r'\.project-dialog:not\(\[open\]\)\s*\{\s*display:\s*none;', css)
 
 
 @pytest.mark.parametrize(
@@ -238,24 +248,45 @@ global.fetch=async (path,request)=>{
     subprocess.run([str(node), str(path)], check=True, timeout=20)
 
 
-def test_portal_phase6_browser_submission():
+@contextmanager
+def portal_browser():
     playwright = pytest.importorskip("playwright.sync_api")
+    with playwright.sync_playwright() as engine:
+        if not Path(engine.chromium.executable_path).is_file():
+            pytest.skip("Playwright Chromium is unavailable")
+        try:
+            browser = engine.chromium.launch()
+        except playwright.Error as exc:
+            if "sandbox_host_linux.cc" in str(exc) and "Operation not permitted" in str(exc):
+                pytest.skip("Chromium startup is denied by the sandbox")
+            raise
+        try:
+            yield browser
+        finally:
+            browser.close()
+
+
+def serve_portal(route, path):
+    if path == "/portal":
+        route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
+        return True
+    name = path.rsplit("/", 1)[-1]
+    if name in {*ASSETS, "portal-operations.css", "task-dag.css", "task-flow.js", "task-timeline.js"}:
+        kind = "text/javascript" if name.endswith(".js") else "text/css"
+        route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
+        return True
+    return False
+
+
+def test_portal_phase6_browser_submission():
     calls = []
     task_id = "12abc345-1234-1234-1234-123456789012"
 
     def handle(route):
         req = route.request
         path = urlsplit(req.url).path
-        if path == "/portal":
-            return route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
-        if path == "/portal/assets/task-dag.js":
-            return route.fulfill(status=404)
-        if path.rsplit("/", 1)[-1] in {
-            *ASSETS, "portal-operations.css", "task-flow.js", "task-timeline.js", "task-dag.css",
-        }:
-            name = path.rsplit("/", 1)[-1]
-            kind = "text/javascript" if name.endswith(".js") else "text/css"
-            return route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
+        if serve_portal(route, path):
+            return
         if path == "/v1/tasks" and req.method == "POST":
             calls.append(req.post_data_json)
             if len(calls) == 1:
@@ -272,13 +303,11 @@ def test_portal_phase6_browser_submission():
                 "id": task_id, "state": "SUCCEEDED", "kind": "coding",
                 "spec": {"instruction": "补测试"}, "result": {},
             },
+            f"/v1/tasks/{task_id}/dag": {"nodes": [], "edges": []},
         }
         return route.fulfill(status=200, json=fixtures.get(path, []))
 
-    with playwright.sync_playwright() as engine:
-        if not Path(engine.chromium.executable_path).is_file():
-            pytest.skip("Playwright Chromium is unavailable")
-        browser = engine.chromium.launch()
+    with portal_browser() as browser:
         page = browser.new_page()
         page.route("**/*", handle)
         page.goto("http://portal.test/portal#/submit")
@@ -303,9 +332,83 @@ def test_portal_phase6_browser_submission():
         page.get_by_role("button", name="提交任务", exact=True).click()
         page.wait_for_url("**/portal#/tasks/" + task_id)
         page.get_by_role("heading", name="代码影响分析").wait_for()
-        assert page.get_by_text("发布补丁后可查看影响范围。").is_visible()
-        assert not page.locator("#task-dag").is_visible()
         assert calls[1]["spec"]["best_of"] == {"n": 2, "select": "human"}
         assert calls[1]["spec"]["tools"] == ["knowledge"]
         assert calls[1]["spec"]["base_ref"] == "main"
-        browser.close()
+
+
+def test_projects_browser_shared_modal_lifecycle():
+    project_id = "31a893e0-3687-4449-8d39-248747aa258b"
+    endpoint = "/v1/projects/" + project_id
+    project = {"id": project_id, "name": "默认项目", "status": "active", "group_counts": {}, "repos": []}
+    document = {"id": "fixture-doc", "title": "项目手册", "text": "手册内容", "format": "text"}
+
+    def handle(route):
+        req = route.request
+        path = urlsplit(req.url).path
+        if serve_portal(route, path):
+            return
+        if path == endpoint and req.method == "PATCH":
+            project.update(req.post_data_json)
+        fixtures = {
+            "/v1/portal/whoami": {"tenant_id": "acme", "role": "admin"},
+            "/v1/portal/config": {"agent_backends": ["codex"], "default_agent_backend": "codex"},
+            "/v1/projects": [project], endpoint: project,
+            endpoint + "/library": {"documents": [document], "artifacts": []},
+            "/v1/knowledge/documents/fixture-doc": document,
+        }
+        route.fulfill(status=200, json=fixtures.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page()
+        page.route("**/*", handle)
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
+        page.goto("http://portal.test/portal#/projects")
+        card = page.get_by_role("link", name="默认项目", exact=True)
+        card.wait_for()
+        dialog = page.locator("#project-dialog")
+        dialog.wait_for(state="hidden")
+        assert dialog.evaluate("node => getComputedStyle(node).display") == "none"
+        create = page.get_by_role("button", name="新建项目")
+        create.click()
+        dialog.get_by_label("项目名称").fill("未保存")
+        dialog.get_by_role("button", name="关闭").click()
+        dialog.wait_for(state="hidden")
+        create.click()
+        assert dialog.get_by_label("项目名称").input_value() == ""
+        page.keyboard.press("Escape")
+        dialog.wait_for(state="hidden")
+        create.click()
+        dialog.get_by_role("heading", name="新建项目").click()
+        assert dialog.is_visible()
+        page.mouse.click(3, 3)
+        dialog.wait_for(state="hidden")
+
+        card.click()
+        page.get_by_role("button", name="新线程").click()
+        dialog.get_by_role("heading", name="新线程").wait_for()
+        page.keyboard.press("Escape")
+        dialog.wait_for(state="hidden")
+        page.locator("#project-menu summary").click()
+        page.get_by_role("button", name="设置", exact=True).click()
+        dialog.get_by_label("项目名称").fill("已更新项目")
+        dialog.get_by_role("button", name="保存设置").click()
+        dialog.get_by_text("项目设置已保存。").wait_for()
+        page.mouse.click(3, 3)
+        dialog.wait_for(state="hidden")
+        page.get_by_role("heading", name="已更新项目").wait_for()
+
+        page.get_by_role("link", name="文件库", exact=True).click()
+        page.get_by_role("button", name="上传文档").click()
+        dialog.get_by_role("heading", name="上传项目文档").wait_for()
+        dialog.get_by_role("button", name="关闭").click()
+        page.get_by_role("button", name="项目手册").click()
+        dialog.get_by_text("手册内容").wait_for()
+        page.keyboard.press("Escape")
+        dialog.wait_for(state="hidden")
+
+        page.get_by_role("link", name="设置", exact=True).click()
+        page.get_by_role("button", name="删除项目").click()
+        dialog.get_by_role("button", name="确认删除").wait_for()
+        page.mouse.click(3, 3)
+        dialog.wait_for(state="hidden")

@@ -21,6 +21,7 @@ NodeKind = Literal[
 ]
 EdgeKind = Literal["sequence", "dependency", "spawn", "select", "merge"]
 TOOL_EVENTS = {"agent.tool", "agent.command", "agent.file_change"}
+EXECUTION_STEPS = {"turn", "fix", "verification"}
 TURN_EVENTS = TOOL_EVENTS | {
     "agent.turn_started", "agent.turn_completed", "agent.turn_interrupted",
     "agent.usage", "agent.error", "agent.message", "model.provider_error",
@@ -204,6 +205,8 @@ class _TaskTrace:
     ) -> DAGNode:
         if "subtask" in lane.node.meta:
             meta.setdefault("subtask", lane.node.meta["subtask"])
+        if kind in EXECUTION_STEPS:
+            meta["parent"] = lane.node.id
         return self.graph.add(self.task, f"{lane.node.id}/{kind}:{suffix}", kind, label, **meta)
 
     def _subtask(self, name: str) -> _Lane:
@@ -322,7 +325,7 @@ class _TaskTrace:
         if group is None:
             group = self.graph.add(
                 self.task, f"{turn.id}/tool_group", "tool_group", "工具调用",
-                tools=[], counts={}, **_fields(turn.meta, "turn", "subtask"),
+                tools=[], counts={}, **_fields(turn.meta, "parent", "turn", "subtask"),
             )
             lane.tools[turn.id] = self.graph.advance(lane, group)
             group.start(event.created_at)
@@ -741,4 +744,8 @@ def build_task_dag(task: Task, events: Iterable[Event], children: Iterable[Task]
             branch.tokens, branch.cost_usd = actual.tokens, actual.cost_usd
             branch.started_at = actual.started_at or branch.started_at
             branch.close(actual.status, actual.finished_at)
+            # Include a persisted child task's execution in the logical subtask's summary.
+            for step in owned[child.task.id]:
+                if step is actual or step is child.finish or step.meta.get("parent") == actual.id:
+                    step.meta["parent"] = branch.id
     return TaskDAG(nodes=list(graph.nodes.values()), edges=list(graph.edges.values()))
