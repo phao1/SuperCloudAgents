@@ -117,7 +117,8 @@ start() {
 up() {
     load_env
     docker_access
-    start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --host 127.0.0.1 --port 8000
+    start api env SCA_PORTAL_LOCAL_TASK_PROGRESS="${SCA_PORTAL_LOCAL_TASK_PROGRESS:-true}" \
+        "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --host 127.0.0.1 --port 8000
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
     for ((i=0; i<60; i++)); do

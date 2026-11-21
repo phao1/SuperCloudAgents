@@ -321,6 +321,29 @@ assert(nodes.get('timeline').children[1].children.at(-1).open);
  await assert.rejects(api('/portal/config'),/权限不足/);
  global.fetch=async()=>({status:401});
  await assert.rejects(api('/portal/config'),/认证失败/);
+
+ portalConfig=null;portalToken='';selectedTask=null;
+ global.location={hash:'#/tasks'};
+ $('overview').id='overview';$('trace').id='trace';
+ document.querySelectorAll=selector=>selector==='main > section'?[$('overview'),$('trace')]:[];
+ $('trace-workspace').hasAttribute=()=>false;
+ renderTaskChoices=()=>{};syncEvalForm=()=>{};
+ data=async path=>(await api(path)).json();
+ const localTasks=[{id:'local-task',kind:'coding',state:'RUNNING'}];
+ global.fetch=async(url,options)=>{
+   assert.equal(url,'/v1/portal/tasks');
+   assert.equal(options.headers.Authorization,undefined);
+   return {ok:true,json:async()=>localTasks};
+ };
+ await route();
+ assert.equal($('trace').hidden,false);
+ assert.equal($('connect-prompt').hidden,true);
+ assert.equal($('local-progress-note').hidden,false);
+ assert.deepEqual(serverTasks,localTasks);
+ global.fetch=async()=>({ok:false,status:404,json:async()=>({})});
+ await route();
+ assert.equal($('trace').hidden,true);
+ assert.equal($('connect-prompt').hidden,false);
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     path = tmp_path / 'portal.cjs'

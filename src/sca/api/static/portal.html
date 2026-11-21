@@ -588,6 +588,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <div class="input-row"><input id="task-id" required spellcheck="false"><button id="open-task" type="submit">查看</button></div>
           </form>
         </div>
+        <small id="local-progress-note" hidden>本机只读。连接工作空间后可查看完整证据和审核任务。</small>
       </div>
       <div id="task-details" class="page" hidden>
         <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span></header>
@@ -671,16 +672,18 @@ body[data-trace-expanded] { overflow: hidden; }
         </div>
         <div class="panel">
           <h2>任务证据</h2>
-          <div class="stack"><h3>过程检查</h3><div id="task-trajectory"></div></div>
-          <div class="stack"><h3>证据规则</h3><div id="task-diagnostics"></div></div>
-          <div id="task-review" class="stack" hidden><h3>任务审核</h3><div id="task-memory-proposals" hidden></div>
-            <label>修改意见<textarea id="task-review-feedback"></textarea></label>
-            <div id="task-review-actions"></div>
+          <div id="task-full-evidence" class="stack" hidden>
+            <div class="stack"><h3>过程检查</h3><div id="task-trajectory"></div></div>
+            <div class="stack"><h3>证据规则</h3><div id="task-diagnostics"></div></div>
+            <div id="task-review" class="stack" hidden><h3>任务审核</h3><div id="task-memory-proposals" hidden></div>
+              <label>修改意见<textarea id="task-review-feedback"></textarea></label>
+              <div id="task-review-actions"></div>
+            </div>
+            <div id="analysis-report-panel" hidden><h3>分析报告</h3><pre id="analysis-report"></pre></div>
+            <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           </div>
-          <div id="analysis-report-panel" hidden><h3>分析报告</h3><pre id="analysis-report"></pre></div>
-          <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
-          <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
+          <div id="task-patch-panel" class="stack" hidden><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
         </div>
       </div>
     </section>
@@ -810,17 +813,18 @@ function json(value){
   return JSON.stringify(value,null,2)
 }
 async function api(path,body,method){
+  const headers={'Content-Type':'application/json'};
+  if(portalToken)headers.Authorization='Bearer '+portalToken;
   const r=await fetch('/v1'+path,{
-    method:method||(body===undefined?'GET':'POST'),headers:{
-      Authorization:'Bearer '+portalToken,'Content-Type':'application/json'
-    },body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)
+    method:method||(body===undefined?'GET':'POST'),headers,
+    body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)
   });
   if(r.status===401||r.status===403){
     throw Object.assign(Error(r.status===401?'认证失败（401）：请重新输入有效令牌并连接。':'权限不足（403）：请使用 eval 租户令牌；构建需要管理员权限。'),{status:r.status})
   }
   if(!r.ok){
     const data=await r.json().catch(()=>({}));
-    throw Error(data.error?.message||'请求失败：'+r.status)
+    throw Object.assign(Error(data.error?.message||'请求失败：'+r.status),{status:r.status})
   }
   return r
 }
@@ -1005,6 +1009,10 @@ function renderTaskChoices(){
   $('task-picker').value=choices.some(row=>row.id===selectedTask)?selectedTask:'';
   $('task-picker').disabled=!serverTasks.length;
 }
+async function localTaskChoices(){
+  try{return await data('/portal/tasks')}
+  catch(e){if(e.status===404)return null;throw e}
+}
 function canOptimize(run){
   const settings=variant(run);
   return run.status==='completed'&&run.suite===portalConfig?.prompt_evolution?.suite
@@ -1163,23 +1171,36 @@ async function openTask(id){
 }
 async function selectTask(id){
   if(selectedTask===id){await updateTask();return}
+  selectedTask=id;
+  resetTaskView();
+  $('task-id').value=id;
+  if(serverTasks.some(task=>task.id===id))$('task-picker').value=id;
+  await updateTask();
+}
+function resetTaskView(){
   stopTaskStream();
   stopReplay();
-  selectedTask=id;
   eventCursor=0;
   renderedEventCursor=-1;
   taskEvents=[];
   currentTask=null;
+  traceSource=null;
+  lastMapSignature='';
+  mapMessage=null;
+  replayDetails=null;
   replaySeq=null;
   showReplayDetails=true;
+  $('evidence').hidden=true;
+  evidenceView=null;
+  $('evidence-body').replaceChildren();
   $('trace-scope').value='all';
   $('trace-round').value='all';
-  $('task-id').value=id;
-  if(serverTasks.some(task=>task.id===id))$('task-picker').value=id;
   $('task-details').hidden=true;
   $('timeline').replaceChildren();
   $('patch').replaceChildren();
-  await updateTask();
+  $('task-summary').textContent='';
+  $('analysis-report').textContent='';
+  $('analysis-report-panel').hidden=true;
 }
 const eventLabels={
   'task.created':'任务已创建','memory.injected':'查询共享记忆','agent.error':'执行错误','task.state_changed':'任务状态','workspace.prepared':'工作区就绪','sandbox.created':'沙箱已创建','setup.completed':'环境准备','agent.turn_started':'开始执行','agent.message':'思考与回复','agent.command':'命令执行','agent.file_change':'文件编辑','agent.tool':'工具调用','agent.usage':'用量','agent.turn_completed':'轮次完成','verification.completed':'测试验证','acceptance.completed':'隐藏验收结果','artifact.published':'产物已发布','review.requested':'等待人工审核'
@@ -1203,7 +1224,7 @@ Object.assign(eventLabels,{
 
 function finishedTask(state){return ['SUCCEEDED','FAILED','CANCELLED'].includes(state)}
 
-let currentTask=null, taskStream=null, taskTimeline=null, renderedEventCursor=0;
+let currentTask=null, taskStream=null, taskTimeline=null, renderedEventCursor=0, taskReadOnly=null;
 let replaySeq=null, replayTimer=null, visibleSteps=[], visibleIndex=-1;
 let mapReady=false, mapMessage=null, lastMapSignature='', traceSource=null;
 let showReplayDetails=true, replayDetails=null, mapModuleNames={};
@@ -1523,49 +1544,59 @@ function renderTimeline(){
 async function updateTask(){
   const id=selectedTask;
   if(!id||taskLoading)return;
+  const readOnly=!portalConfig;
+  if(taskReadOnly!==readOnly){resetTaskView();taskReadOnly=readOnly}
+  const current=()=>selectedTask===id&&readOnly===!portalConfig;
+  const taskPath='/tasks/'+enc(id);
+  const path=(readOnly?'/portal':'')+taskPath;
   taskLoading=true;
   try{
-    const t=await data('/tasks/'+enc(id));
+    const t=await data(path);
+    if(!current())return;
     let cursor=eventCursor,events=[];
     for(let page=0;
     page<20;
     page++){
-      const batch=await data('/tasks/'+enc(id)+'/events?after='+cursor);
+      const batch=await data(path+'/events?after='+cursor);
+      if(!current())return;
       events.push(...batch);
       if(batch.length)cursor=batch.at(-1).seq;
       if(batch.length<500)break
     }
-    if(selectedTask!==id)return;
     currentTask=t;
     appendTaskEvents(events);
+    $('task-full-evidence').hidden=readOnly;
+    $('task-patch-panel').hidden=readOnly;
+    $('trace-detail-event').textContent=readOnly?'查看进度事件':'查看原始事件';
     $('task-details').hidden=false;
-    $('task-summary').textContent=json({
-      规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
-    });
-    await renderTaskReview(t);
-    if(selectedTask!==id)return;
+    if(!readOnly){
+      $('task-summary').textContent=json({规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason});
+      await renderTaskReview(t);
+      if(!current())return;
+    }
     renderTaskObservability(currentTask);
     if(renderedEventCursor!==eventCursor){
       renderTimeline();
       renderedEventCursor=eventCursor;
     }
-    void streamTask(id);
+    if(!readOnly)void streamTask(id);
     const [,routeId,section,seq]=location.hash.slice(2).split('/');
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
-    const artifacts=await data('/tasks/'+enc(id)+'/artifacts');
-    if(selectedTask!==id)return;
+    if(readOnly)return;
+    const artifacts=await data(taskPath+'/artifacts');
+    if(!current())return;
     $('analysis-report-panel').hidden=true;
     if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
-      const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
-      if(selectedTask===id){$('analysis-report').textContent=report;$('analysis-report-panel').hidden=false}
+      const report=await(await api(taskPath+'/artifacts/report.md')).text();
+      if(current()){$('analysis-report').textContent=report;$('analysis-report-panel').hidden=false}
     }
     if(artifacts.some(a=>a.name==='changes.patch')){
-      const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
-      if(selectedTask===id){diff($('patch'),patch);renderTaskDiagnostics(patch)}
+      const patch=await(await api(taskPath+'/artifacts/changes.patch')).text();
+      if(current()){diff($('patch'),patch);renderTaskDiagnostics(patch)}
     }
   } finally{
     taskLoading=false;
-    if(selectedTask!==id)await updateTask()
+    if(!current()&&!$('trace').hidden)await updateTask();
   }
 }
 function renderFixControls(){
@@ -1858,7 +1889,7 @@ function showEvidence(event,revealRaw=false){
   for(const [key,label] of [['command','命令'],['name','工具'],['input','输入'],['text','内容'],['message','消息'],['output_tail','输出'],['output','输出'],['exit_code','退出码'],['passed','判定'],['input_tokens','输入 Token'],['output_tokens','输出 Token'],['cached_input_tokens','缓存输入 Token'],['reasoning_tokens','推理 Token'],['cost','费用（美元）'],['model_call_duration_ms','模型调用耗时（毫秒）'],['duration_ms','耗时（毫秒）']]){const v=event.payload?.[key];if(v!==undefined){body.append(el('h3',label),el('pre',typeof v==='string'?v:json(v)))}}
   if(Array.isArray(event.payload?.changes)&&event.payload.changes.length){body.append(el('h3','修改文件'));for(const change of event.payload.changes)body.append(el('p',typeof change==='string'?change:(change.file||change.path||change.filePath||'文件')+' · '+(change.status||'已修改')))}
   for(const patch of extractPatches(event.payload||{})){const view=el('div',undefined,'diff');diff(view,patch);body.append(view)}
-  const raw=el('details');raw.open=revealRaw;raw.append(el('summary','原始事件'),el('pre',json(event)));body.append(raw);
+  const raw=el('details');raw.open=revealRaw;raw.append(el('summary',taskReadOnly?'进度事件':'原始事件'),el('pre',json(event)));body.append(raw);
   $('evidence-close').focus();
 }
 
@@ -1868,7 +1899,7 @@ function renderTaskQuality(task){
   qualitySignature=signature;
   const report=SCAJobFlow.qualityReport(task,taskEvents);
   const verdict=(passed,skipped=false)=>skipped?'跳过':passed===true?'通过':passed===false?'未通过':'等待记录';
-  const hasAcceptance=Boolean(task.spec?.acceptance_files)||report.rows.some(row=>row.type==='acceptance.completed');
+  const hasAcceptance=task.acceptance_configured||Boolean(task.spec?.acceptance_files)||report.rows.some(row=>row.type==='acceptance.completed');
   const body=$('evidence-body');
   body.replaceChildren(el('p','任务 '+task.id.slice(0,8)+' · '+statusText(task.state)),
     el('p','工作区验证 '+verdict(report.verification)+' · 独立验收 '+
@@ -1955,7 +1986,7 @@ function renderTaskObservability(t){
   if(evidenceView==='quality'&&!$('evidence').hidden)renderTaskQuality(t);
   const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(Date.parse(t.updated_at)-Date.parse(t.created_at))/1000;
   const turns=new Set(taskEvents.filter(e=>e.type==='agent.turn_started').map(e=>e.payload.turn)).size;
-  const hasAcceptance=Boolean(t.spec?.acceptance_files)||Boolean(acceptance);
+  const hasAcceptance=t.acceptance_configured||Boolean(t.spec?.acceptance_files)||Boolean(acceptance);
   const acceptanceStatus=acceptance?(acceptance.payload.passed?'通过':'失败')
     :hasAcceptance?(finishedTask(t.state)?'未执行':'待验收'):'不适用';
   $('task-metrics').replaceChildren(
@@ -1965,6 +1996,7 @@ function renderTaskObservability(t){
     metric('费用',usage.cost===undefined?'—':money(usage.cost),'输入 '+(usage.input_tokens??'—')+' / 输出 '+(usage.output_tokens??'—')+' / 缓存 '+(usage.cached_input_tokens??'—'))
   );
   renderSwimlane(t);
+  if(taskReadOnly)return;
   for(const run of runDetails.values()){
     const row=run.results.find(r=>r.task_id===t.id&&!overallPassed(r));
     if(row&&!fixSelection&&!flow.fixTask){chooseFix(run,row,canOptimize(run)?'system_prompt':'source',false);break}
@@ -2122,9 +2154,13 @@ const pages={
   versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
 };
 async function route(){
-  const [requested,...parts]=location.hash.slice(2).split('/');
+  const hash=location.hash;
+  const [requested,...parts]=hash.slice(2).split('/');
   const page=Object.hasOwn(pages,requested)?requested:'overview';
-  const current=portalConfig?page:'overview';
+  const localTasks=page==='tasks'&&!portalConfig?await localTaskChoices():null;
+  if(hash!==location.hash)return;
+  const local=!portalConfig&&localTasks!==null;
+  const current=portalConfig||local?page:'overview';
   if(current!=='tasks'){
     stopTaskStream();
     stopReplay();
@@ -2132,7 +2168,9 @@ async function route(){
   }
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
-  $('connect-prompt').hidden=Boolean(portalConfig)||page==='overview';
+  $('connect-prompt').hidden=Boolean(portalConfig)||local||page==='overview';
+  $('local-progress-note').hidden=!local;
+  if(local){serverTasks=localTasks;renderTaskChoices()}
   $('page-title').textContent=title;
   $('page-description').textContent=description;
   document.querySelectorAll('.sidebar nav a').forEach(link=>{
@@ -2409,9 +2447,19 @@ function displayConnection(text,style){
   if($('connection-status').textContent!==text)$('connection-status').textContent=text;
 }
 async function refresh(){
-  if(refreshing||!portalToken)return;
+  if(refreshing||(!portalToken&&$('trace').hidden))return;
   refreshing=true;
   try{
+    if(!portalToken){
+      const recent=await localTaskChoices();
+      if($('trace').hidden)return;
+      if(recent===null){await route();return}
+      serverTasks=recent;
+      renderTaskChoices();
+      await updateTask();
+      $('error').textContent='';
+      return;
+    }
     await loadConfig();
     const results=await Promise.allSettled([loadSuites(),loadVersions()]);
     for(const item of results)if(item.status==='rejected')throw item.reason;
@@ -2428,8 +2476,11 @@ async function refresh(){
     $('error').textContent='';
     displayConnection('已连接 eval 工作空间','complete');
   }catch(e){
+    if(!portalToken){error(e);return}
     if(e.status===401||e.status===403){
       portalConfig=null;
+      portalToken='';
+      localStorage.removeItem('sca-portal-token');
       $('health').hidden=true;
       $('provider-key').disabled=true;
       $('provider-key-form').querySelector('button').disabled=true;
@@ -2440,7 +2491,7 @@ async function refresh(){
     displayConnection('请检查访问令牌或服务状态。','problem');
   }finally{refreshing=false}
 }
-$('refresh').onclick=()=>refresh().catch(error);
+$('refresh').onclick=()=>(portalToken||!$('trace').hidden?refresh():route()).catch(error);
 $('theme').value=localStorage.getItem('sca-portal-theme')||'';
 document.documentElement.dataset.theme=$('theme').value;
 $('theme').onchange=()=>{
@@ -2454,8 +2505,8 @@ document.addEventListener('keydown',event=>{
   else if($('trace-workspace').hasAttribute('data-expanded'))setTraceFullscreen(false).catch(error);
 });
 window.addEventListener('hashchange',()=>route().catch(error));
-route().catch(error);
-refresh().then(()=>route()).catch(error);
+if(portalToken)refresh().then(()=>route()).catch(error);
+else route().catch(error);
 setInterval(()=>refresh().catch(error),4000);
 </script>
 </body>
