@@ -177,7 +177,8 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     assert result.returncode == 0, result.stderr
 
 
-def test_portal_guest_history_bootstrap(tmp_path):
+@pytest.mark.parametrize("destination", ["guest", "projects", "task"])
+def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
     assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
@@ -187,79 +188,158 @@ def test_portal_guest_history_bootstrap(tmp_path):
     node = shutil.which("node") or Path.home() / ".local/bin/node"
     if not Path(node).exists():
         pytest.skip("Node is unavailable")
-    script = source.split('<script>')[1].split('</script>')[0]
-    sections = [
-        ("function el(", "function table("),
-        ("async function loadConfig(", "async function loadSuites("),
-        ("const pages=", "async function route("),
-        ("async function loadRecentTasks(", "$('refresh').onclick="),
-    ]
+    script = source.split("<script>", 1)[1].split("window.addEventListener('hashchange'", 1)[0]
     harness = r'''
 const assert=require('node:assert/strict');
-const elements=new Map(),location={hash:''},history={replaceState:(a,b,hash)=>{location.hash=hash}};
-function $(id){
-  if(!elements.has(id))elements.set(id,{
-    hidden:true,textContent:'',value:'',options:[],querySelector:()=>$('save'),
-    replaceChildren(){this.options=[]},append(option){this.options.push(option)},
-  });
+const destination=process.argv[2];
+const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
+const project={id:'project-id',name:'默认项目',status:'active',group_counts:{resolved:1030}};
+const taskPath='/v1/tasks/'+task.id;
+const location={hash:{guest:'#/projects/private-project',projects:'#/projects',task:'#/tasks/'+task.id}[destination]};
+const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
+const localStorage={getItem:key=>key==='sca-portal-token'&&destination!=='guest'?'fixture-member':null};
+class Element {
+  constructor(id) {
+    Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
+    this.classList={toggle(){}};
+    this.attributes=new Map();
+  }
+  get options(){return this.children}
+  append(...nodes){this.children.push(...nodes)}
+  replaceChildren(...nodes){this.children=nodes}
+  addEventListener(){}
+  hasAttribute(name){return this.attributes.has(name)}
+  setAttribute(name,value){this.attributes.set(name,value)}
+  getAttribute(name){return this.attributes.get(name)}
+  querySelector(){return new Element()}
+  querySelectorAll(){return []}
+  reset(){}
+}
+const elements=new Map();
+function element(id){
+  if(!elements.has(id))elements.set(id,new Element(id));
   return elements.get(id);
 }
+const sections=['overview','projects-page','evaluation','trace'].map(element);
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
-const document={querySelectorAll:()=>controls,createElement:()=>({})};
-const localStorage={removeItem:()=>{}};
-let portalToken='',portalConfig=null,portalIdentity=null,guestChecked=false,refreshing=false;
-let canRescore=false,savingKey=false,serverTasks=[],routeCount=0;
+const document={
+  getElementById:element,createElement:()=>new Element(),documentElement:new Element(),
+  addEventListener(){},
+  querySelectorAll:selector=>({'main > section':sections,'[data-access]':controls})[selector]||[],
+};
+const window={addEventListener(){}};
+const SCATaskTimeline={create:()=>({update:()=>null,selectedSeq:()=>null,includes:()=>true})};
 const calls=[];
-function error(e){throw e}
-function displayConnection(){}
-function updateRescoreButton(){}
-function renderProviderError(){}
-function renderTaskChoices(){}
-async function loadVersions(){}
-async function route(){routeCount++}
-function resetPortalSession(){portalIdentity=null}
+const blocked=new Map();
+function block(path){
+  let release;
+  const pending=new Promise(resolve=>{release=resolve});
+  blocked.set(path,pending);
+  return ()=>{blocked.delete(path);release()};
+}
+const releaseSuites=block('/v1/evals/suites');
+const releaseProjects=destination==='projects'?block('/v1/projects'):null;
+const releaseTask=destination==='task'?block(taskPath):null;
+const releaseConfig=destination==='task'?block('/v1/portal/config'):null;
+const releaseRecent=destination==='task'?block('/v1/tasks?limit=100'):null;
 global.fetch=async (path,request)=>{
-  calls.push([path,request.headers.Authorization]);
-  if(path==='/v1/portal/whoami')return {ok:true,json:async()=>({tenant_id:'customer',role:'member'})};
-  if(path==='/v1/portal/config')return {ok:true,json:async()=>request.headers.Authorization
-    ?config.tenant:config.guest};
-  return {ok:true,json:async()=>[]};
+  const auth=request.headers.Authorization;
+  if(['/v1/portal/whoami','/v1/projects'].includes(path))assert.equal(auth,'Bearer fixture-member');
+  calls.push(path);
+  await blocked.get(path);
+  const fixtures={
+    '/v1/portal/whoami':{tenant_id:'eval',role:'member'},
+    '/v1/portal/config':auth?config.tenant:config.guest,
+    '/v1/projects':[project],
+    '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
+    [taskPath]:task,
+    [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}}],
+  };
+  return {ok:true,json:async()=>fixtures[path]||[]};
 };
 '''
     checks = r'''
+const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4000);
 (async()=>{
-  await refresh();
-  assert.deepEqual(calls,[['/v1/portal/config',undefined],['/v1/tasks?limit=100',undefined]]);
-  assert.equal(pageRoute().current,'tasks');
-  assert.equal(routeCount,1);
-  assert.equal($('guest-view-banner').hidden,false);
-  assert.equal($('model-not-configured').hidden,false);
-  assert.deepEqual(controls.map(control=>control.hidden),[false,true,true]);
-  await assert.rejects(api('/tasks',{}),/请先登录/);
-  assert.equal(calls.length,2);
+  const nextTick=()=>new Promise(setImmediate);
+  await route();
+  const startup=refresh();
+  await nextTick();
+  if(destination==='guest'){
+    await startup;
+    assert.deepEqual(calls,['/v1/portal/config','/v1/tasks?limit=100']);
+    assert.equal(location.hash,'#/tasks');
+    assert.equal($('trace').hidden,false);
+    assert.equal($('guest-view-banner').hidden,false);
+    assert.equal($('model-not-configured').hidden,false);
+    assert.deepEqual(controls.map(control=>control.hidden),[false,true,true]);
+    await assert.rejects(api('/tasks',{}),/请先登录/);
+    assert.equal(calls.length,2);
 
-  location.hash='#/projects/fixture-project';
-  assert.deepEqual(pageRoute(),{page:'tasks',parts:[],current:'tasks',redirect:'#/tasks'});
-  portalToken='fixture-member';
-  await refresh(true);
-  assert.deepEqual(calls.slice(2),[
-    ['/v1/portal/whoami','Bearer fixture-member'],['/v1/portal/config','Bearer fixture-member'],
-    ['/v1/tasks?limit=100','Bearer fixture-member'],
-  ]);
-  assert.equal(pageRoute().current,'projects');
-  assert.deepEqual($('models').options.map(option=>option.value),config.tenant.models);
-  assert.equal($('guest-view-banner').hidden,true);
-  assert.equal($('model-not-configured').hidden,true);
-  assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
-})().catch(error=>{console.error(error);process.exitCode=1});
+    portalToken='fixture-member';
+    location.hash='#/projects';
+    await refresh(true);
+    assert.deepEqual(calls.slice(2),['/v1/portal/whoami','/v1/projects']);
+    assert.equal($('projects-home').hidden,false);
+    assert.equal($('guest-view-banner').hidden,true);
+    assert.equal($('model-not-configured').hidden,true);
+    assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
+  }else if(destination==='projects'){
+    assert.deepEqual(calls,['/v1/portal/whoami','/v1/projects']);
+    const duplicate=route();
+    await refresh();
+    assert.equal(calls.filter(path=>path==='/v1/projects').length,1);
+    releaseProjects();
+    await Promise.all([startup,duplicate]);
+    assert.equal($('projects-home').hidden,false);
+    const [card]=$('project-cards').children;
+    assert.equal(card.children[0].children[0].children[0].textContent,'默认项目');
+    assert.equal(card.children[1].children.at(-1).children[1].textContent,'1,030');
+    await refresh();
+    await refresh();
+    assert.deepEqual(calls,['/v1/portal/whoami','/v1/projects']);
+
+    location.hash='#/evals/repair';
+    const evaluation=route();
+    await nextTick();
+    assert(calls.includes('/v1/evals/suites'));
+    location.hash='#/projects';
+    await route();
+    assert.equal($('projects-home').hidden,false);
+    assert.equal(calls.filter(path=>path==='/v1/projects').length,2);
+    releaseSuites();
+    await evaluation;
+    assert(!calls.includes('/v1/evals/runs?limit=200'));
+    await refresh(true);
+    assert.equal(calls.filter(path=>path==='/v1/projects').length,3);
+  }else{
+    assert.deepEqual(new Set(calls),new Set([
+      '/v1/portal/whoami',taskPath,taskPath+'/events?after=0',
+      '/v1/tasks?limit=100','/v1/portal/config',
+    ]));
+    releaseTask();
+    await nextTick();
+    assert.equal($('task-details').hidden,false);
+    assert.equal($('task-title').textContent,task.id);
+    assert.equal($('task-state').textContent,'已成功');
+    assert.equal($('task-picker').disabled,undefined);
+    releaseConfig();
+    releaseRecent();
+    await startup;
+    assert.equal($('task-picker').disabled,true);
+    assert.equal(eventCursor,1);
+  }
+  assert.equal($('error').textContent,'');
+})().finally(()=>clearTimeout(deadline)).catch(error=>{console.error(error);process.exitCode=1});
 '''
-    snippets = "\n".join(script[script.index(start):script.index(end)] for start, end in sections)
     config = json.dumps({"tenant": TENANT_PORTAL_CONFIG, "guest": GUEST_PORTAL_CONFIG})
-    path = tmp_path / "guest.cjs"
-    path.write_text(
-        f"const config = {config};\n" + harness + (STATIC / "portal-ui.js").read_text() + snippets + checks
-    )
-    subprocess.run([str(node), str(path)], check=True, timeout=20)
+    assets = ["task-flow.js", *(name for name in ASSETS if name != "task-dag.js")]
+    path = tmp_path / "portal.cjs"
+    path.write_text("\n".join([
+        f"const config = {config};", harness, *((STATIC / name).read_text() for name in assets),
+        script, checks,
+    ]))
+    subprocess.run([str(node), str(path), destination], check=True, timeout=10)
 
 
 @contextmanager
@@ -290,6 +370,53 @@ def serve_portal(route, path):
         route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
         return True
     return False
+
+
+@pytest.mark.parametrize("destination", ["projects", "task"])
+def test_portal_browser_first_render(destination):
+    task_id = "12abc345-1234-1234-1234-123456789012"
+    task_path = f"/v1/tasks/{task_id}"
+    project = {
+        "id": "31a893e0-3687-4449-8d39-248747aa258b", "name": "默认项目",
+        "status": "active", "group_counts": {"resolved": 1030},
+    }
+    requests = []
+
+    def handle(route):
+        url = urlsplit(route.request.url)
+        path = url.path
+        if serve_portal(route, path):
+            return
+        if path.startswith("/v1/"):
+            requests.append(path)
+        if path in {"/v1/evals/suites", "/v1/agents/opencode/versions", "/v1/portal/config", "/v1/tasks"}:
+            return
+        fixtures = {
+            "/v1/portal/whoami": {"tenant_id": "eval", "role": "member"},
+            "/v1/projects": [project],
+            task_path: {"id": task_id, "kind": "coding", "state": "SUCCEEDED", "spec": {}, "result": {}},
+            task_path + "/dag": {"nodes": [], "edges": []},
+        }
+        route.fulfill(json=fixtures.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page()
+        page.route("**/*", handle)
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-member')")
+        route = "projects" if destination == "projects" else f"tasks/{task_id}"
+        page.goto("http://portal.test/portal#/" + route, wait_until="domcontentloaded")
+        if destination == "projects":
+            card = page.locator(".project-card")
+            card.get_by_role("link", name="默认项目", exact=True).wait_for(timeout=3000)
+            assert card.get_by_text("1,030", exact=True).is_visible()
+            page.wait_for_function("!refreshing")
+            page.evaluate("refresh()")
+            assert requests == ["/v1/portal/whoami", "/v1/projects"]
+        else:
+            page.get_by_role("heading", name=task_id, exact=True).wait_for(timeout=3000)
+            assert task_path + "/events" in requests
+            assert "/v1/evals/suites" not in requests
+            assert "/v1/agents/opencode/versions" not in requests
 
 
 def test_portal_phase6_browser_submission():
@@ -328,8 +455,9 @@ def test_portal_phase6_browser_submission():
         page.locator("#token").fill("fixture-member")
         page.get_by_role("button", name="连接", exact=True).click()
         page.get_by_role("heading", name="提交任务").wait_for()
-        assert not page.locator('nav a[href="#/team"]').is_visible()
-        assert not page.locator('nav a[href="#/platform"]').is_visible()
+        nav = page.locator('nav[aria-label="主导航"]')
+        assert not nav.locator('a[href="#/team"]').is_visible()
+        assert not nav.locator('a[href="#/platform"]').is_visible()
         page.get_by_label("仓库地址").fill("https://example.test/org/repo.git")
         page.get_by_label("任务指令").fill("补测试")
         page.get_by_label("Agent 后端").select_option("dsh")
@@ -450,4 +578,5 @@ def test_projects_browser_shared_modal_lifecycle():
         guest.wait_for_url("**/portal#/tasks")
         guest.locator("#trace").wait_for()
         assert guest.locator("#guest-view-banner").is_visible()
-        assert not guest.locator('nav a[href="#/projects"]').is_visible()
+        nav = guest.locator('nav[aria-label="主导航"]')
+        assert not nav.locator('a[href="#/projects"]').is_visible()

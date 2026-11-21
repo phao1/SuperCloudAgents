@@ -88,8 +88,23 @@ const portalProjects = (() => {
       return card;
     }) : [el('p', '暂无项目。', 'empty-state')]));
     $('project-create').onclick = () => {
-      if (ui.can('member')) dialog('新建项目', projectForm());
+      if (ui.can('member')) openEditor();
     };
+  }
+
+  async function openEditor(project, afterSave) {
+    const identity = portalIdentity, route = location.hash;
+    const title = project ? '项目设置' : '新建项目';
+    const loading = el('p', '正在读取服务配置…');
+    dialog(title, loading);
+    try {
+      if (!portalConfig) await loadConfig();
+      if (loading.isConnected && projectDialog.open && identity === portalIdentity && route === location.hash) {
+        loading.replaceWith(projectForm(project, afterSave));
+      }
+    } catch (err) {
+      if (loading.isConnected) ui.setMessage(loading, err.message, true);
+    }
   }
 
   function editorRepositories(repos) {
@@ -187,9 +202,9 @@ const portalProjects = (() => {
     const identity = portalIdentity, route = location.hash;
     const actions = [button('设置', () => {
       if (!ui.can('member')) return;
-      dialog('项目设置', projectForm(project, async () => {
+      return openEditor(project, async () => {
         if (identity === portalIdentity && route === location.hash) await load([project.id, tab], true);
-      }));
+      });
     })];
     const stateActions = {
       active: [['pause', '暂停'], ['archive', '归档']],
@@ -223,9 +238,13 @@ const portalProjects = (() => {
     if (project.status === 'active' && ui.can('member')) {
       const composer = ui.action('新线程', async () => {
         if (!ui.can('member')) return;
-        const form = el('div');
+        const form = el('div', '正在读取任务设置…');
         dialog('新线程', form);
-        await portalTasks.loadSubmit(form, project);
+        try {
+          await portalTasks.loadSubmit(form, project);
+        } catch (err) {
+          if (form.isConnected) ui.setMessage(form, err.message, true);
+        }
       }, $('projects-status'));
       composer.classList.add('primary');
       root.append(ui.actions(composer));
@@ -391,6 +410,7 @@ const portalProjects = (() => {
         const [project, payload] = await Promise.all([
           data(path(id)), tab === 'settings' ? null : data(path(id) + '/' + tab +
             (tab === 'library' ? '?limit=' + libraryPageSize : '')),
+          tab === 'settings' && ui.can('member') && !portalConfig ? loadConfig() : null,
         ]);
         if (!current()) return;
         showHeader(project, tab);
@@ -413,7 +433,7 @@ const portalProjects = (() => {
   }
 
   function poll(parts) {
-    if (loading || (parts[1] && parts[1] !== 'threads') || projectDialog.open || $('project-menu').open) return;
+    if (!parts[0] || loading || (parts[1] && parts[1] !== 'threads') || projectDialog.open || $('project-menu').open) return;
     return load(parts, true);
   }
 

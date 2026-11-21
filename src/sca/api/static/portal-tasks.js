@@ -156,7 +156,13 @@ const portalTasks = (() => {
 
   async function loadSubmit(target = $('submit-form'), project = null) {
     if (!project && target.hasChildNodes()) return refreshTools();
-    const identity = portalIdentity;
+    const identity = portalIdentity, hash = location.hash;
+    const current = () => identity === portalIdentity && hash === location.hash && target.isConnected;
+    await Promise.all([
+      portalConfig || loadConfig(),
+      loadVersions().catch(err => { if (current()) error(err); }),
+    ]);
+    if (!current()) return;
     const {check, control, field, fields, value} = ui;
     const primaryRepo = project?.repos[0];
     const defaultBackend = project?.default_backend || portalConfig.default_agent_backend;
