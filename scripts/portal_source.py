@@ -135,7 +135,7 @@ def select_port(port: int, strict: bool) -> int:
         return probe.getsockname()[1]
 
 
-def serve_gateway() -> None:
+def serve_gateway(config: str) -> None:
     from dotenv import load_dotenv
 
     database_url = os.environ["DATABASE_URL"]
@@ -144,7 +144,7 @@ def serve_gateway() -> None:
     os.environ["DATABASE_URL"] = database_url
     from litellm.proxy.proxy_cli import run_server
 
-    run_server(args=["--config", "deploy/litellm/config.yaml", "--host", "127.0.0.1",
+    run_server(args=["--config", config, "--host", "127.0.0.1",
                      "--port", "4000", "--num_workers", "1"])
 
 
@@ -156,7 +156,7 @@ def main() -> None:
     port.add_argument("preferred", type=int)
     port.add_argument("--strict", action="store_true")
     commands.add_parser("postgres-password").add_argument("path", type=Path)
-    commands.add_parser("gateway")
+    commands.add_parser("gateway").add_argument("config")
     args = parser.parse_args()
     try:
         match args.command:
@@ -168,7 +168,7 @@ def main() -> None:
                 with args.path.open("x", encoding="utf-8") as stream:
                     stream.write(secrets.token_hex(32) + "\n")
             case "gateway":
-                serve_gateway()
+                serve_gateway(args.config)
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 

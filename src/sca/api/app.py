@@ -245,6 +245,11 @@ def create_app(
     from sca.api.task_dag import router as dag_router
 
     app.include_router(dag_router)
+
+    # History without a model credential
+    from sca.api.model_access import ModelNotConfiguredError, model_not_configured
+
+    app.add_exception_handler(ModelNotConfiguredError, model_not_configured)
     return app
 
 

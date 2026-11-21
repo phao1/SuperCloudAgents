@@ -20,7 +20,7 @@ image:
 migrate:
 	.venv/bin/alembic upgrade head
 api:
-	.venv/bin/uvicorn sca.api.app:create_app --factory --host 0.0.0.0 --port 8000
+	.venv/bin/uvicorn sca.api.app:create_app --factory --no-proxy-headers --host 0.0.0.0 --port 8000
 worker:
 	$(call dk,$(PY) -m sca.orchestration.worker)
 test:

@@ -9,7 +9,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 
-from pydantic import AnyHttpUrl, BaseModel, Field, SecretStr, model_validator
+from pydantic import (
+    AnyHttpUrl,
+    BaseModel,
+    Field,
+    SecretStr,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Containers run natively on the host's architecture (Apple silicon gets arm64 images).
@@ -296,6 +304,18 @@ class Settings(BaseSettings):
             if "opencode_default_version" not in self.model_fields_set:
                 self.opencode_default_version = SOURCE_OPENCODE_VERSION
         return self
+
+    # Guest history
+    guest_view: Literal["off", "local", "all"] = "local"
+    guest_tenant: str | None = Field(default=None, min_length=1)
+    guest_view_acknowledge_risk: str = Field(default="0", validate_default=True)
+
+    @field_validator("guest_view_acknowledge_risk")
+    @classmethod
+    def require_guest_risk_acknowledgement(cls, ack: str, info: ValidationInfo) -> str:
+        if info.data.get("guest_view") == "all" and ack != "1":
+            raise ValueError("SCA_GUEST_VIEW=all requires SCA_GUEST_VIEW_ACKNOWLEDGE_RISK=1")
+        return ack
 
 
 # Local source mode

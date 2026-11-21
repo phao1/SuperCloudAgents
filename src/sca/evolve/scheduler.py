@@ -26,6 +26,7 @@ with workflow.unsafe.imports_passed_through():
     from sca.eval.trajectory import overall_passed
     from sca.evolve.champions import PLATFORM_TENANT
     from sca.evolve.models import EvolutionConfig
+    from sca.gateway.configuration import model_configured
 
 SCHEDULER_ID = "sca-evolution-scheduler"
 
@@ -102,11 +103,15 @@ class EvolutionSchedulerActivities:
 
     @activity.defn(name="evolution_schedules_due")
     async def due(self, request: dict) -> list[str]:
+        if not model_configured():
+            return []
         ids = await self.store.due_evolution_schedules(datetime.fromisoformat(request["now"]))
         return [str(schedule_id) for schedule_id in ids]
 
     @activity.defn(name="evolution_schedule_begin")
     async def begin(self, request: dict) -> dict | None:
+        if not model_configured():
+            return None
         schedule = await self.store.claim_evolution_schedule(
             UUID(request["schedule_id"]), datetime.fromisoformat(request["now"]),
             request.get("force", False),

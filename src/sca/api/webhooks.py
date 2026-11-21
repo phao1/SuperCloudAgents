@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, Request
 
+from sca.api.model_access import require_model
 from sca.core.errors import ConflictError, InvalidTaskError
 from sca.core.models import TaskState
 from sca.scm.models import IssueDefaults
@@ -44,6 +45,7 @@ async def issue_webhook(provider: ProviderName, request: Request) -> dict[str, s
     defaults = IssueDefaults.model_validate(integration["default_spec"])
     if not event.matches(defaults):
         return {"status": "ignored"}
+    require_model()
     try:
         spec = event.task_spec(defaults).model_dump()
     except ValueError:

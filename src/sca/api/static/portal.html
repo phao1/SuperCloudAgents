@@ -464,12 +464,12 @@ body[data-trace-expanded] { overflow: hidden; }
       <a href="#/projects" data-access="tenant" hidden>项目</a>
       <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
       <a href="#/submit" data-access="member" hidden>提交任务</a>
-      <a href="#/tasks" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>所有线程</a>
-      <a href="#/analysis" data-access="tenant" hidden>数据分析</a>
-      <a href="#/evals" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
+      <a href="#/tasks" data-access="history" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>所有线程</a>
+      <a href="#/analysis" data-access="history" hidden>数据分析</a>
+      <a href="#/evals" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
       <a href="#/evolutions" data-access="admin" hidden>自动演进</a>
-      <a href="#/compare" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
+      <a href="#/compare" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
       <a href="#/versions" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
       <a href="#/memories" data-access="tenant" hidden>共享记忆</a>
       <a href="#/tools" data-access="tenant" hidden>工具与知识库</a>
@@ -490,6 +490,8 @@ body[data-trace-expanded] { overflow: hidden; }
         <button id="refresh" type="button">刷新数据</button>
       </div>
     </header>
+    <p id="guest-view-banner" class="panel" hidden>只读访客模式 · <a href="#/overview">登录</a></p>
+    <p id="model-not-configured" class="provider-error-banner" role="status" hidden>未配置模型密钥：可浏览历史，无法运行新任务</p>
     <!-- source mode warning -->
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
@@ -580,7 +582,7 @@ body[data-trace-expanded] { overflow: hidden; }
     </section>
 
     <section id="evaluation" class="page" hidden>
-      <div class="panel">
+      <div class="panel" data-access="eval" hidden>
         <div class="panel-head"><div><h2>启动评测</h2><p>为基线选择套件、模型和 OpenCode 版本。</p></div></div>
         <div id="suite-cards" class="suites"></div>
         <form id="run-form" class="stack" data-access="member" hidden>
@@ -785,7 +787,7 @@ body[data-trace-expanded] { overflow: hidden; }
           </div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
-          <form id="task-message-form" class="task-message-form stack">
+          <form id="task-message-form" class="task-message-form stack" data-access="member" hidden>
             <fieldset id="task-message-controls" class="stack" disabled>
               <label for="task-message-text">插话：给正在运行的任务补充要求</label>
               <textarea id="task-message-text" rows="2" maxlength="4000" required
@@ -921,6 +923,7 @@ const $=id=>document.getElementById(id), enc=encodeURIComponent;
 let runs=[],versions=[],selectedTask=null,eventCursor=0,refreshing=false;
 let fixes=[], flow={}, fixSelection=null, taskEvents=[], taskLoading=false, suites=[], serverTasks=[], builds=[];
 let portalToken=localStorage.getItem('sca-portal-token')||'';
+let guestChecked=false;
 let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
 let selectedIteration=null, currentLoopTask=null, pendingReview=null, promptPreviewKey=null;
 const pendingActions=new Set();
@@ -949,10 +952,15 @@ function button(text,fn){
 function json(value){
   return JSON.stringify(value,null,2)
 }
+function authHeaders(){
+  return portalToken?{Authorization:'Bearer '+portalToken}:{};
+}
 async function api(path,body,method){
+  const verb=method||(body===undefined?'GET':'POST');
+  if(!portalToken&&verb!=='GET')throw Error('请先登录。');
   const r=await fetch('/v1'+path,{
-    method:method||(body===undefined?'GET':'POST'),headers:{
-      Authorization:'Bearer '+portalToken,'Content-Type':'application/json'
+    method:verb,headers:{
+      ...authHeaders(),'Content-Type':'application/json'
     },body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(15000)
   });
   if(!r.ok)throw await apiFailure(r);
@@ -1052,9 +1060,11 @@ function renderProviderError(error){
     banner.hidden=!label;
   }
 }
-async function loadConfig(){
-  const c=await data('/portal/config');
+async function loadConfig(c){
+  c??=await data('/portal/config');
   portalConfig=c;
+  $('model-not-configured').hidden=c.model_configured!==false;
+  if(c.guest_view)return c;
   $('config').textContent=json(c);
   canRescore=c.can_rescore===true;
   updateRescoreButton();
@@ -1070,7 +1080,8 @@ async function loadConfig(){
     :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
   if(!$('model').value)$('model').value=c.default_model;
   options('models',c.models,x=>x,x=>x);
-  options('backend',c.agent_backends,x=>x,portalUI.backendLabel)
+  options('backend',c.agent_backends,x=>x,portalUI.backendLabel);
+  return c;
 }
 async function loadSuites(){
   const first=!suites.length;
@@ -1286,7 +1297,7 @@ async function showComparison(a,b){
     el('small',report.p_value===null?'样本较少，无法判断统计显著性。':'配对符号检验 p='+report.p_value));
 }
 async function selectCase(run,row,focus=false){
-  if(!overallPassed(row)&&typeof row.acceptance_passed==='boolean')
+  if(portalUI.can('eval')&&!overallPassed(row)&&typeof row.acceptance_passed==='boolean')
     chooseFix(run,row,canOptimize(run)?'system_prompt':'source',false);
   await openTask(row.task_id);
   if(focus)location.hash='/loop';
@@ -1607,7 +1618,7 @@ async function streamTask(taskId){
   taskStream=stream;
   try{
     const response=await fetch('/v1/tasks/'+enc(taskId)+'/events/stream?after='+eventCursor,{
-      headers:{Authorization:'Bearer '+portalToken},signal:stream.controller.signal,
+      headers:authHeaders(),signal:stream.controller.signal,
     });
     if(!response.ok||!response.body||taskStream!==stream)return;
     stream.connected=true;
@@ -1718,7 +1729,7 @@ function renderTimeline(){
   if(!group)root.append(el('small',taskEvents.length?'选定时段没有事件。':'暂无执行事件。'));
 }
 async function updateTask(){
-  const id=selectedTask;
+  const id=selectedTask,identity=portalIdentity;
   if(!id||taskLoading)return;
   taskLoading=true;
   try{
@@ -1732,7 +1743,7 @@ async function updateTask(){
       if(batch.length)cursor=batch.at(-1).seq;
       if(batch.length<500)break
     }
-    if(selectedTask!==id)return;
+    if(selectedTask!==id||portalIdentity!==identity)return;
     currentTask=t;
     appendTaskEvents(events);
     $('task-details').hidden=false;
@@ -1742,7 +1753,7 @@ async function updateTask(){
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
     });
     await renderTaskReview(t);
-    if(selectedTask!==id)return;
+    if(selectedTask!==id||portalIdentity!==identity)return;
     renderTaskObservability(currentTask);
     portalTasks.render(currentTask,taskEvents);
     if(renderedEventCursor!==eventCursor){
@@ -1753,13 +1764,13 @@ async function updateTask(){
     const [,routeId,section,seq]=location.hash.slice(2).split('/');
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
     const [artifacts]=await Promise.all([data('/tasks/'+enc(id)+'/artifacts'),portalTasks.refreshTask(t)]);
-    if(selectedTask!==id)return;
+    if(selectedTask!==id||portalIdentity!==identity)return;
     if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
       const artifact=artifacts.find(a=>a.name==='report.md');
       const key=id+'|'+artifact.created_at+'|'+artifact.size_bytes;
       if($('analysis-report-panel').dataset.report!==key){
         const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
-        if(selectedTask===id){
+        if(selectedTask===id&&portalIdentity===identity){
           $('analysis-report').textContent=report;
           $('analysis-rendered').replaceChildren(portalMarkdown.render(report));
           $('analysis-report-panel').dataset.report=key;
@@ -1772,7 +1783,7 @@ async function updateTask(){
     }
     if(artifacts.some(a=>a.name==='changes.patch')){
       const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
-      if(selectedTask===id){diff($('patch'),patch);renderTaskDiagnostics(patch)}
+      if(selectedTask===id&&portalIdentity===identity){diff($('patch'),patch);renderTaskDiagnostics(patch)}
     }
   } finally{
     taskLoading=false;
@@ -2350,8 +2361,8 @@ const pages={
 };
 const pageAccess={
   projects:'tenant',
-  overview:'public',submit:'member',tasks:'tenant',analysis:'tenant',versions:'tenant',memories:'tenant',
-  evals:'eval',runs:'eval',compare:'eval',loop:'eval',evolutions:'admin',integrations:'admin',
+  overview:'public',submit:'member',tasks:'history',analysis:'history',versions:'tenant',memories:'tenant',
+  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'admin',integrations:'admin',
   tools:'tenant',team:'admin',platform:'platform',
 };
 function pageRoute(){
@@ -2362,6 +2373,7 @@ function pageRoute(){
 }
 function syncAccess(){
   for(const node of document.querySelectorAll('[data-access]'))node.hidden=!portalUI.can(node.dataset.access);
+  $('guest-view-banner').hidden=portalIdentity?.guest!==true;
   const labels={viewer:'只读',member:'成员',admin:'租户管理员'};
   $('sidebar-workspace').textContent=portalIdentity?.platform_admin?'平台管理员'
     :portalIdentity?portalIdentity.tenant_id+' · '+labels[portalIdentity.role]:'尚未连接';
@@ -2527,6 +2539,7 @@ $('provider-key-form').onsubmit=async event=>{
     const result=await response.json();
     input.value='';
     label.textContent=result.gateway_restarted?'密钥已保存，模型网关已重启。':'密钥已保存，网关重启失败。请查看服务状态。';
+    await loadConfig();
   }catch(e){label.textContent=e.message}
   finally{savingKey=false;control.disabled=false;input.disabled=false}
 };
@@ -2678,6 +2691,7 @@ function resetPortalSession(){
   portalSettings.reset();
   portalProjects.reset();
   portalIdentity=portalConfig=null;
+  guestChecked=false;
   canRescore=false;
   selectedTask=currentTask=currentLoopTask=activeRun=selectedIteration=fixSelection=pendingReview=null;
   eventCursor=0;
@@ -2694,10 +2708,12 @@ function resetPortalSession(){
   $('analysis-form').reset();
   $('memory-form').reset();
   $('memory-filter').value='';
-  for(const id of ['analysis-status','memory-list','task-summary','timeline','patch','evidence-body']){
+  for(const id of ['analysis-status','memory-list','task-summary','timeline','patch','evidence-body',
+    'runs','matrix','run-metrics','run-progress','run-diagnostics','comparison']){
     $(id).replaceChildren();
   }
   $('health').hidden=true;
+  $('model-not-configured').hidden=true;
   renderProviderError(null);
   $('provider-key').value='';
   $('provider-key').disabled=true;
@@ -2711,29 +2727,38 @@ async function loadRecentTasks(){
   renderTaskChoices();
 }
 async function refresh(manual=false){
-  if(refreshing||!portalToken)return;
+  if(refreshing||(!manual&&!portalToken&&!portalIdentity&&guestChecked))return;
   refreshing=true;
   try{
     const connect=manual||!portalIdentity;
     if(connect){
       $('error').textContent='';
-      const identity=await data('/portal/whoami');
+      let identity,config;
+      if(portalToken){
+        identity=await data('/portal/whoami');
+      }else{
+        guestChecked=true;
+        config=await data('/portal/config');
+        if(!config.guest_view)return;
+        identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
+        if(!location.hash)history.replaceState(null,'','#/tasks');
+      }
       if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
-      if(!identity.platform_admin)await loadConfig();
+      if(!identity.platform_admin)await loadConfig(config);
       portalIdentity=portalIdentity||identity;
       syncAccess();
-      displayConnection(identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
+      displayConnection(identity.guest?'只读访客模式':identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
       if(portalUI.can('tenant')){
         const results=await Promise.allSettled([loadVersions(),...(portalUI.can('eval')?[loadSuites()]:[])]);
         for(const item of results)if(item.status==='rejected')error(item.reason);
       }
     }
     const {current:page,parts}=pageRoute();
-    if(portalUI.can('tenant')){
+    if(portalUI.can('history')){
       if(['overview','tasks'].includes(page)&&!connect)await loadConfig();
-      if(portalUI.can('eval')&&['overview','evals','runs','compare','loop'].includes(page)){
+      if(portalUI.can('eval-history')&&['overview','evals','runs','compare','loop'].includes(page)){
         await loadRuns();
-        if(page==='overview'||page==='loop')await updateFlow();
+        if(portalUI.can('eval')&&(page==='overview'||page==='loop'))await updateFlow();
         else if(page==='runs')await loadRecentTasks();
       }else if(connect||page==='tasks'||page==='analysis'){
         await loadRecentTasks();
@@ -2749,6 +2774,7 @@ async function refresh(manual=false){
     }
     if(connect)await route();
   }catch(e){
+    if(!portalToken&&!portalIdentity&&(e.status===401||e.status===403))return;
     if(!portalIdentity||e.status===401){
       resetPortalSession();
       if(e.status===401||e.status===403){

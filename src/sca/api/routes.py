@@ -11,7 +11,15 @@ from pydantic import BaseModel, Field
 from sca.kinds import builtin as _builtin_kinds
 
 _builtin_kinds.load()
-from sca.api.authz import authorize
+from sca.api.authz import ForbiddenError, GuestPrincipal, authorize
+from sca.api.guest_history import (
+    guest_artifact_text,
+    guest_downloadable,
+    history_artifacts,
+    history_event,
+    history_payload,
+    history_task,
+)
 from sca.api.tasks_admission import submit
 from sca.api.terminal import router as terminal_router
 from sca.core.errors import ConflictError, InvalidTaskError, NotFoundError
@@ -45,43 +53,40 @@ async def list_kinds(user: Annotated[Principal, Depends(authorize("read"))]) -> 
 @router.get("/tasks")
 async def list_tasks(
     request: Request,
-    user: Annotated[Principal, Depends(authorize("read"))],
+    user: Annotated[Principal, Depends(authorize("read", guest=True))],
     state: TaskState | None = None,
     limit: int = Query(50, ge=1, le=500),
 ) -> list[Task]:
-    return await request.app.state.store.for_tenant(user.tenant_id).list_tasks(
-        user.tenant_id, state, limit
-    )
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    return [history_task(user, task) for task in await store.list_tasks(user.tenant_id, state, limit)]
 
 
 @router.get("/tasks/{task_id}")
 async def get_task(
-    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read"))]
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read", guest=True))]
 ) -> Task:
-    return await request.app.state.store.for_tenant(user.tenant_id).get_task(
-        task_id, user.tenant_id
-    )
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    return history_task(user, await store.get_task(task_id, user.tenant_id))
 
 
 @router.get("/tasks/{task_id}/events")
 async def list_events(
     task_id: UUID,
     request: Request,
-    user: Annotated[Principal, Depends(authorize("read"))],
+    user: Annotated[Principal, Depends(authorize("read", guest=True))],
     after: int = Query(0, ge=0),
     limit: int = Query(500, ge=1, le=500),
 ) -> list[Event]:
-    await request.app.state.store.for_tenant(user.tenant_id).get_task(task_id, user.tenant_id)
-    return await request.app.state.store.for_tenant(user.tenant_id).list_events(
-        task_id, after, limit
-    )
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    await store.get_task(task_id, user.tenant_id)
+    return [history_event(user, event) for event in await store.list_events(task_id, after, limit)]
 
 
 @router.get("/tasks/{task_id}/events/stream")
 async def stream(
     task_id: UUID,
     request: Request,
-    user: Annotated[Principal, Depends(authorize("read"))],
+    user: Annotated[Principal, Depends(authorize("read", guest=True))],
     after: int = Query(0, ge=0),
     last_event_id: str | None = Header(None),
 ) -> StreamingResponse:
@@ -106,6 +111,7 @@ async def stream(
                 task = await store.get_task(task_id, user.tenant_id)
                 batch = await store.list_events(task_id, cursor)
                 for event in batch:
+                    event = history_event(user, event)
                     yield f"id: {event.seq}\nevent: {event.type}\ndata: {event.model_dump_json()}\n\n"
                     cursor = event.seq
                 if task.state in TERMINAL_STATES and len(batch) < 500:
@@ -211,10 +217,11 @@ async def cancel(
 
 @router.get("/tasks/{task_id}/artifacts")
 async def list_artifacts(
-    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read"))]
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read", guest=True))]
 ) -> list[Artifact]:
-    await request.app.state.store.for_tenant(user.tenant_id).get_task(task_id, user.tenant_id)
-    return await request.app.state.store.for_tenant(user.tenant_id).list_artifacts(task_id)
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    await store.get_task(task_id, user.tenant_id)
+    return history_artifacts(user, await store.list_artifacts(task_id))
 
 
 @router.get("/tasks/{task_id}/artifacts/{name:path}")
@@ -222,12 +229,17 @@ async def download(
     task_id: UUID,
     name: str,
     request: Request,
-    user: Annotated[Principal, Depends(authorize("read"))],
+    user: Annotated[Principal, Depends(authorize("read", guest=True))],
 ) -> Response:
-    await request.app.state.store.for_tenant(user.tenant_id).get_task(task_id, user.tenant_id)
-    artifact = await request.app.state.store.for_tenant(user.tenant_id).get_artifact(task_id, name)
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    await store.get_task(task_id, user.tenant_id)
+    artifact = await store.get_artifact(task_id, name)
+    guest = isinstance(user, GuestPrincipal)
+    if guest and not guest_downloadable(artifact):
+        raise ForbiddenError("访客只能读取文本制品")
     data = await request.app.state.object_store.get(key_for(task_id, artifact.name))
-    return Response(data, media_type=artifact.content_type,
+    return Response(guest_artifact_text(data) if guest else data,
+                    media_type="text/plain" if guest else artifact.content_type,
                     headers={"Content-Disposition": "attachment", "X-Content-Type-Options": "nosniff"})
 
 
@@ -325,7 +337,7 @@ def _awaiting_best_of_selection(task: Task) -> bool:
 
 @router.get("/tasks/{task_id}/best-of")
 async def get_best_of(
-    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read"))],
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("read", guest=True))],
 ) -> dict:
     store = request.app.state.store.for_tenant(user.tenant_id)
     task = await store.get_task(task_id, user.tenant_id)
@@ -348,8 +360,10 @@ async def get_best_of(
             stats = data["diff_stats"]
             data["diff_stats"] = {**stats, "changed_lines": stats["insertions"] + stats["deletions"]}
         attempts.append(data)
-    return {"select": options.get("select", "verify_then_cost"), "chosen_attempt": chosen,
-            "awaiting_selection": _awaiting_best_of_selection(task), "attempts": attempts}
+    return history_payload(user, {
+        "select": options.get("select", "verify_then_cost"), "chosen_attempt": chosen,
+        "awaiting_selection": _awaiting_best_of_selection(task), "attempts": attempts,
+    })
 
 
 @router.post("/tasks/{task_id}/best-of/select", status_code=202)

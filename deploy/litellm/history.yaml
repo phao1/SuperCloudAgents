@@ -1,0 +1,5 @@
+# The demo gateway keeps its database and admin credential while no model key is configured.
+model_list: []
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  database_url: os.environ/DATABASE_URL

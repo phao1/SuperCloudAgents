@@ -1,6 +1,7 @@
 from collections.abc import Callable, Coroutine
 from hmac import compare_digest
-from typing import Annotated, Any
+from ipaddress import IPv6Address, ip_address
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import Depends, Header, Request
@@ -8,6 +9,7 @@ from fastapi import Depends, Header, Request
 from sca.core.errors import AuthError
 from sca.core.models import Principal
 from sca.db.repo import Store
+from sca.gateway.configuration import demo_config_path
 
 ROLE_ORDER = {"viewer": 0, "member": 1, "admin": 2}
 ACTION_ROLES = {
@@ -56,10 +58,15 @@ async def platform_admin_store(
     return request.app.state.platform_store
 
 
-def authorize(action: str) -> Callable[..., Coroutine[Any, Any, Principal]]:
+def authorize(action: str, *, guest: bool = False) -> Callable[..., Coroutine[Any, Any, Principal]]:
     minimum = ACTION_ROLES[action]
+    authenticate = history_principal if guest else principal
 
-    async def check(request: Request, user: Annotated[Principal, Depends(principal)]) -> Principal:
+    async def check(request: Request, user: Annotated[Principal, Depends(authenticate)]) -> Principal:
+        if isinstance(user, GuestPrincipal):
+            if guest and request.method == "GET":
+                return user
+            raise ForbiddenError("访客只能浏览历史")
         if user.scopes:
             allowed = set().union(*(SCOPE_ACTIONS.get(scope, set()) for scope in user.scopes))
             if action not in allowed:
@@ -79,3 +86,30 @@ def authorize(action: str) -> Callable[..., Coroutine[Any, Any, Principal]]:
         return user
 
     return check
+
+
+# Guest history
+class GuestPrincipal(Principal):
+    role: Literal["viewer"] = "viewer"
+    subject: Literal["guest"] = "guest"
+
+
+def is_loopback(host: str) -> bool:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return False
+    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
+        address = address.ipv4_mapped
+    return address.is_loopback
+
+
+async def history_principal(request: Request, authorization: str | None = Header(None)) -> Principal:
+    settings = getattr(request.app.state, "settings", None)
+    if settings is not None and request.method == "GET" and authorization is None:
+        mode = settings.guest_view
+        if mode == "all" or (mode == "local" and request.client and is_loopback(request.client.host)):
+            tenant = settings.guest_tenant or ("eval" if demo_config_path() else "default")
+            if not await request.app.state.store.tenant_deleted(tenant):
+                return GuestPrincipal(tenant_id=tenant)
+    return await principal(request, authorization)

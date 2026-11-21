@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from sca.api.authz import ForbiddenError, principal
+from sca.api.authz import ForbiddenError
 from sca.api.evolutions import router
 from sca.core.models import Principal
 
@@ -44,10 +44,10 @@ async def harness(tmp_path, monkeypatch):
     app.state.store = SimpleNamespace(for_tenant=lambda tenant: store)
     app.state.orchestrator = SimpleNamespace(client=temporal)
     current = Principal(tenant_id='eval', subject='test', role='admin')
-    async def current_principal():
+    async def current_principal(token):
         return current
 
-    app.dependency_overrides[principal] = current_principal
+    app.state.authenticator = SimpleNamespace(authenticate=current_principal)
 
     @app.exception_handler(ForbiddenError)
     async def forbidden(request: Request, exc: ForbiddenError):

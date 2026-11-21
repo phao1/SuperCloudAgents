@@ -5,6 +5,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, Query, Request, Response
 
 from sca.api.authz import authorize
+from sca.api.guest_history import history_payload
 from sca.api.tenants import PlatformStore
 from sca.billing.report import GroupBy, aggregate, billing_csv
 from sca.config import get_settings
@@ -13,6 +14,7 @@ from sca.core.models import Principal
 
 router = APIRouter(prefix="/v1")
 UsageReader = Annotated[Principal, Depends(authorize("read"))]
+HistoryReader = Annotated[Principal, Depends(authorize("read", guest=True))]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,10 +39,10 @@ Dates = Annotated[UsageRange, Depends(usage_range)]
 
 @router.get("/usage")
 async def tenant_usage(
-    request: Request, user: UsageReader, dates: Dates, group_by: GroupBy = "day",
+    request: Request, user: HistoryReader, dates: Dates, group_by: GroupBy = "day",
 ) -> list[dict[str, Any]]:
     store = request.app.state.store.for_tenant(user.tenant_id)
-    return aggregate(await store.usage_rows(dates.start, dates.end), group_by)
+    return history_payload(user, aggregate(await store.usage_rows(dates.start, dates.end), group_by))
 
 
 @router.get("/admin/usage")

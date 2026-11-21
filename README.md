@@ -97,6 +97,22 @@ bash scripts/portal_demo.sh down
 
 **本地源码模式：任务在本机直接运行，无隔离，仅限个人试用**
 
+### 只看历史
+
+在已有历史数据的机器上启动 Portal。Docker 模式首次使用时先运行上面的 `setup`。
+
+```bash
+bash scripts/portal_demo.sh up --mode docker
+# 或使用本机源码模式
+bash scripts/portal_demo.sh up --mode source
+curl -fsS http://127.0.0.1:8000/v1/portal/config
+curl -fsS http://127.0.0.1:8000/v1/tasks
+```
+
+在浏览器打开 `http://127.0.0.1:8000/portal`。新会话默认进入演示租户 `eval` 的任务历史，
+无需输入令牌或 DeepSeek API Key。顶部「只读访客模式 · 登录」可切换到令牌登录。缺少模型密钥时
+仍可查看轨迹和补丁，登录后可在概览配置密钥以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
+
 ### Docker 演示环境
 
 在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Docker Compose、

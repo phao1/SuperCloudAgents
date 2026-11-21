@@ -14,11 +14,13 @@ const portalUI = (() => {
   }
 
   function can(access, identity = portalIdentity) {
-    const tenant = Boolean(identity?.tenant_id && !identity.platform_admin);
+    const history = Boolean(identity?.tenant_id && !identity.platform_admin);
+    const tenant = history && !identity.guest;
     const admin = tenant && identity.role === 'admin';
     const evaluation = tenant && identity.tenant_id === 'eval';
     return ({
-      public: true, tenant, admin, eval: evaluation, 'eval-admin': evaluation && admin,
+      public: true, history, tenant, admin, eval: evaluation, 'eval-admin': evaluation && admin,
+      'eval-history': history && identity.tenant_id === 'eval',
       member: tenant && ['member', 'admin'].includes(identity.role),
       platform: identity?.platform_admin === true,
     })[access] === true;

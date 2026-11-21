@@ -74,6 +74,19 @@ async def test_scheduler_runs_due_schedules_even_when_one_is_active(monkeypatch)
     assert start.await_args.kwargs["parent_close_policy"] == workflow.ParentClosePolicy.ABANDON
 
 
+async def test_keyless_demo_does_not_claim_scheduled_evaluations(tmp_path, monkeypatch):
+    config = tmp_path / "provider.env"
+    config.touch()
+    monkeypatch.setenv("SCA_PORTAL_LOCAL_CONFIG", str(config))
+    store = SimpleNamespace(due_evolution_schedules=AsyncMock(), claim_evolution_schedule=AsyncMock())
+    scheduler = EvolutionSchedulerActivities(Settings(_env_file=None), SimpleNamespace(for_tenant=lambda _: store))
+    request = {"now": datetime.now(UTC).isoformat(), "schedule_id": str(uuid4())}
+    assert await scheduler.due(request) == []
+    assert await scheduler.begin(request) is None
+    store.due_evolution_schedules.assert_not_called()
+    store.claim_evolution_schedule.assert_not_called()
+
+
 @pytest.mark.parametrize("status,search", [("completed", True), ("budget_exhausted", False)])
 async def test_scheduler_evaluates_current_champion_and_records_outcome(
     tmp_path, monkeypatch, status, search,

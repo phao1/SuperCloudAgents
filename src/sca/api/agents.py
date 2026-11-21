@@ -32,6 +32,7 @@ from sca.agents.opencode_prompt import (
 from sca.api.authz import authorize
 from sca.api.evals import RunRequest, enqueue_run, read_run, require_eval
 from sca.api.evolutions import Admin, client_for, scoped
+from sca.api.model_access import require_model
 from sca.config import Settings, get_settings
 from sca.core.errors import InvalidTaskError, NotFoundError
 from sca.core.models import Event, Principal, Task
@@ -277,6 +278,7 @@ async def fixes_list(
 async def fixes(
     body: FixRequest, request: Request, user: Annotated[Principal, Depends(authorize("submit"))]
 ) -> Task:
+    require_model()
     settings = get_settings()
     _require_docker_build(settings)
     store = request.app.state.store.for_tenant(user.tenant_id)
@@ -406,6 +408,7 @@ async def retest(
     build_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize("submit"))],
 ) -> dict:
     require_eval(user)
+    require_model()
     build = await builds_get(build_id, user)
     if build["status"] != "succeeded":
         raise HTTPException(409, "请等待 OpenCode 构建成功")
@@ -491,6 +494,8 @@ async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> d
 async def solidify(
     champion_id: UUID, request: Request, user: Admin, body: SolidifyRequest | None = None,
 ) -> dict:
+    require_eval(user)
+    require_model()
     settings = get_settings()
     _require_docker_build(settings)
     champion = await _champion(request, user, champion_id)

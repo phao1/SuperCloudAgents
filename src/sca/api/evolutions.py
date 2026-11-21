@@ -14,6 +14,8 @@ from temporalio.service import RPCError
 
 from sca.api.authz import authorize
 from sca.api.evals import require_eval
+from sca.api.guest_history import history_payload
+from sca.api.model_access import require_model
 from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.repo import Store
@@ -24,6 +26,7 @@ from sca.evolve.workflow import EvolutionWorkflow
 
 router = APIRouter(prefix='/v1')
 Admin = Annotated[Principal, Depends(authorize('tokens'))]
+HistoryReader = Annotated[Principal, Depends(authorize('tokens', guest=True))]
 
 
 def scoped(request: Request, user: Principal) -> Store:
@@ -66,6 +69,7 @@ async def evolution_suite(name: str) -> tuple[Path, dict]:
 @router.post('/evolutions', status_code=201)
 async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
     store = scoped(request, user)
+    require_model()
     settings = get_settings()
     resolved, suite = await evolution_suite(body.suite)
     config = body.model_dump()
@@ -87,13 +91,13 @@ async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
 
 
 @router.get('/evolutions')
-async def listing(request: Request, user: Admin) -> list[dict]:
-    return await scoped(request, user).list_evolutions()
+async def listing(request: Request, user: HistoryReader) -> list[dict]:
+    return history_payload(user, await scoped(request, user).list_evolutions())
 
 
 @router.get('/evolutions/{evolution_id}')
-async def get(evolution_id: UUID, request: Request, user: Admin) -> dict:
-    return await detail(request, user, evolution_id)
+async def get(evolution_id: UUID, request: Request, user: HistoryReader) -> dict:
+    return history_payload(user, await detail(request, user, evolution_id))
 
 
 class Decision(BaseModel):
@@ -204,7 +208,9 @@ async def delete_schedule(schedule_id: UUID, request: Request, user: Admin) -> R
 
 @router.post('/evolution-schedules/{schedule_id}/run-now', status_code=202)
 async def run_schedule_now(schedule_id: UUID, request: Request, user: Admin) -> dict:
-    await scoped(request, user).get_evolution_schedule(schedule_id)
+    store = scoped(request, user)
+    require_model()
+    await store.get_evolution_schedule(schedule_id)
     workflow_id = schedule_workflow_id(schedule_id)
     try:
         async with asyncio.timeout(10):

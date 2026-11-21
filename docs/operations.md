@@ -52,6 +52,36 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 已受理的任务可继续。删除使用 `DELETE /v1/admin/tenants/{id}`，会关闭租户访问并吊销其
 数据库令牌，保留历史任务、用量和租户标识。
 
+## 只读访客模式
+
+`SCA_GUEST_VIEW` 默认 `local`，允许从回环地址直接连接的无令牌 `GET` 请求读取历史。
+设为 `off` 要求使用令牌。`SCA_GUEST_TENANT` 指定访客可访问的唯一租户，独立部署默认是
+`default`，通过 `portal_demo.sh` 启动时默认是保存演示任务、评测和演进记录的 `eval`。
+提交、审核、令牌、成员、集成配置和账单管理仍需认证。访客可查看任务、事件（含流式更新）、
+文本制品和补丁、评测及演进历史（`eval`），以及租户用量。文本历史中的常见凭证字段和邮箱会被遮盖。
+二进制制品和原始终端需使用令牌查看。
+
+**危险：`SCA_GUEST_VIEW=all` 会把指定租户的历史对所有能连接 API 的人开放，包括无令牌的远程用户。**
+任务指令、轨迹和补丁可能包含业务数据。只对允许公开的历史使用此模式，并显式设置
+`SCA_GUEST_VIEW_ACKNOWLEDGE_RISK=1`，否则服务拒绝启动。
+
+`local` 使用 TCP 对端地址判断连接来源。`X-Forwarded-For` 和 `Forwarded` 不参与判断。
+脚本和 `make api` 使用 Uvicorn 的 `--no-proxy-headers`。自定义启动命令也应保留这一参数。
+**若反向代理通过回环地址连接 API，所有经该代理转发的访问都会被视为本地连接。** 对外服务请设置
+`SCA_GUEST_VIEW=off`，或让代理通过非回环地址连接 API。
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/portal/config
+curl -fsS http://127.0.0.1:8000/v1/tasks
+curl -fsS http://127.0.0.1:8000/v1/usage?group_by=day
+```
+
+访客的配置响应包含 `guest_view: true`、`guest_tenant` 和 `model_configured`。
+演示环境没有 DeepSeek 密钥时，Docker 和源码模式均以空模型列表启动 LiteLLM。此时用令牌提交
+任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在 Portal 概览用本机
+`eval` 管理员令牌登录并保存密钥会重启网关。手工更新 `.env` 后可用
+`bash scripts/portal_demo.sh restart-gateway` 应用变更。
+
 ## 套餐与用量
 
 用 `GET /v1/admin/plans` 查询套餐。平台新建租户默认使用 `free`，已有租户沿用
