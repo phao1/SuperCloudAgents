@@ -49,6 +49,7 @@ async def store():
                     "0021_member_admin",
                     "0022_payments",
                     "0023_task_messages",
+                    "0024_projects",
                 ):
                     import_module(f"sca.db.migrations.versions.{revision}").upgrade()
 

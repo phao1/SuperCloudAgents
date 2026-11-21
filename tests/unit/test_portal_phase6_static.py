@@ -11,6 +11,7 @@ STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
     "portal-ui.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
+    "portal-projects.js",
 ]
 
 

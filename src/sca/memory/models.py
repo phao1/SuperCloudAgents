@@ -1,4 +1,5 @@
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -20,6 +21,7 @@ class MemoryInput(BaseModel):
     scope: str = Field(max_length=2000)
     text: str = Field(min_length=1, max_length=500)
     category: Category = "convention"
+    project_id: UUID | None = None
 
     @field_validator("scope")
     @classmethod

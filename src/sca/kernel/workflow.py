@@ -52,6 +52,36 @@ def _retry(attempts: int) -> RetryPolicy:
     return RetryPolicy(maximum_attempts=attempts, initial_interval=timedelta(seconds=2))
 
 
+# Projects
+async def project_work_blocked(task_id: str) -> bool:
+    return await workflow.execute_activity("project_work_blocked", task_id, **_QUICK)
+
+
+async def wait_for_project_resume(task_id: str) -> None:
+    delay = timedelta(seconds=5)
+    while await project_work_blocked(task_id):
+        await workflow.sleep(delay)
+
+
+class ProjectCheckpoints:
+    def __init__(self, spec: dict) -> None:
+        self.enabled: bool | None = spec.get("_project_control", None if spec.get("_versioned_prompts") else False)
+        self.position = 0
+
+    def available(self) -> bool:
+        if self.enabled is None:
+            # Backfilled threads can have a recorded load_task from before project control.
+            # An earlier replayed checkpoint must leave later checkpoints eligible.
+            self.position += 1
+            if workflow.patched(f"projects-checkpoint-{self.position}"):
+                self.enabled = True
+        return self.enabled is True
+
+    async def wait(self, task_id: str) -> None:
+        if self.available():
+            await wait_for_project_resume(task_id)
+
+
 @workflow.defn(name="TaskWorkflow")
 class TaskWorkflow:
     def __init__(self) -> None:
@@ -60,6 +90,7 @@ class TaskWorkflow:
         self._pause_requested = False
         self._sandbox_up = False
         self._admission = False
+        self._project_checkpoints = ProjectCheckpoints({})
         self._task_spec: dict | None = None
         self._extension_signals: dict[tuple[str, str], tuple[str, list[Any]]] = {}
         self._interjections = Interjections()
@@ -172,6 +203,22 @@ class TaskWorkflow:
             )
             self._sandbox_up = True
 
+    # Projects
+    async def _wait_for_project(self, task_id: str, state: str, turn: int = 0) -> None:
+        if not self._project_checkpoints.available() or not await project_work_blocked(task_id):
+            return
+        had_sandbox = self._sandbox_up
+        await self._release_sandbox(task_id, turn)
+        await self._set_state(task_id, "PAUSED", "项目已暂停或归档")
+        await wait_for_project_resume(task_id)
+        await self._set_state(task_id, state)
+        if state == "AWAITING_REVIEW":
+            return
+        if had_sandbox:
+            await self._restore_sandbox(task_id, turn)
+        else:
+            await self._acquire_slot(task_id)
+
     async def _check_budget(self, task_id: str, turn: int) -> None:
         reason = await workflow.execute_activity("check_budget", StepInput(task_id, turn), **_QUICK)
         if reason:
@@ -188,6 +235,7 @@ class TaskWorkflow:
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
 
         self._admission = spec.get("_admission", False)
+        self._project_checkpoints = ProjectCheckpoints(spec)
         await self._acquire_slot(task_id)
         early_context = workflow.patched("memory-before-planning")
         intents = {}
@@ -229,6 +277,7 @@ class TaskWorkflow:
                 intents = await workflow.execute_activity("compile_intents", task_id, **intent_options)
             if spec.get("memory_enabled"):
                 memory_note = await workflow.execute_activity("memory_initial_prompt", task_id, **_QUICK)
+        await self._wait_for_project(task_id, "PROVISIONING")
         await workflow.execute_activity(
             "create_sandbox",
             task_id,
@@ -255,6 +304,7 @@ class TaskWorkflow:
         skip_turn = extension.get("skip_turn", False)
         unresolved = extension.get("unresolved", [])
         while True:
+            await self._wait_for_project(task_id, "RUNNING", turn)
             # A pause takes effect here, between turns, never in the middle of one.
             if self._pause_requested and not skip_turn:
                 await self._release_sandbox(task_id, turn)
@@ -290,6 +340,7 @@ class TaskWorkflow:
                 if messages and not turn_result.skipped:
                     await self._interjections.apply(task_id, messages)
             skip_turn = False
+            await self._wait_for_project(task_id, "RUNNING", turn)
 
             over_budget: str | None = await workflow.execute_activity(
                 "check_budget", StepInput(task_id, turn), **_QUICK
@@ -338,6 +389,7 @@ class TaskWorkflow:
                 prompt = CONTINUE_WITH_GUIDANCE if session_id else initial_prompt
                 continue
 
+            await self._wait_for_project(task_id, "VERIFYING", turn)
             passed = verify.passed
             if (
                 passed
@@ -353,6 +405,7 @@ class TaskWorkflow:
                 if self._interjections.pending:
                     prompt = CONTINUE_WITH_GUIDANCE if session_id else initial_prompt
                     continue
+                await self._wait_for_project(task_id, "VERIFYING", turn)
 
             await workflow.execute_activity(
                 hooks["publish"],
@@ -364,6 +417,7 @@ class TaskWorkflow:
                 await workflow.execute_activity(
                     'collect_memory_proposals', StepInput(task_id, turn), **_QUICK)
             if spec.get("acceptance_files"):
+                await self._wait_for_project(task_id, "VERIFYING", turn)
                 await workflow.execute_activity(
                     "run_acceptance", task_id,
                     start_to_close_timeout=turn_timeout + timedelta(minutes=10),
@@ -371,6 +425,7 @@ class TaskWorkflow:
                 )
             # The slot follows the sandbox: a prompt review keeps both, the idle timer below
             # releases both (release_sandbox frees the slot).
+            await self._wait_for_project(task_id, "VERIFYING", turn)
             await self._set_state(task_id, "AWAITING_REVIEW")
             if spec.get("auto_finish"):
                 state = "SUCCEEDED" if passed and not unresolved else "FAILED"
@@ -386,6 +441,7 @@ class TaskWorkflow:
                 # Nobody is looking: stop holding a sandbox. It is rebuilt if work continues.
                 await self._release_sandbox(task_id, turn)
                 await workflow.wait_condition(self._review_ready)
+            await self._wait_for_project(task_id, "AWAITING_REVIEW", turn)
             decision, feedback = self._next_review()
 
             if decision == "approve" and await self._complete(task_id, "SUCCEEDED"):

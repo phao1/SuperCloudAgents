@@ -17,6 +17,7 @@ class DocumentInput(BaseModel):
     text: Annotated[str, StringConstraints(min_length=1, max_length=100_000, pattern=r"^[^\x00]+$")]
     format: TextFormat = "text"
     allowed_teams: list[ToolName] = Field(default_factory=list, max_length=64)
+    project_id: UUID | None = None
 
 
 class DocumentMetadata(BaseModel):
@@ -27,6 +28,7 @@ class DocumentMetadata(BaseModel):
     chunk_count: int
     created_by: str
     created_at: datetime
+    project_id: UUID | None = None
 
 
 class Citation(BaseModel):

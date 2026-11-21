@@ -25,8 +25,19 @@ from sca.core.models import (
 from sca.db.schema import api_tokens, artifacts, events, sessions, tasks, tenants
 
 if TYPE_CHECKING:
+    from sqlalchemy import ColumnElement
+    from sqlalchemy.sql.selectable import Exists, ScalarSelect
+
     from sca.billing.payments import PaymentProvider, UsageInvoiceItem
     from sca.billing.stripe_events import Invoice, StripeEvent
+    from sca.core.projects import (
+        Project,
+        ProjectAction,
+        ProjectOverview,
+        ProjectUsage,
+        Thread,
+        ThreadGroup,
+    )
 
 
 def task_uuid(value: str | UUID) -> UUID:
@@ -191,16 +202,14 @@ class Store:
         idempotency_key: str | None,
         actor: str | None = None,
         initial_result: dict | None = None,  # SCM issue link is committed with the task.
+        # Projects
+        project_id: UUID | None = None,
+        validate_spec: Callable[[dict], dict] | None = None,
     ) -> tuple[Task, bool]:
         async with self._transaction() as session:
             if self.tenant_id is not None and tenant_id != self.tenant_id:
                 raise NotFoundError("Tenant not found")
-            await session.execute(
-                pg_insert(tenants)
-                .values(id=tenant_id, display_name=tenant_id,
-                        max_active_tasks=self.default_max_active_tasks)
-                .on_conflict_do_nothing(index_elements=[tenants.c.id])
-            )
+            await self._ensure_task_tenant(session, tenant_id)
             # Commercial quotas share the tenant lock with submission and suspension.
             tenant = await self._find_tenant(session, tenant_id, lock=True)
             if tenant is None:
@@ -220,7 +229,14 @@ class Store:
                     .first()
                 )
                 if existing is not None:
+                    if project_id is not None and existing["project_id"] != project_id:
+                        await self._project(session, project_id, tenant_id)
+                        raise ConflictError("该去重键已用于其他项目的线程")
                     return Task.model_validate(dict(existing)), False
+            project = await self._thread_project(session, tenant_id, project_id)
+            from sca.projects import prepare_thread_spec
+
+            spec = prepare_thread_spec(kind, spec, project, validate_spec)
             active = await session.scalar(
                 select(func.count())
                 .select_from(tasks)
@@ -236,6 +252,7 @@ class Store:
             stmt = pg_insert(tasks).values(
                 id=uuid4(),
                 tenant_id=tenant_id,
+                project_id=project["id"],
                 kind=kind,
                 spec=spec,
                 state=TaskState.QUEUED,
@@ -279,6 +296,8 @@ class Store:
                 return {"granted": False, "terminal": True}
             if task["slot_held"]:
                 return {"granted": True}
+            if await self._project_work_blocked(session, task):
+                return {"granted": False, "project_blocked": True}
             if task["slot_requested_at"] is None:
                 task = (await session.execute(update(tasks).where(tasks.c.id == task["id"])
                     .values(slot_requested_at=func.now(), slot_generation=tasks.c.slot_generation + 1)
@@ -294,7 +313,10 @@ class Store:
                       for r in quotas}
             candidates = (await session.execute(select(tasks).where(
                 tasks.c.slot_requested_at.is_not(None), ~tasks.c.slot_held,
-                tasks.c.state.not_in(TERMINAL_STATES)))).mappings().all()
+                tasks.c.state.not_in(TERMINAL_STATES),
+                ~self._inactive_task_project()))).mappings().all()
+            if not any(row["id"] == task["id"] for row in candidates):
+                return {"granted": False, "project_blocked": True}
             ordered = sorted(candidates, key=lambda r: grant_order(dict(r), held, weights))
             eligible = [r for r in ordered if held[r["tenant_id"]] < limits[r["tenant_id"]]]
             position = next(i + 1 for i, r in enumerate(ordered) if r["id"] == task["id"])
@@ -700,7 +722,8 @@ class Store:
             return int(bool(missing and await self._store_memory_vector(session, row, vector)))
 
     async def list_memories(self, scope: str | None = None, status: str | None = None,
-                            *, missing_vectors: bool = False) -> list[dict]:
+                            *, missing_vectors: bool = False,
+                            project_id: UUID | None = None) -> list[dict]:
         from sca.db.schema import memories
         from sca.memory.models import normalise_scope
 
@@ -714,6 +737,9 @@ class Store:
         stmt = stmt.order_by(memories.c.last_used_at.desc().nullslast(),
                              memories.c.created_at.desc(), memories.c.id)
         async with self._transaction() as session:
+            if project_id is not None:
+                await self._project(session, project_id, self.tenant_id)
+                stmt = stmt.where(self._project_scope(memories.c.project_id, project_id))
             if missing_vectors:
                 if not await self._has_memory_vectors(session):
                     return []
@@ -735,11 +761,15 @@ class Store:
         from sca.memory.models import MemoryInput
 
         value = MemoryInput.model_validate(body)
+        project_id = value.project_id
         if source_task_id is not None:
-            await self._task(session, source_task_id)
+            project_id = (await self._task(session, source_task_id))["project_id"]
+        elif project_id is not None:
+            await self._project(session, project_id, self._feature_tenant())
         now = datetime.now(UTC)
         row = (await session.execute(insert(memories).values(
-            id=uuid4(), tenant_id=self.tenant_id, **value.model_dump(), source=source,
+            id=uuid4(), tenant_id=self.tenant_id, **value.model_dump(exclude={"project_id"}),
+            project_id=project_id, source=source,
             source_task_id=source_task_id, created_by=actor,
             status='active' if source == 'manual' else 'proposed',
             approved_by=actor if source == 'manual' else None,
@@ -845,6 +875,8 @@ class Store:
             await self._memory_audit(session, memory_id, actor, 'delete')
 
     async def memory_query(self, task_id: str, max_items: int, max_chars: int) -> str | None:
+        from sqlalchemy import literal_column
+
         from sca.db.schema import memories
         from sca.memory.models import normalise_scope, render
 
@@ -858,6 +890,7 @@ class Store:
             conditions = (
                 memories.c.tenant_id == self.tenant_id, memories.c.scope.in_(scopes),
                 memories.c.status == 'active',
+                self._project_scope(memories.c.project_id, task['project_id']),
             )
             count = await session.scalar(select(func.count()).select_from(memories).where(*conditions))
             if count <= max_items:
@@ -869,10 +902,10 @@ class Store:
                     return None
             if not await self._has_memory_vectors(session):
                 return None
-            present = await session.scalar(text("""SELECT EXISTS (SELECT 1 FROM memories
-                WHERE tenant_id = :tenant AND scope = ANY(:scopes) AND status = 'active'
-                AND embedding IS NOT NULL)"""),
-                {'tenant': self.tenant_id, 'scopes': scopes})
+            has_vector = select(memories.c.id).where(
+                *conditions, literal_column("embedding").is_not(None),
+            ).exists()
+            present = await session.scalar(select(has_vector))
             if not present:
                 return None
             return task['spec'].get('instruction') or task['spec'].get('question', '')
@@ -895,6 +928,7 @@ class Store:
             rows = (await session.execute(select(memories).where(
                 memories.c.tenant_id == self.tenant_id, memories.c.scope.in_(scopes),
                 memories.c.status == 'active',
+                self._project_scope(memories.c.project_id, task['project_id']),
             ).order_by(memories.c.last_used_at.desc().nullslast(),
                        memories.c.created_at.desc(), memories.c.id))).mappings().all()
             from sca.config import get_settings
@@ -2050,6 +2084,8 @@ class Store:
 
         tenant, doc_id = self._feature_tenant(), uuid4()
         async with self._transaction() as session:
+            if document.get("project_id") is not None:
+                await self._project(session, document["project_id"], tenant)
             row = (await session.execute(insert(kb_documents).values(
                 **document, id=doc_id, tenant_id=tenant, chunk_count=len(chunks),
             ).returning(kb_documents))).mappings().one()
@@ -2069,31 +2105,36 @@ class Store:
                     """), vectors)
             return dict(row)
 
-    def _readable_knowledge(self, teams: list[str]):
+    def _readable_knowledge(self, teams: list[str], project_id: UUID | None):
         from sqlalchemy import or_
 
         from sca.db.schema import kb_documents as docs
 
         return (docs.c.tenant_id == self._feature_tenant(),
+                self._project_scope(docs.c.project_id, project_id),
                 or_(func.cardinality(docs.c.allowed_teams) == 0, docs.c.allowed_teams.overlap(teams)))
 
-    async def list_knowledge_documents(self, teams: list[str], limit: int, offset: int) -> list[dict]:
+    async def list_knowledge_documents(
+        self, teams: list[str], limit: int, offset: int, *, project_id: UUID | None = None,
+    ) -> list[dict]:
         from sca.db.schema import kb_documents as docs
 
         metadata = [column for column in docs.c if column.key != "content"]
-        query = select(*metadata).where(*self._readable_knowledge(teams)).order_by(
+        query = select(*metadata).where(*self._readable_knowledge(teams, project_id)).order_by(
             docs.c.created_at.desc(), docs.c.id,
         ).limit(limit).offset(offset)
         async with self._transaction() as session:
             return [dict(row) for row in (await session.execute(query)).mappings()]
 
-    async def get_knowledge_document(self, document_id: UUID, teams: list[str]) -> dict:
+    async def get_knowledge_document(
+        self, document_id: UUID, teams: list[str], *, project_id: UUID | None = None,
+    ) -> dict:
         from sca.db.schema import kb_chunks as chunks
         from sca.db.schema import kb_documents as docs
 
         async with self._transaction() as session:
             row = (await session.execute(select(docs).where(
-                docs.c.id == document_id, *self._readable_knowledge(teams),
+                docs.c.id == document_id, *self._readable_knowledge(teams, project_id),
             ).with_for_update(read=True, key_share=True))).mappings().first()
             if row is None:
                 raise NotFoundError("知识库文档不存在")
@@ -2115,7 +2156,8 @@ class Store:
                 raise NotFoundError("知识库文档不存在")
 
     async def search_knowledge(self, query: str, teams: list[str], limit: int,
-                               vector: list[float] | None, model: str | None) -> list[dict]:
+                               vector: list[float] | None, model: str | None, *,
+                               project_id: UUID | None = None) -> list[dict]:
         from sqlalchemy import and_, case, literal_column, null, or_
 
         from sca.db.schema import kb_chunks as chunks
@@ -2135,7 +2177,9 @@ class Store:
             candidates = select(
                 chunks.c.document_id, docs.c.title, chunks.c.ordinal, chunks.c.heading,
                 chunks.c.content, distance.label("distance"),
-            ).select_from(chunks.join(docs)).where(*self._readable_knowledge(teams)).subquery()
+            ).select_from(chunks.join(docs)).where(
+                *self._readable_knowledge(teams, project_id),
+            ).subquery()
             # Without embeddings, rank by how many query keywords a chunk contains.
             fields = (candidates.c.title, candidates.c.heading, candidates.c.content)
             terms = keyword_terms(query) or [query]
@@ -2613,3 +2657,254 @@ class Store:
                      "turn": row["turn"], "plan_attempt": row["plan_attempt"]},
                     f"user.message.{row['id']}.applied",
                 )
+
+    # Projects
+
+    async def _ensure_task_tenant(self, session: AsyncSession, tenant_id: str) -> None:
+        await session.execute(pg_insert(tenants).values(
+            id=tenant_id, display_name=tenant_id, max_active_tasks=self.default_max_active_tasks,
+        ).on_conflict_do_nothing(index_elements=[tenants.c.id]))
+
+    @staticmethod
+    def _visible_projects(tenant_id: str) -> Select:
+        from sca.db.schema import projects
+
+        return select(projects).where(
+            projects.c.tenant_id == tenant_id, projects.c.deleted_at.is_(None),
+        )
+
+    async def _project(
+        self, session: AsyncSession, project_id: UUID, tenant_id: str, *, lock: bool = False,
+    ) -> RowMapping:
+        from sca.db.schema import projects
+
+        query = self._visible_projects(tenant_id).where(projects.c.id == project_id)
+        if lock:
+            query = query.with_for_update()
+        row = (await session.execute(query)).mappings().first()
+        if row is None:
+            raise NotFoundError("项目不存在")
+        return row
+
+    async def _thread_project(
+        self, session: AsyncSession, tenant_id: str, project_id: UUID | None,
+    ) -> RowMapping:
+        from sca.db.schema import projects
+
+        if project_id is None:
+            # create_task holds the tenant row lock while finding or creating its default.
+            query = self._visible_projects(tenant_id).where(projects.c.is_default).with_for_update()
+            row = (await session.execute(query)).mappings().first()
+            if row is None:
+                row = (await session.execute(insert(projects).values(
+                    id=uuid4(), tenant_id=tenant_id, name="默认项目", is_default=True,
+                    created_by="system",
+                ).returning(projects))).mappings().one()
+        else:
+            row = await self._project(session, project_id, tenant_id, lock=True)
+        if row["status"] != "active":
+            raise ConflictError("项目已暂停或归档，无法创建线程")
+        return row
+
+    @staticmethod
+    def _inactive_task_project() -> "Exists":
+        from sca.db.schema import projects
+
+        return select(projects.c.id).where(
+            projects.c.id == tasks.c.project_id, projects.c.tenant_id == tasks.c.tenant_id,
+            (projects.c.status != "active") | projects.c.deleted_at.is_not(None),
+        ).exists()
+
+    async def _project_work_blocked(self, session: AsyncSession, task: RowMapping) -> bool:
+        if task["project_id"] is None:
+            return False
+        return bool(await session.scalar(select(self._inactive_task_project()).select_from(tasks)
+                                         .where(tasks.c.id == task["id"])))
+
+    async def project_work_blocked(self, task_id: str) -> bool:
+        async with self._transaction() as session:
+            return await self._project_work_blocked(session, await self._task(session, task_id))
+
+    async def create_project(self, values: dict, actor: str) -> "Project":
+        from sca.core.projects import Project
+        from sca.db.schema import projects
+
+        tenant_id = self._feature_tenant()
+        async with self._transaction() as session:
+            await self._ensure_task_tenant(session, tenant_id)
+            self._require_active_tenant(await self._find_tenant(session, tenant_id, lock=True))
+            row = (await session.execute(insert(projects).values(
+                **values, id=uuid4(), tenant_id=tenant_id, created_by=actor,
+            ).returning(projects))).mappings().one()
+            return Project.model_validate(row)
+
+    async def get_project(self, project_id: UUID) -> "Project":
+        from sca.core.projects import Project
+
+        async with self._transaction() as session:
+            return Project.model_validate(await self._project(
+                session, project_id, self._feature_tenant(),
+            ))
+
+    async def update_project(self, project_id: UUID, values: dict) -> "Project":
+        from sca.core.projects import Project
+
+        async with self._transaction() as session:
+            row = await self._project(session, project_id, self._feature_tenant(), lock=True)
+            return Project.model_validate(await self._update_project(session, row, values))
+
+    async def _update_project(self, session: AsyncSession, row: RowMapping,
+                              values: dict) -> RowMapping:
+        from sca.db.schema import projects
+
+        if not values:
+            return row
+        return (await session.execute(update(projects).where(
+            projects.c.id == row["id"], projects.c.tenant_id == row["tenant_id"],
+        ).values(**values, updated_at=func.now()).returning(projects))).mappings().one()
+
+    async def change_project_status(self, project_id: UUID, action: "ProjectAction") -> "Project":
+        from sca.core.projects import Project
+
+        target, allowed = {
+            "pause": ("paused", {"active"}),
+            "resume": ("active", {"paused"}),
+            "archive": ("archived", {"active", "paused"}),
+            "unarchive": ("active", {"archived"}),
+        }[action]
+        async with self._transaction() as session:
+            row = await self._project(session, project_id, self._feature_tenant(), lock=True)
+            if row["status"] == target:
+                return Project.model_validate(row)
+            if row["status"] not in allowed:
+                raise ConflictError("项目当前状态不支持此操作")
+            return Project.model_validate(await self._update_project(session, row, {"status": target}))
+
+    async def delete_project(self, project_id: UUID) -> list[UUID]:
+        from sca.db.schema import projects
+        from sca.projects import WORKING_STATES
+
+        tenant_id = self._feature_tenant()
+        async with self._transaction() as session:
+            query = select(projects).where(projects.c.id == project_id,
+                                           projects.c.tenant_id == tenant_id).with_for_update()
+            row = (await session.execute(query)).mappings().first()
+            if row is None:
+                raise NotFoundError("项目不存在")
+            pending = (await session.execute(select(tasks.c.id, tasks.c.state).where(
+                tasks.c.project_id == project_id, tasks.c.tenant_id == tenant_id,
+                tasks.c.state.not_in(TERMINAL_STATES),
+            ).with_for_update())).all()
+            if any(state in WORKING_STATES for _, state in pending):
+                raise ConflictError("项目仍有进行中的线程，无法删除")
+            if row["deleted_at"] is None:
+                await self._update_project(
+                    session, row, {"status": "archived", "deleted_at": func.now()},
+                )
+            return [task_id for task_id, _ in pending]
+
+    @staticmethod
+    def _last_thread_event(column: "ColumnElement[Any]", *types: str) -> "ScalarSelect[Any]":
+        query = select(column).where(
+            events.c.task_id == tasks.c.id, events.c.tenant_id == tasks.c.tenant_id,
+        )
+        if types:
+            query = query.where(events.c.type.in_(types))
+        return query.order_by(events.c.seq.desc()).limit(1).scalar_subquery()
+
+    def _project_threads(self, *columns: "ColumnElement[Any]") -> Select:
+        ci = self._last_thread_event(events.c.type, "ci.requested", "ci.completed")
+        review = self._last_thread_event(events.c.payload["plan"].astext, "review.requested")
+        return select(
+            *columns, (ci == "ci.requested").label("ci_pending"),
+            review.is_not(None).label("plan_review"),
+        ).where(tasks.c.tenant_id == self._feature_tenant())
+
+    async def list_projects(self) -> list["ProjectOverview"]:
+        from sca.core.projects import ProjectOverview, ThreadGroup
+        from sca.projects import thread_group
+
+        async with self._transaction() as session:
+            rows = (await session.execute(self._visible_projects(self._feature_tenant()))).mappings()
+            summaries = {row["id"]: ProjectOverview(
+                **row, last_activity_at=row["updated_at"],
+                group_counts=dict.fromkeys(ThreadGroup, 0),
+            ) for row in rows}
+            if not summaries:
+                return []
+            last_event = self._last_thread_event(events.c.created_at)
+            threads = self._project_threads(
+                tasks.c.project_id, tasks.c.state, tasks.c.spec, tasks.c.result,
+                func.greatest(tasks.c.updated_at, last_event).label("activity_at"),
+            ).where(tasks.c.project_id.in_(summaries))
+            for row in (await session.execute(threads)).mappings():
+                summary = summaries[row["project_id"]]
+                summary.group_counts[thread_group(row)] += 1
+                summary.last_activity_at = max(summary.last_activity_at, row["activity_at"])
+            return sorted(summaries.values(), key=lambda item: (item.last_activity_at, item.id),
+                          reverse=True)
+
+    async def list_project_threads(self, project_id: UUID, group: "ThreadGroup | None") -> list["Thread"]:
+        from sca.core.projects import Thread
+        from sca.projects import thread_group
+
+        async with self._transaction() as session:
+            await self._project(session, project_id, self._feature_tenant())
+            query = self._project_threads(*tasks.c).where(tasks.c.project_id == project_id)
+            rows = (await session.execute(query.order_by(
+                tasks.c.updated_at.desc(), tasks.c.id,
+            ))).mappings()
+            threads = []
+            for row in rows:
+                current = thread_group(row)
+                if group is None or current == group:
+                    threads.append(Thread.model_validate({**row, "group": current}))
+            return threads
+
+    async def project_artifacts(self, project_id: UUID) -> list[Artifact]:
+        tenant_id = self._feature_tenant()
+        async with self._transaction() as session:
+            await self._project(session, project_id, tenant_id)
+            rows = (await session.execute(select(artifacts).join(
+                tasks, tasks.c.id == artifacts.c.task_id,
+            ).where(
+                tasks.c.project_id == project_id, tasks.c.tenant_id == tenant_id,
+                artifacts.c.tenant_id == tenant_id,
+            ).order_by(artifacts.c.created_at.desc(), artifacts.c.id))).mappings()
+            return [Artifact.model_validate(row) for row in rows]
+
+    async def project_usage(self, project_id: UUID, default_model: str) -> "ProjectUsage":
+        from collections import defaultdict
+
+        from sca.billing.metering import METERED_EVENTS, task_usage
+        from sca.projects import project_usage
+
+        tenant_id = self._feature_tenant()
+        history = defaultdict(list)
+        async with self._transaction() as session:
+            await self._project(session, project_id, tenant_id)
+            rows = (await session.execute(select(tasks).where(
+                tasks.c.project_id == project_id, tasks.c.tenant_id == tenant_id,
+            ).order_by(tasks.c.created_at.desc(), tasks.c.id))).mappings().all()
+            live_ids = [row["id"] for row in rows if row["billing_usage"] is None
+                        and row["events_archived_at"] is None]
+            if live_ids:
+                evidence = (await session.execute(select(events).where(
+                    events.c.tenant_id == tenant_id, events.c.task_id.in_(live_ids),
+                    events.c.type.in_(METERED_EVENTS),
+                ).order_by(events.c.task_id, events.c.seq))).mappings()
+                for event in evidence:
+                    history[event["task_id"]].append(Event.model_validate(event))
+        now = datetime.now(UTC)
+        return project_usage((
+            (row, row["billing_usage"] or task_usage(
+                row, history[row["id"]], row["finished_at"] or now, default_model,
+            )) for row in rows
+        ), default_model)
+
+    @staticmethod
+    def _project_scope(
+        column: "ColumnElement[UUID]", project_id: UUID | None,
+    ) -> "ColumnElement[bool]":
+        shared = column.is_(None)
+        return shared if project_id is None else shared | (column == project_id)

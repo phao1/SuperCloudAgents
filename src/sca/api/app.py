@@ -237,6 +237,10 @@ def create_app(
     from sca.api.payments import register_payments
 
     register_payments(app, settings, default_store=store is None)
+    # Projects
+    from sca.api.projects import router as projects_router
+
+    app.include_router(projects_router)
     return app
 
 
