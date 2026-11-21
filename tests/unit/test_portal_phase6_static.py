@@ -218,12 +218,15 @@ global.fetch=async (path,request)=>{
   await assert.rejects(api('/tasks',{}),/请先登录/);
   assert.equal(calls.length,2);
 
+  location.hash='#/projects/fixture-project';
+  assert.deepEqual(pageRoute(),{page:'tasks',parts:[],current:'tasks',redirect:'#/tasks'});
   portalToken='fixture-member';
   await refresh(true);
   assert.deepEqual(calls.slice(2),[
     ['/v1/portal/whoami','Bearer fixture-member'],['/v1/portal/config','Bearer fixture-member'],
     ['/v1/tasks?limit=100','Bearer fixture-member'],
   ]);
+  assert.equal(pageRoute().current,'projects');
   assert.equal($('guest-view-banner').hidden,true);
   assert.equal($('model-not-configured').hidden,true);
   assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
@@ -245,7 +248,11 @@ def test_portal_phase6_browser_submission():
         path = urlsplit(req.url).path
         if path == "/portal":
             return route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
-        if path.rsplit("/", 1)[-1] in {*ASSETS, "portal-operations.css", "task-flow.js", "task-timeline.js"}:
+        if path == "/portal/assets/task-dag.js":
+            return route.fulfill(status=404)
+        if path.rsplit("/", 1)[-1] in {
+            *ASSETS, "portal-operations.css", "task-flow.js", "task-timeline.js", "task-dag.css",
+        }:
             name = path.rsplit("/", 1)[-1]
             kind = "text/javascript" if name.endswith(".js") else "text/css"
             return route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
@@ -296,6 +303,8 @@ def test_portal_phase6_browser_submission():
         page.get_by_role("button", name="提交任务", exact=True).click()
         page.wait_for_url("**/portal#/tasks/" + task_id)
         page.get_by_role("heading", name="代码影响分析").wait_for()
+        assert page.get_by_text("发布补丁后可查看影响范围。").is_visible()
+        assert not page.locator("#task-dag").is_visible()
         assert calls[1]["spec"]["best_of"] == {"n": 2, "select": "human"}
         assert calls[1]["spec"]["tools"] == ["knowledge"]
         assert calls[1]["spec"]["base_ref"] == "main"
