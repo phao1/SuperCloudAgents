@@ -59,7 +59,6 @@ def test_portal_places_provider_alerts_in_overview_and_tasks():
         assert f'id="{banner}" class="provider-error-banner" role="alert" hidden' in content
     assert '.provider-error-banner { color: var(--bad); background: var(--bad-bg)' in source
     assert 'renderProviderError(c.gateway_provider_account_error)' in source
-    assert "if(['overview','tasks'].includes(page)&&!connect)await loadConfig()" in source
 
 
 def test_portal_diff_and_metrics_runtime(tmp_path):

@@ -931,6 +931,7 @@ let fixes=[], flow={}, fixSelection=null, taskEvents=[], taskLoading=false, suit
 let portalToken=localStorage.getItem('sca-portal-token')||'';
 let guestChecked=false;
 let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
+let routeLoad=null;
 let selectedIteration=null, currentLoopTask=null, pendingReview=null, promptPreviewKey=null;
 const pendingActions=new Set();
 $('token').value=portalToken;
@@ -1067,7 +1068,10 @@ function renderProviderError(error){
   }
 }
 async function loadConfig(c){
+  const identity=portalIdentity;
   c??=await data('/portal/config');
+  if(identity!==portalIdentity)return;
+  const backendChanged=portalConfig?.default_agent_backend!==c.default_agent_backend;
   portalConfig=c;
   $('model-not-configured').hidden=c.model_configured!==false;
   if(c.guest_view)return c;
@@ -1087,18 +1091,28 @@ async function loadConfig(c){
   if(!$('model').value)$('model').value=c.default_model;
   options('models',c.models,x=>x,x=>x);
   options('backend',c.agent_backends,x=>x,portalUI.backendLabel);
+  if(currentTask&&pageRoute().current==='tasks'){
+    if(backendChanged)portalTasks.render(currentTask,taskEvents);
+    renderReplayDetails(currentTask,visibleSteps[visibleIndex]);
+  }
   return c;
 }
 async function loadSuites(){
+  const identity=portalIdentity;
+  const rows=await data('/evals/suites');
+  if(identity!==portalIdentity)return;
   const first=!suites.length;
-  suites=await data('/evals/suites');
+  suites=rows;
   $('suite-cards').replaceChildren(...suites.map(s=>{const n=el('div',undefined,'suite-card');n.append(el('strong',s.name),el('small',s.cases.length+' 个用例 · '+(s.description||'独立验收')));return n}));
   options('suite',suites,x=>x.name,x=>x.name+' · '+x.cases.length+' 个用例');
   if(first&&suites.some(s=>s.name==='opencode-demo'))$('suite').value='opencode-demo';
 }
 async function loadVersions(){
+  const identity=portalIdentity;
+  const rows=await data('/agents/opencode/versions');
+  if(identity!==portalIdentity)return;
   const first=!versions.length;
-  versions=await data('/agents/opencode/versions');
+  versions=rows;
   options('version',[{
     version:''
   },...versions],v=>v.version,v=>v.version||'默认版本');
@@ -1198,9 +1212,18 @@ function renderRunProgress(run,total){
   if(run.reason)$('run-progress').append(el('p',run.reason,'bad'));
 }
 async function loadRuns(){
-  runs=await data('/evals/runs?limit=200');
+  const hash=location.hash,identity=portalIdentity;
+  const current=()=>hash===location.hash&&identity===portalIdentity;
+  const summaries=await data('/evals/runs?limit=200');
+  if(!current())return;
+  runs=summaries;
   options('compare-a',runs,r=>r.id,r=>r.id.slice(0,8)+' · '+r.suite);
   options('compare-b',runs,r=>r.id,r=>r.id.slice(0,8)+' · '+r.suite);
+  const [page,a,b]=hash.slice(2).split('/');
+  if(page==='compare'&&a&&b){
+    $('compare-a').value=decodeURIComponent(a);
+    $('compare-b').value=decodeURIComponent(b);
+  }
   // Four requests at a time keep the local API and browser bounded.
   for(let i=0;i<runs.length;i+=4){
     const batch=await Promise.all(runs.slice(i,i+4).map(r=>{
@@ -1208,6 +1231,7 @@ async function loadRuns(){
       return cached?.status===r.status&&cached.result_count===r.result_count
         &&cached.passed===r.passed&&cached.failed===r.failed?cached:data('/evals/runs/'+enc(r.id));
     }));
+    if(!current())return;
     batch.forEach(r=>runDetails.set(r.id,r));
   }
   const rows=runs.map(r=>runDetails.get(r.id));
@@ -1230,9 +1254,9 @@ async function loadRuns(){
   if(activeRun)await matrix();
 }
 async function matrix(){
-  const id=activeRun;
+  const id=activeRun,identity=portalIdentity;
   const run=runDetails.get(id)||await data('/evals/runs/'+enc(id));
-  if(activeRun!==id)return;
+  if(activeRun!==id||identity!==portalIdentity)return;
   runDetails.set(id,run);
   const rows=run.results,repeat=run.variant.repeat||1;
   const cases=[...new Set([...(suites.find(s=>s.name===run.suite)?.cases||[]),...rows.map(r=>r.case_id)])].sort();
@@ -1278,10 +1302,13 @@ function comparisonCell(rows){
 }
 async function showComparison(a,b){
   if(!a||!b)return;
+  const identity=portalIdentity;
+  const current=()=>location.hash==='#/compare/'+enc(a)+'/'+enc(b)&&identity===portalIdentity;
   const [report,oldRun,newRun]=await Promise.all([data('/evals/compare?a='+enc(a)+'&b='+enc(b)),data('/evals/runs/'+enc(a)),data('/evals/runs/'+enc(b))]);
+  if(!current())return;
   await Promise.all([loadRunEvidence(oldRun),loadRunEvidence(newRun)]);
+  if(!current())return;
   $('compare-a').value=a;$('compare-b').value=b;
-  if(location.hash!=='#/compare/'+enc(a)+'/'+enc(b))return;
   const verdict=verdictFor(oldRun,newRun),box=el('div',undefined,'verdict');
   box.append(el('small','结论卡 · A '+(variant(oldRun).agent_version||a.slice(0,8))+' → B '+(variant(newRun).agent_version||b.slice(0,8))),el('h3',(verdict.adopt?'✓ 建议采纳':'⊘ 不建议采纳'),verdict.adopt?'good':'bad'),el('p',verdict.reason),el('small','修复 '+verdict.fixed+' 项 · 回归 '+verdict.regressions+' 项。单次样本不能证明稳定性或因果。'));
   if(portalUI.can('member')&&canOptimize(newRun)&&newRun.variant.source_build_id){
@@ -1743,19 +1770,18 @@ async function updateTask(){
   if(!id||taskLoading)return;
   taskLoading=true;
   try{
-    const t=await data('/tasks/'+enc(id));
-    let cursor=eventCursor,events=[];
-    for(let page=0;
-    page<20;
-    page++){
-      const batch=await data('/tasks/'+enc(id)+'/events?after='+cursor);
+    const path='/tasks/'+enc(id),loadEvents=after=>data(path+'/events?after='+after);
+    let [t,batch]=await Promise.all([data(path),loadEvents(eventCursor)]);
+    const events=[...batch];
+    for(let page=1;page<20&&batch.length>=500;page++){
+      if(selectedTask!==id||portalIdentity!==identity)return;
+      batch=await loadEvents(batch.at(-1).seq);
       events.push(...batch);
-      if(batch.length)cursor=batch.at(-1).seq;
-      if(batch.length<500)break
     }
     if(selectedTask!==id||portalIdentity!==identity)return;
     currentTask=t;
     appendTaskEvents(events);
+    renderTaskState(currentTask);
     $('task-details').hidden=false;
     if(portalUI.can('tenant'))portalProjects.breadcrumb(t);
     else $('task-project-breadcrumb').hidden=true;
@@ -1851,9 +1877,12 @@ async function beginFix({run,row,target}){
   await updateFlow();
 }
 async function recoverFlow(){
-  [serverTasks,builds,fixes]=await Promise.all([
+  const hash=location.hash,identity=portalIdentity;
+  const result=await Promise.all([
     data('/tasks?limit=500'),data('/agents/opencode/builds'),data('/agents/opencode/fixes'),
   ]);
+  if(hash!==location.hash||identity!==portalIdentity)return;
+  [serverTasks,builds,fixes]=result;
   // Earlier fixes may have the source task only in the instruction.
   const legacy=serverTasks.find(t=>t.spec?.labels?.source_task_id
     ||(t.spec?.push&&/^You are working on the source code of OpenCode/.test(t.spec?.instruction||'')));
@@ -1900,7 +1929,10 @@ function renderLoopProgress(task,build,baseline,retest){
   }));
 }
 async function updateFlow(){
+  const hash=location.hash,identity=portalIdentity;
+  const current=()=>hash===location.hash&&identity===portalIdentity;
   await recoverFlow();
+  if(!current())return;
   renderTaskChoices();
   const active=runDetails.get(activeRun);
   if(active){
@@ -1913,6 +1945,7 @@ async function updateFlow(){
     flow.oldRun?runDetail(flow.oldRun):(fixSelection?.run||runDetails.get(runs[0]?.id)),
     flow.newRun?runDetail(flow.newRun):null,
   ]);
+  if(!current())return;
   if(task&&task.id!==flow.fixTask)return;
   currentLoopTask=task;
   if(pendingReview&&(pendingReview.id!==task?.id||task.state!=='AWAITING_REVIEW'
@@ -1946,6 +1979,7 @@ async function updateFlow(){
     ||Boolean(retest&&['queued','running','completed'].includes(retest.status));
   $('fix-trace').disabled=!flow.fixTask;
   await renderMemoryProposals(task,'loop-memory-proposals');
+  if(!current())return;
   renderPromptReview(task,ready);
   renderFixControls();
   renderLoopResult(task,build,baseline,retest);
@@ -2144,11 +2178,13 @@ function openTaskQuality(){
 function diagnosticList(target,items){target.replaceChildren();if(!items.length){target.append(el('small','✓ 当前可见证据未触发规则；不等于已证明无缺陷。'));return}for(const item of items){const row=el('div',undefined,'diagnostic'),text=el('div');text.append(el('strong',item.title),el('small',item.note));const link=item.href?evidenceLink('查看事件 #'+item.seq+' ↗',item.href):button('查看证据 ↗',()=>item.open?item.open():item.event?showEvidence(item.event):$('patch').scrollIntoView({block:'center'}));row.append(text,link);target.append(row)}}
 function cachedTokens(run){const events=run.results.flatMap(r=>runEvidence.get(r.task_id)||[]).filter(e=>e.type==='agent.usage'&&e.payload?.cached_input_tokens!==undefined);return events.length?events.reduce((n,e)=>n+Number(e.payload.cached_input_tokens),0).toLocaleString('zh-CN'):'未提供'}
 async function loadRunEvidence(run){
-  for(let i=0;i<run.results.length;i+=3){await Promise.all(run.results.slice(i,i+3).map(async row=>{
+  const identity=portalIdentity,hash=location.hash;
+  const current=()=>identity===portalIdentity&&hash===location.hash;
+  for(let i=0;i<run.results.length&&current();i+=3){await Promise.all(run.results.slice(i,i+3).map(async row=>{
     if(runEvidence.has(row.task_id)&&run.status==='completed')return;
     let events=[],cursor=0;
-    for(let page=0;page<20;page++){const batch=await data('/tasks/'+enc(row.task_id)+'/events?after='+cursor);events.push(...batch);if(batch.length)cursor=batch.at(-1).seq;if(batch.length<500)break}
-    runEvidence.set(row.task_id,events);
+    for(let page=0;page<20&&current();page++){const batch=await data('/tasks/'+enc(row.task_id)+'/events?after='+cursor);events.push(...batch);if(batch.length)cursor=batch.at(-1).seq;if(batch.length<500)break}
+    if(current())runEvidence.set(row.task_id,events);
   }))}
   if(activeRun===run.id){renderRunDiagnostics(run);$('run-metrics').lastChild.querySelector('span').textContent='Token '+dimensions(run.results).tokens+' · 缓存输入 '+cachedTokens(run)}
 }
@@ -2185,7 +2221,6 @@ function renderTaskState(t){
   state.className='badge '+statusClass(t.state);
 }
 function renderTaskObservability(t){
-  renderTaskState(t);
   renderArchitecture(t);
   if(evidenceView==='quality'&&!$('evidence').hidden)renderTaskQuality(t);
   const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(Date.parse(t.updated_at)-Date.parse(t.created_at))/1000;
@@ -2249,8 +2284,10 @@ function renderLoopResult(task,build,baseline,retest){
     evidenceLink('打开自演进闭环 →','#/loop/round/'+enc(task.id)));
 }
 async function runDetail(id){
-  if(!runDetails.has(id))runDetails.set(id,await data('/evals/runs/'+enc(id)));
-  return runDetails.get(id);
+  if(runDetails.has(id))return runDetails.get(id);
+  const identity=portalIdentity,run=await data('/evals/runs/'+enc(id));
+  if(identity===portalIdentity)runDetails.set(id,run);
+  return run;
 }
 function renderSwimlane(task){
   taskTimeline??=SCATaskTimeline.create($('swimlane'),{
@@ -2273,10 +2310,12 @@ const memoryChoices=new Map();
 function memoryCategoryLabel(category){return ({convention:'约定',pitfall:'陷阱',command:'命令',preference:'偏好'})[category]||category}
 function checkedMemories(taskId){return [...(memoryChoices.get(taskId)||new Set())]}
 async function renderMemoryProposals(task,targetId){
+  const identity=portalIdentity;
   const target=$(targetId),ids=task?.state==='AWAITING_REVIEW'?(task.result?.memory_proposals||[]):[];
   target.hidden=!ids.length;
   if(!ids.length){target.replaceChildren();return}
   const rows=await data('/memories?status=proposed');
+  if(identity!==portalIdentity)return;
   if(targetId==='task-memory-proposals'&&selectedTask!==task.id)return;
   const choices=memoryChoices.get(task.id)||new Set();
   memoryChoices.set(task.id,choices);
@@ -2393,8 +2432,23 @@ function syncAccess(){
     :portalIdentity?portalIdentity.tenant_id+' · '+labels[portalIdentity.role]:'尚未连接';
 }
 async function route(){
-  const {page,current,parts,redirect}=pageRoute();
-  if(redirect)history.replaceState(null,'',redirect);
+  const destination=pageRoute();
+  if(destination.redirect)history.replaceState(null,'',destination.redirect);
+  const hash=location.hash,identity=portalIdentity;
+  if(routeLoad?.hash===hash&&routeLoad.identity===identity)return routeLoad.pending;
+  const pending=showRoute(destination).catch(e=>{
+    if(hash===location.hash&&identity===portalIdentity)throw e;
+  });
+  const load={hash,identity,pending};
+  routeLoad=load;
+  try{
+    await pending;
+  }finally{
+    if(routeLoad===load)routeLoad=null;
+  }
+}
+async function showRoute({page,current,parts}){
+  const hash=location.hash,identity=portalIdentity;
   if(current!=='tasks'){
     stopTaskStream();
     taskDag?.reset();
@@ -2402,6 +2456,7 @@ async function route(){
     stopReplay();
     if(traceFullscreen())await setTraceFullscreen(false);
   }
+  if(hash!==location.hash||identity!==portalIdentity)return;
   if(current!=='team')portalSettings.clearSensitive();
   if(current!=='projects')portalProjects.leave();
   syncAccess();
@@ -2418,41 +2473,82 @@ async function route(){
   });
   $('evidence').hidden=true;
   evidenceView=null;
-  const preset=current==='evals'?parts[0]:null;
-  if(!preset)appliedPreset=null;
-  applyEvalPreset(preset);
-  syncEvalForm();
+  if(current!=='evals'||!parts[0])appliedPreset=null;
   activeRun=current==='runs'&&parts[0]?decodeURIComponent(parts[0]):null;
-  if(activeRun)await matrix();
-  if(current==='projects')await portalProjects.load(parts);
-  if(current==='submit')await portalTasks.loadSubmit();
-  if(current==='evolutions')await portalEvolution.load(parts);
-  if(['tools','integrations','team','platform'].includes(current))await portalSettings.load(current);
-  if(current==='analysis'){
-    portalTasks.renderAnalysisChoices();
-    await portalTasks.showAnalysis(parts[0]?decodeURIComponent(parts[0]):null);
+  await loadPage(current,parts);
+}
+async function loadTaskRoute(parts){
+  if(!parts[0])return updateTask();
+  const hash=location.hash,identity=portalIdentity,id=decodeURIComponent(parts[0]);
+  await selectTask(id);
+  if(hash===location.hash&&identity===portalIdentity&&selectedTask===id
+    &&!$('task-details').hidden&&$('evidence').hidden){
+    if(parts[1]==='events')openEvent(Number(parts[2]));
+    if(parts[1]==='quality')openTaskQuality();
   }
-  if(current==='memories')await loadMemories();
-  if(current==='loop'){
-    if(['round','build'].includes(parts[0])&&parts[1]){
-      selectedIteration=decodeURIComponent(parts[1]);
-      await updateFlow();
+}
+async function loadEvalPage(page,parts,polling){
+  const hash=location.hash,identity=portalIdentity;
+  const current=()=>hash===location.hash&&identity===portalIdentity;
+  const config=(page==='overview'&&(polling||!identity.guest))
+    ||(!polling&&!portalConfig&&portalUI.can('tenant'));
+  const prepare=!polling&&portalUI.can('eval');
+  const results=await Promise.allSettled([
+    config?loadConfig():null,
+    prepare&&['overview','evals','runs'].includes(page)?loadSuites():null,
+    prepare&&['overview','evals','loop'].includes(page)?loadVersions():null,
+    page==='runs'?loadRecentTasks():null,
+  ]);
+  if(!current())return;
+  for(const result of results){
+    if(result.status==='rejected'){
+      if(result.reason.status===401)throw result.reason;
+      error(result.reason);
     }
-    if(parts[0]==='build')$('build-evidence').scrollIntoView({block:'center'});
   }
-  if(current==='tasks'&&parts[0]){
-    const id=decodeURIComponent(parts[0]);
-    await selectTask(id);
-    if(selectedTask===id&&!$('task-details').hidden&&$('evidence').hidden){
-      if(parts[1]==='events')openEvent(Number(parts[2]));
-      if(parts[1]==='quality')openTaskQuality();
-    }
-  }else if(current==='tasks'&&selectedTask){
-    await updateTask();
+  if(page==='evals'){
+    applyEvalPreset(parts[0]);
+    syncEvalForm();
   }
-  if(current==='compare'&&parts[0]&&parts[1]){
-    await showComparison(decodeURIComponent(parts[0]),decodeURIComponent(parts[1]));
+  if(!polling&&page==='runs'&&activeRun)return matrix();
+  if(!polling&&page==='loop'&&['round','build'].includes(parts[0])&&parts[1]){
+    selectedIteration=decodeURIComponent(parts[1]);
   }
+  const comparison=!polling&&page==='compare'&&parts[0]&&parts[1]
+    ?showComparison(decodeURIComponent(parts[0]),decodeURIComponent(parts[1])):null;
+  await Promise.all([loadRuns(),comparison]);
+  if(!current()||!portalUI.can('eval')||!['overview','loop'].includes(page))return;
+  await updateFlow();
+  if(current()&&!polling&&page==='loop'&&parts[0]==='build')$('build-evidence').scrollIntoView({block:'center'});
+}
+async function loadPage(page,parts,polling=false){
+  const hash=location.hash,identity=portalIdentity;
+  const current=()=>hash===location.hash&&identity===portalIdentity;
+  if(page==='projects')return polling?portalProjects.poll(parts):portalProjects.load(parts);
+  if(page==='tasks'){
+    return Promise.all([
+      polling?updateTask():loadTaskRoute(parts),
+      loadRecentTasks(),
+      polling||!identity.guest?loadConfig():null,
+    ]);
+  }
+  if(page==='analysis'){
+    const choices=loadRecentTasks().then(()=>{if(current())portalTasks.renderAnalysisChoices()});
+    const id=parts[0]?decodeURIComponent(parts[0]):null;
+    const report=!polling||(id&&!$('analysis-page-report').dataset.report)?portalTasks.showAnalysis(id):null;
+    return Promise.all([choices,report]);
+  }
+  if(portalUI.can('eval-history')&&['overview','evals','runs','compare','loop'].includes(page)){
+    return loadEvalPage(page,parts,polling);
+  }
+  if(page==='overview'&&portalUI.can('history')&&(polling||!identity.guest))return loadConfig();
+  if(page==='versions')return loadVersions();
+  if(page==='evolutions')return polling?portalEvolution.poll():portalEvolution.load(parts);
+  if(polling)return;
+  if(page==='submit')return portalTasks.loadSubmit();
+  if(page==='memories')return loadMemories();
+  if(page==='integrations'&&!portalConfig)await loadConfig();
+  if(current()&&['tools','integrations','team','platform'].includes(page))return portalSettings.load(page);
 }
 function openEvent(seq,locate=false,revealRaw=false){
   if(replayTimer)stopReplay();
@@ -2738,56 +2834,38 @@ function resetPortalSession(){
   syncAccess();
 }
 async function loadRecentTasks(){
-  serverTasks=await data('/tasks?limit=100');
+  const identity=portalIdentity,hash=location.hash;
+  const tasks=await data('/tasks?limit=100');
+  if(identity!==portalIdentity||hash!==location.hash)return;
+  serverTasks=tasks;
   renderTaskChoices();
 }
 async function refresh(manual=false){
-  if(refreshing||(!manual&&!portalToken&&!portalIdentity&&guestChecked))return;
+  const connect=manual||!portalIdentity;
+  if(refreshing||(!connect&&routeLoad)||(!manual&&!portalToken&&!portalIdentity&&guestChecked))return;
   refreshing=true;
   try{
-    const connect=manual||!portalIdentity;
-    if(connect){
-      $('error').textContent='';
-      let identity,config;
-      if(portalToken){
-        identity=await data('/portal/whoami');
-      }else{
-        guestChecked=true;
-        config=await data('/portal/config');
-        if(!config.guest_view)return;
-        identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
-        if(!location.hash)history.replaceState(null,'','#/tasks');
-      }
-      if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
-      if(!identity.platform_admin)await loadConfig(config);
-      portalIdentity=portalIdentity||identity;
-      syncAccess();
-      displayConnection(identity.guest?'只读访客模式':identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
-      if(portalUI.can('tenant')){
-        const results=await Promise.allSettled([loadVersions(),...(portalUI.can('eval')?[loadSuites()]:[])]);
-        for(const item of results)if(item.status==='rejected')error(item.reason);
-      }
+    if(!connect){
+      const {current:page,parts}=pageRoute();
+      await loadPage(page,parts,true);
+      return;
     }
-    const {current:page,parts}=pageRoute();
-    if(portalUI.can('history')){
-      if(['overview','tasks'].includes(page)&&!connect)await loadConfig();
-      if(portalUI.can('eval-history')&&['overview','evals','runs','compare','loop'].includes(page)){
-        await loadRuns();
-        if(portalUI.can('eval')&&(page==='overview'||page==='loop'))await updateFlow();
-        else if(page==='runs')await loadRecentTasks();
-      }else if(connect||page==='tasks'||page==='analysis'){
-        await loadRecentTasks();
-      }
-      if(page==='versions'&&!connect)await loadVersions();
-      if(!connect&&page==='tasks')await updateTask();
-      if(!connect&&page==='projects')await portalProjects.poll(parts);
-      if(!connect&&page==='evolutions')await portalEvolution.poll();
-      if(!connect&&page==='analysis'){
-        portalTasks.renderAnalysisChoices();
-        if(parts[0]&&!$('analysis-page-report').dataset.report)await portalTasks.showAnalysis(decodeURIComponent(parts[0]));
-      }
+    $('error').textContent='';
+    let identity,config;
+    if(portalToken){
+      identity=await data('/portal/whoami');
+    }else{
+      guestChecked=true;
+      config=await data('/portal/config');
+      if(!config.guest_view)return;
+      identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
+      if(!location.hash)history.replaceState(null,'','#/tasks');
     }
-    if(connect)await route();
+    if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
+    portalIdentity=portalIdentity||identity;
+    if(config)await loadConfig(config);
+    displayConnection(identity.guest?'只读访客模式':identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
+    await route();
   }catch(e){
     if(!portalToken&&!portalIdentity&&(e.status===401||e.status===403))return;
     if(!portalIdentity||e.status===401){
