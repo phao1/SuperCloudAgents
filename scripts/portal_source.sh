@@ -126,9 +126,11 @@ source_port() {
 start_litellm() {
     : "${LITELLM_DB_URL:?请先启动源码模式 PostgreSQL。}"
     source_port litellm 4000
+    local config
+    config=$(gateway_config)
     DATABASE_URL="$LITELLM_DB_URL" PATH="$LITELLM_VENV/bin:$PATH" \
         PRISMA_BINARY_CACHE_DIR="$LITELLM_VENV/prisma-cache" \
-        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway
+        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway "$ROOT/deploy/litellm/$config"
     wait_service litellm "${1:-300}" "$PY" -c \
         'from urllib.request import urlopen; urlopen("http://127.0.0.1:4000/health/readiness", timeout=1).close()'
 }

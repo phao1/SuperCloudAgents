@@ -7,11 +7,13 @@ help() {
     cat <<'HELP'
 用法: bash scripts/portal_demo.sh {setup|up} [--mode docker|source]
       bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
+      bash scripts/portal_demo.sh restart-gateway
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
   up      启动本地 API 和 worker，打印网址和登录令牌
   down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
   status  查看运行模式、服务、网关连接和已注册版本
   logs    查看当前模式的服务日志
+  restart-gateway  加载更新后的模型密钥并重启网关
 也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
@@ -100,6 +102,18 @@ WRAPPER
     run "$SCA_DOCKER_BIN" compose version >/dev/null
 }
 compose() { run "$SCA_DOCKER_BIN" compose --env-file "$ROOT/.env" -f deploy/docker-compose.yml --profile gateway "$@"; }
+gateway_config() {
+    run "$PY" - <<'PY'
+from sca.gateway.configuration import model_configured
+
+print("config.yaml" if model_configured() else "history.yaml")
+PY
+}
+start_docker_gateway() {
+    local config
+    config=$(gateway_config)
+    SCA_LITELLM_CONFIG="$ROOT/deploy/litellm/$config" compose up -d --wait --no-deps "$@" litellm
+}
 load_env() {
     [[ -f .data/portal.env ]] || fail '请先运行 setup。'
     unset SCA_RUNTIME_MODE
@@ -148,9 +162,10 @@ import os
 import sys
 import urllib.request
 try:
+    token = os.environ.get("SCA_EVAL_API_TOKEN")
     request = urllib.request.Request(
         "http://127.0.0.1:8000" + sys.argv[1],
-        headers={"Authorization": "Bearer " + os.environ["SCA_EVAL_API_TOKEN"]},
+        headers={"Authorization": "Bearer " + token} if token else {},
     )
     with urllib.request.urlopen(request, timeout=10) as response:
         data = json.load(response)
@@ -270,7 +285,7 @@ up() {
         fail '请先运行 down，再启动普通模式的 Portal。'
     fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then start_stripe_sim; fi
-    start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --host 127.0.0.1 --port 8000
+    start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --no-proxy-headers --host 127.0.0.1 --port 8000
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
     for ((i=0; i<60; i++)); do
@@ -280,7 +295,7 @@ up() {
     done
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
-    printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"
+    if [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"; fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"
     else
@@ -345,6 +360,14 @@ portal.write_text("".join(f"export {key}={shlex.quote(value)}\n" for key, value 
 portal.chmod(0o600)
 PY
 }
+start_docker_services() {
+    compose up -d --wait postgres temporal
+    # LiteLLM expects its own database; never remove existing databases or volumes.
+    compose exec -T postgres psql -U sca -d postgres -v ON_ERROR_STOP=1 <<'SQL'
+SELECT 'CREATE DATABASE litellm' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'litellm')\gexec
+SQL
+    start_docker_gateway
+}
 setup_docker() {
     command -v python3.12 >/dev/null || fail '缺少依赖: python3.12'
     run python3.12 -c 'import shutil; assert shutil.disk_usage(".").free >= 15 * 1024**3, "需要至少 15 GB 可用磁盘"'
@@ -353,12 +376,7 @@ setup_docker() {
     prepare_app
     save_mode docker
     load_env
-    compose up -d --wait postgres temporal
-    # LiteLLM expects its own database; never remove existing databases or volumes.
-    compose exec -T postgres psql -U sca -d postgres -v ON_ERROR_STOP=1 <<'SQL'
-SELECT 'CREATE DATABASE litellm' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = 'litellm')\gexec
-SQL
-    compose up -d --wait
+    start_docker_services
     run .venv/bin/alembic upgrade head
     run "$SCA_DOCKER_BIN" build -t sca-sandbox:latest deploy/sandbox
     run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
@@ -413,6 +431,8 @@ case "$COMMAND" in
             [[ -f .data/portal.env ]] || fail '请先运行 setup。'
             docker_access
             save_mode docker
+            load_env
+            start_docker_services
         fi
         up;;
     down)
@@ -446,7 +466,7 @@ case "$COMMAND" in
             compose ps
         fi
         request /v1/portal/config
-        request /v1/agents/opencode/versions;;
+        if [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then request /v1/agents/opencode/versions; fi;;
     logs)
         log_files=(.data/run/api.log .data/run/worker.log)
         if [[ -f .data/run/stripe-sim.pid ]]; then log_files+=(.data/run/stripe-sim.log); fi
@@ -458,7 +478,16 @@ case "$COMMAND" in
         run tail -n 100 "${log_files[@]}";;
     restart-gateway)
         load_env
-        [[ $SCA_RUNTIME_MODE == source ]] || fail '此命令用于源码模式网关。'
-        stop litellm
-        start_litellm 80;;
+        if [[ $SCA_RUNTIME_MODE == source ]]; then
+            stop litellm
+            start_litellm 80
+        else
+            docker_access
+            start_docker_gateway --force-recreate
+            if owned worker; then
+                # The Docker worker resolves the gateway's sandbox IP on startup.
+                stop worker
+                start worker "$PY" -m sca.orchestration.worker
+            fi
+        fi;;
 esac

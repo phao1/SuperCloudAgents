@@ -63,7 +63,7 @@ services:
     environment:
       DATABASE_URL: postgresql://sca:sca@postgres:5432/litellm
     ports: ["127.0.0.1:4000:4000"]
-    volumes: ["./litellm/config.yaml:/app/config.yaml:ro"]
+    volumes: ["${SCA_LITELLM_CONFIG:-./litellm/config.yaml}:/app/config.yaml:ro"]
     mem_limit: 900m
     depends_on:
       postgres: {condition: service_healthy}

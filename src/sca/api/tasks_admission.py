@@ -7,6 +7,7 @@ from sca.kinds import builtin as _builtin_kinds
 
 _builtin_kinds.load()
 from sca.api.authz import authorize
+from sca.api.model_access import require_model
 from sca.core.errors import InvalidTaskError
 from sca.core.models import Principal, Task
 from sca.kernel.kind import get
@@ -28,6 +29,7 @@ async def submit(
     user: Annotated[Principal, Depends(authorize("submit"))],
     idempotency_key: str | None = Header(None),
 ) -> Task:
+    require_model()
     kind = get(body.kind)
     try:
         spec = kind.spec_model.model_validate(body.spec)

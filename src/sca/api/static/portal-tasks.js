@@ -280,7 +280,7 @@ const portalTasks = (() => {
   }
 
   function openTaskIs(id) {
-    return ui.can('tenant') && selectedTask === id && location.hash.startsWith('#/tasks');
+    return ui.can('history') && selectedTask === id && location.hash.startsWith('#/tasks');
   }
 
   function paths(entries) {
@@ -307,7 +307,7 @@ const portalTasks = (() => {
         rows.push(el('span', 'Linear ' + params.issue_id));
       }
     }
-    if (pr) rows.push(ui.action('刷新 PR 状态', async () => {
+    if (pr && ui.can('tenant')) rows.push(ui.action('刷新 PR 状态', async () => {
       const current = await data(taskPath(task) + '/pr');
       state.textContent = 'PR 状态 · ' + prState(current.state);
     }, $('task-extras-status')));
@@ -356,7 +356,8 @@ const portalTasks = (() => {
       ]));
     }
     const backend = task.spec.agent_backend || portalConfig?.default_agent_backend;
-    $('task-terminal-panel').hidden = backend !== 'opencode-brain' || (finishedTask(task.state) && terminalTask !== task.id);
+    $('task-terminal-panel').hidden = !ui.can('tenant') || backend !== 'opencode-brain'
+      || (finishedTask(task.state) && terminalTask !== task.id);
     $('task-terminal-start').disabled = Boolean(terminal) || finishedTask(task.state);
     $('task-terminal-start').onclick = () => void startTerminal(task);
     $('task-terminal-stop').onclick = () => stopTerminal();
@@ -453,7 +454,8 @@ const portalTasks = (() => {
   function impact(task) {
     const root = $('task-impact');
     const artifact = task.result.patch_artifact;
-    root.parentElement.hidden = task.kind !== 'coding';
+    root.parentElement.hidden = !ui.can('tenant') || task.kind !== 'coding';
+    if (root.parentElement.hidden) return;
     const key = JSON.stringify([task.id, artifact, task.result.commit]);
     if (impactSignature === key) return;
     impactSignature = key;

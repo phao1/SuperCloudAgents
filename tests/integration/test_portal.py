@@ -1,3 +1,4 @@
+import socket
 from types import SimpleNamespace
 
 import httpx
@@ -10,6 +11,15 @@ from sca.storage.local import LocalObjectStore
 pytestmark = pytest.mark.integration
 
 
+def postgres_socket_denied() -> bool:
+    try:
+        with socket.socket(socket.AF_INET):
+            return False
+    except PermissionError:
+        return True
+
+
+@pytest.mark.skipif(postgres_socket_denied(), reason="Sandbox denies PostgreSQL sockets")
 async def test_portal_and_config(api_store, tmp_path, monkeypatch):
     from sca.api import portal
     from sca.config import Settings
@@ -26,7 +36,8 @@ async def test_portal_and_config(api_store, tmp_path, monkeypatch):
     app = create_app(store=api_store, orchestrator=SimpleNamespace(),
                      object_store=LocalObjectStore(tmp_path),
                      authenticator=StaticTokenAuthenticator({'token': 'eval'}))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as c:
+    transport = httpx.ASGITransport(app=app, client=("192.0.2.1", 50000))
+    async with httpx.AsyncClient(transport=transport, base_url='http://test') as c:
         page = await c.get('/portal')
         assert page.status_code == 200 and '自演进闭环' in page.text
         architecture = await c.get('/portal/architecture')

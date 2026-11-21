@@ -5,6 +5,7 @@ from dotenv import dotenv_values
 from fastapi import HTTPException
 
 from sca.api import portal
+from sca.gateway.configuration import model_configured
 
 
 @pytest.mark.asyncio
@@ -39,16 +40,13 @@ async def test_provider_key_is_local_opt_in_and_restarts_gateway(tmp_path, monke
     assert dotenv_values(env_file)['DEEPSEEK_API_KEY'] == 'REPLACE_ME'
 
     local = SimpleNamespace(client=SimpleNamespace(host='127.0.0.1'))
+    assert model_configured() is False
     result = await portal.set_provider_key(body, local, None)
     assert result == {'saved': True, 'gateway_restarted': True}
+    assert model_configured() is True
     assert dotenv_values(env_file) == {'DEEPSEEK_API_KEY': 'sk-test-key-123', 'OTHER': 'keep'}
     assert env_file.stat().st_mode & 0o777 == 0o600
-    if mode == "docker":
-        assert commands == [('/local/docker', 'compose', '--env-file', str(env_file), '-f',
-                             str(tmp_path / 'deploy/docker-compose.yml'), '--profile', 'gateway',
-                             'up', '-d', '--no-deps', '--force-recreate', 'litellm')]
-    else:
-        assert commands == [('bash', str(tmp_path / 'scripts/portal_demo.sh'), 'restart-gateway')]
+    assert commands == [('bash', str(tmp_path / 'scripts/portal_demo.sh'), 'restart-gateway')]
     assert all('sk-test-key-123' not in arg for arg in commands[0])
 
 

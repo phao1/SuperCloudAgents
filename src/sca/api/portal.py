@@ -17,12 +17,13 @@ from temporalio.service import RPCError
 
 from sca.admission.order import tenant_slot_limit
 from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_PATH, PROMPT_SUITE
-from sca.api.authz import ForbiddenError, authorize, platform_admin_store, principal
+from sca.api.authz import ForbiddenError, GuestPrincipal, authorize, platform_admin_store, principal
 from sca.api.evals import can_rescore
 from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
 from sca.db.schema import plans, tasks, tenants, usage_daily
+from sca.gateway.configuration import model_configured
 from sca.gateway.health import ProviderHealth
 
 router = APIRouter()
@@ -101,7 +102,10 @@ async def temporal_reachable(request: Request) -> bool:
 
 @router.get("/v1/portal/config")
 async def config(request: Request,
-                 user: Annotated[Principal, Depends(authorize("read"))]) -> dict:
+                 user: Annotated[Principal, Depends(authorize("read", guest=True))]) -> dict:
+    configured = model_configured()
+    if isinstance(user, GuestPrincipal):
+        return {"guest_view": True, "guest_tenant": user.tenant_id, "model_configured": configured}
     settings = get_settings()
     (gateway, models), temporal = await asyncio.gather(gateway_models(), temporal_reachable(request))
     provider_health = ProviderHealth(settings.data_dir).read()
@@ -113,7 +117,8 @@ async def config(request: Request,
     else:
         backends.extend(["opencode", "opencode-brain"])
     backends.extend(["pi", "dsh"])
-    return {"agent_backends": backends, "default_model": settings.default_model,
+    return {"guest_view": False, "model_configured": configured,
+            "agent_backends": backends, "default_model": settings.default_model,
             "default_agent_backend": settings.agent_backend,
             "models": models, "sandbox_driver": settings.sandbox_driver,
             "state_transport": settings.state_transport, "secret_provider": settings.secret_provider,
@@ -230,12 +235,7 @@ def _source_config(settings: Settings) -> dict:
 
 
 def _restart_gateway_command(config: str | None) -> list[str]:
-    if not config:
+    if not config or (os.environ.get("SCA_RUNTIME_MODE") != "source" and not os.environ.get("SCA_DOCKER_BIN")):
         return []
     root = Path(config).parent
-    if os.environ.get("SCA_RUNTIME_MODE") == "source":
-        return ["bash", str(root / "scripts/portal_demo.sh"), "restart-gateway"]
-    if docker := os.environ.get("SCA_DOCKER_BIN"):
-        return [docker, "compose", "--env-file", config, "-f", str(root / "deploy/docker-compose.yml"),
-                "--profile", "gateway", "up", "-d", "--no-deps", "--force-recreate", "litellm"]
-    return []
+    return ["bash", str(root / "scripts/portal_demo.sh"), "restart-gateway"]

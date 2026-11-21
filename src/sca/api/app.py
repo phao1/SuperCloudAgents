@@ -237,6 +237,11 @@ def create_app(
     from sca.api.payments import register_payments
 
     register_payments(app, settings, default_store=store is None)
+
+    # History without a model credential
+    from sca.api.model_access import ModelNotConfiguredError, model_not_configured
+
+    app.add_exception_handler(ModelNotConfiguredError, model_not_configured)
     return app
 
 

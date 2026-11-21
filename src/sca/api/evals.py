@@ -15,6 +15,8 @@ from temporalio.service import RPCError
 
 from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_SUITE, version_commit
 from sca.api.authz import ForbiddenError, authorize, principal
+from sca.api.guest_history import history_payload
+from sca.api.model_access import require_model
 from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.schema import eval_runs
@@ -87,7 +89,7 @@ def summary(run: dict) -> dict:
 
 
 @router.get("/suites")
-async def suites(user: Annotated[Principal, Depends(authorize("read"))]) -> list[dict]:
+async def suites(user: Annotated[Principal, Depends(authorize("read", guest=True))]) -> list[dict]:
     require_eval(user)
     root = Path(getattr(get_settings(), "eval_suites_dir", Path("evals")))
 
@@ -106,7 +108,7 @@ async def suites(user: Annotated[Principal, Depends(authorize("read"))]) -> list
                            "cases": [case["id"] for case in suite["cases"]]})
         return result
 
-    return await asyncio.to_thread(listing)
+    return history_payload(user, await asyncio.to_thread(listing))
 
 
 @router.post("/runs", status_code=201)
@@ -120,6 +122,7 @@ async def enqueue_run(
     body: RunRequest, request: Request, user: Principal, *,
     expected_suite_hash: str | None = None, source_build_id: UUID | None = None,
 ) -> dict:
+    require_model()
     path = suite_path(body.suite)
     try:
         suite = await asyncio.to_thread(load_suite, path)
@@ -168,7 +171,7 @@ async def enqueue_run(
 
 
 @router.get("/runs")
-async def runs(request: Request, user: Annotated[Principal, Depends(authorize("read"))],
+async def runs(request: Request, user: Annotated[Principal, Depends(authorize("read", guest=True))],
                limit: Annotated[int, Query(ge=1, le=200)] = 50) -> list[dict]:
     require_eval(user)
     store = request.app.state.store.for_tenant("eval")
@@ -176,23 +179,23 @@ async def runs(request: Request, user: Annotated[Principal, Depends(authorize("r
         await session.execute(text("SELECT set_config('app.tenant_id', 'eval', true)"))
         ids = (await session.execute(select(eval_runs.c.id).where(
             eval_runs.c.tenant_id == "eval").order_by(eval_runs.c.created_at.desc()).limit(limit))).scalars().all()
-    return [summary(await read_run(request, run_id)) for run_id in ids]
+    return history_payload(user, [summary(await read_run(request, run_id)) for run_id in ids])
 
 
 @router.get("/runs/{run_id}")
 async def detail(run_id: UUID, request: Request,
-                 user: Annotated[Principal, Depends(authorize("read"))]) -> dict:
+                 user: Annotated[Principal, Depends(authorize("read", guest=True))]) -> dict:
     require_eval(user)
     run = await read_run(request, run_id)
-    return {**summary(run), "results": run["results"]}
+    return history_payload(user, {**summary(run), "results": run["results"]})
 
 
 @router.get("/compare")
 async def comparison(a: UUID, b: UUID, request: Request,
-                     user: Annotated[Principal, Depends(authorize("read"))]) -> dict:
+                     user: Annotated[Principal, Depends(authorize("read", guest=True))]) -> dict:
     require_eval(user)
     try:
-        return compare(await read_run(request, a), await read_run(request, b))
+        return history_payload(user, compare(await read_run(request, a), await read_run(request, b)))
     except ValueError:
         raise HTTPException(422, "Runs have different suite contents") from None
 

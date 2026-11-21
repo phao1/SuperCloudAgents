@@ -18,7 +18,7 @@ from sca.storage.local import LocalObjectStore
 @pytest.fixture
 async def portal_client(tmp_path, monkeypatch):
     settings = Settings(_env_file=None, data_dir=tmp_path, tenant_max_queued=12,
-                        platform_admin_token="fixture-platform")
+                        platform_admin_token="fixture-platform", guest_view="off")
     monkeypatch.setattr("sca.api.app.get_settings", lambda: settings)
 
     async def authenticate(token):

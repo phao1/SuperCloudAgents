@@ -70,13 +70,13 @@ def demo(tmp_path, monkeypatch):
     shutil.copyfile(SCRIPT, script)
     (scripts / "portal_source.sh").write_text(
         'find_postgres() { :; }\nsource_port() { :; }\nload_source_env() { :; }\n'
-        'start_source_services() { echo "started native services"; }\n'
+        'start_source_services() { gateway_config > source-gateway-config; }\n'
         'stop_source_services() { echo "stopped native services"; }\n'
         'up() { load_env; echo "started $SCA_RUNTIME_MODE"; }\n'
     )
     portal_env = tmp_path / ".data" / "portal.env"
     portal_env.parent.mkdir()
-    portal_env.touch()
+    portal_env.write_text(f"export SCA_PORTAL_LOCAL_CONFIG={shlex.quote(str(tmp_path / '.env'))}\n")
     (tmp_path / ".env").touch()
     (tmp_path / ".venv" / "bin").mkdir(parents=True)
     python = tmp_path / ".venv" / "bin" / "python"
@@ -87,6 +87,8 @@ def demo(tmp_path, monkeypatch):
     for name, body in {
         "timeout": 'shift\nexec "$@"',
         "docker": 'printf "%s\n" "$*" >> docker-calls\n'
+                  'if [ -n "${SCA_LITELLM_CONFIG:-}" ]; then '
+                  'printf "%s\n" "${SCA_LITELLM_CONFIG##*/}" > docker-gateway-config; fi\n'
                   'if [ "$1" = info ]; then exit "${DEMO_INFO_STATUS:-0}"; fi\n'
                   'exit "${DEMO_COMPOSE_STATUS:-0}"',
         "sg": "exit 1",
@@ -143,3 +145,16 @@ def test_invalid_mode_is_rejected(demo, monkeypatch):
     monkeypatch.setenv("SCA_RUNTIME_MODE", "other")
     assert run("up").returncode != 0
     assert run("up", "--mode", "other").returncode == 2
+
+
+@pytest.mark.parametrize("mode", ["docker", "source"])
+def test_gateway_starts_with_and_without_a_model_key(demo, mode):
+    run, portal_env = demo
+    root = portal_env.parents[1]
+    selected = root / f"{mode}-gateway-config"
+    for entry, expected in (("", "history.yaml"), ("DEEPSEEK_API_KEY=REPLACE_ME\n", "history.yaml"),
+                            ("DEEPSEEK_API_KEY=fixture-configured\n", "config.yaml")):
+        (root / ".env").write_text(entry)
+        result = run("up", "--mode", mode)
+        assert result.returncode == 0, result.stderr
+        assert selected.read_text().strip() == expected

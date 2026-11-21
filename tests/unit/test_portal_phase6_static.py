@@ -128,6 +128,10 @@ for (const role of ['viewer','member','admin']){
 assert(portalUI.can('eval-admin',{tenant_id:'eval',role:'admin'}));
 assert(portalUI.can('platform',{platform_admin:true}));
 assert(!portalUI.can('tenant',{platform_admin:true}));
+const guest={tenant_id:'eval',role:'viewer',guest:true};
+assert(portalUI.can('history',guest));
+assert(portalUI.can('eval-history',guest));
+assert(['tenant','member','admin','eval','eval-admin','platform'].every(role=>!portalUI.can(role,guest)));
 assert.deepEqual(portalUI.backendChoices({agent_backends:['codex','dsh'],default_agent_backend:'dsh'}),
   [['','默认 · DeepSeek Harness'],['codex','Codex'],['dsh','DeepSeek Harness']]);
 assert.deepEqual(portalEvolution.lineChanges('相同\n旧行\n下文','相同\n新行\n下文'),
@@ -150,6 +154,84 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     path.write_text(harness + "\n".join((STATIC / file).read_text() for file in scripts) + checks)
     result = subprocess.run([node, str(path)], capture_output=True, text=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
+
+
+def test_portal_guest_history_bootstrap(tmp_path):
+    source = (STATIC / "portal.html").read_text()
+    assert '只读访客模式 · <a href="#/overview">登录</a>' in source
+    assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
+    assert 'id="task-message-form" class="task-message-form stack" data-access="member" hidden' in source
+    assert "headers:authHeaders(),signal:stream.controller.signal" in source
+
+    node = shutil.which("node") or Path.home() / ".local/bin/node"
+    if not Path(node).exists():
+        pytest.skip("Node is unavailable")
+    script = source.split('<script>')[1].split('</script>')[0]
+    sections = [
+        ("function authHeaders()", "function options("),
+        ("async function loadConfig(", "async function loadSuites("),
+        ("const pages=", "async function route("),
+        ("async function loadRecentTasks(", "$('refresh').onclick="),
+    ]
+    harness = r'''
+const assert=require('node:assert/strict');
+const elements=new Map(),location={hash:''},history={replaceState:(a,b,hash)=>{location.hash=hash}};
+function $(id){
+  if(!elements.has(id))elements.set(id,{hidden:true,textContent:'',querySelector:()=>$('save')});
+  return elements.get(id);
+}
+const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
+const document={querySelectorAll:()=>controls};
+const localStorage={removeItem:()=>{}};
+let portalToken='',portalConfig=null,portalIdentity=null,guestChecked=false,refreshing=false;
+let canRescore=false,savingKey=false,serverTasks=[],routeCount=0;
+const calls=[];
+const json=JSON.stringify;
+function error(e){throw e}
+function displayConnection(){}
+function updateRescoreButton(){}
+function options(){}
+function renderProviderError(){}
+function renderTaskChoices(){}
+async function loadVersions(){}
+async function route(){routeCount++}
+function resetPortalSession(){portalIdentity=null}
+global.fetch=async (path,request)=>{
+  calls.push([path,request.headers.Authorization]);
+  if(path==='/v1/portal/whoami')return {ok:true,json:async()=>({tenant_id:'customer',role:'member'})};
+  if(path==='/v1/portal/config')return {ok:true,json:async()=>request.headers.Authorization
+    ?{guest_view:false,model_configured:true,models:[],agent_backends:[]}
+    :{guest_view:true,guest_tenant:'eval',model_configured:false}};
+  return {ok:true,json:async()=>[]};
+};
+'''
+    checks = r'''
+(async()=>{
+  await refresh();
+  assert.deepEqual(calls,[['/v1/portal/config',undefined],['/v1/tasks?limit=100',undefined]]);
+  assert.equal(pageRoute().current,'tasks');
+  assert.equal(routeCount,1);
+  assert.equal($('guest-view-banner').hidden,false);
+  assert.equal($('model-not-configured').hidden,false);
+  assert.deepEqual(controls.map(control=>control.hidden),[false,true,true]);
+  await assert.rejects(api('/tasks',{}),/请先登录/);
+  assert.equal(calls.length,2);
+
+  portalToken='fixture-member';
+  await refresh(true);
+  assert.deepEqual(calls.slice(2),[
+    ['/v1/portal/whoami','Bearer fixture-member'],['/v1/portal/config','Bearer fixture-member'],
+    ['/v1/tasks?limit=100','Bearer fixture-member'],
+  ]);
+  assert.equal($('guest-view-banner').hidden,true);
+  assert.equal($('model-not-configured').hidden,true);
+  assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
+})().catch(error=>{console.error(error);process.exitCode=1});
+'''
+    snippets = "\n".join(script[script.index(start):script.index(end)] for start, end in sections)
+    path = tmp_path / "guest.cjs"
+    path.write_text(harness + (STATIC / "portal-ui.js").read_text() + snippets + checks)
+    subprocess.run([str(node), str(path)], check=True, timeout=20)
 
 
 def test_portal_phase6_browser_submission():
