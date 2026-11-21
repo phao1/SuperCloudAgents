@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # --------------------------------------------------------------------------- tasks
 
@@ -34,7 +34,9 @@ ALLOWED_TRANSITIONS: dict[TaskState, frozenset[TaskState]] = {
     TaskState.PROVISIONING: frozenset(
         {TaskState.RUNNING, TaskState.PAUSED, TaskState.FAILED, TaskState.CANCELLED}
     ),
-    TaskState.RUNNING: frozenset({TaskState.VERIFYING, TaskState.FAILED, TaskState.CANCELLED}),
+    TaskState.RUNNING: frozenset(
+        {TaskState.VERIFYING, TaskState.PAUSED, TaskState.FAILED, TaskState.CANCELLED}
+    ),
     TaskState.VERIFYING: frozenset(
         {
             TaskState.RUNNING,
@@ -280,3 +282,33 @@ class RepoCredential(BaseModel):
     username: str = Field(repr=False)
     password: str = Field(repr=False)
     expires_at: datetime | None = None
+
+
+# Task interjection
+MessageMode = Literal["queue", "interrupt"]
+MessageStatus = Literal["pending", "delivered", "applied"]
+
+
+class TaskMessageInput(BaseModel):
+    text: str = Field(min_length=1, max_length=4000)
+    mode: MessageMode = "queue"
+
+    @field_validator("text")
+    @classmethod
+    def validate_text(cls, text: str) -> str:
+        if not text.strip() or "\x00" in text:
+            raise ValueError("请输入有效的插话内容")
+        return text
+
+
+class TaskMessage(BaseModel):
+    id: UUID
+    task_id: UUID
+    seq: int
+    text: str
+    mode: MessageMode
+    status: MessageStatus
+    actor: str
+    created_at: datetime
+    turn: int | None
+    plan_attempt: int | None

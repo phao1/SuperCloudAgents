@@ -27,13 +27,22 @@ async def stream_exec(
         "os.execvp(sys.argv[2],sys.argv[2:])"
     )
     args = command(wrapper, marker)
-    try:
-        proc = await asyncio.create_subprocess_exec(
+    spawn = asyncio.create_task(
+        asyncio.create_subprocess_exec(
             *args,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+    )
+    cancelled = False
+    try:
+        try:
+            proc = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # Keep the exec handle so startup cancellation can kill the sandbox process too.
+            proc = await spawn
+            cancelled = True
     except OSError as exc:
         raise SandboxError(str(exc)) from exc
 
@@ -109,6 +118,8 @@ async def stream_process(
         return None if deadline is None else max(0, deadline - asyncio.get_running_loop().time())
 
     try:
+        if cancelled:
+            raise asyncio.CancelledError
         try:
             ends = 0
             while ends < 2:

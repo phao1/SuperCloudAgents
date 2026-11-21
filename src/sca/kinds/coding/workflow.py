@@ -24,6 +24,7 @@ from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
     from sca.intents.base import TICKET_TYPES
+    from sca.kernel.interjection import MESSAGES_PENDING, Guidance, TurnInterrupted, with_guidance
     from sca.kernel.workflow import TaskWorkflow
     from sca.kinds.coding.activities import (
         SCM_ATTEMPTS,
@@ -35,8 +36,6 @@ with workflow.unsafe.imports_passed_through():
         ScmPhase,
         SetStateInput,
         StepInput,
-        TurnInput,
-        TurnResult,
         VerifyResult,
         WorkspaceInfo,
     )
@@ -117,19 +116,28 @@ class CodingTaskWorkflow(TaskWorkflow):
 
     # SCM
     async def _set_state(self, task_id: str, state: str, reason: str | None = None,
-                         *, model_provider_error: dict | None = None) -> None:
-        if self._scm_review and state in {"SUCCEEDED", "CANCELLED"}:
-            await self._sync_scm(task_id, "approve" if state == "SUCCEEDED" else "reject")
+                         *, model_provider_error: dict | None = None,
+                         wait_for_messages: bool = False) -> bool:
+        decision = {"SUCCEEDED": "approve", "CANCELLED": "reject"}.get(state)
+        if self._scm_review and decision and not wait_for_messages:
+            await self._sync_scm(task_id, decision)
         # Earlier histories return None from set_state and need no further activity.
         enabled = await workflow.execute_activity(
-            "set_state", SetStateInput(task_id, state, reason, model_provider_error), **_QUICK,
+            "set_state", SetStateInput(task_id, state, reason, model_provider_error, wait_for_messages),
+            **_QUICK,
         )
+        if enabled == MESSAGES_PENDING:
+            return False
+        # The database rejects approval under the task lock if guidance is waiting.
+        if self._scm_review and decision and wait_for_messages:
+            await self._sync_scm(task_id, decision)
         if state == "AWAITING_REVIEW":
             self._scm_review = bool(enabled)
             if enabled:
                 await self._sync_scm(task_id, "review")
         elif enabled and state in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             await self._sync_scm(task_id, "terminal")
+        return True
 
     async def _finish(self, task_id: str, state: str, reason: str,
                       *, model_provider_error: dict | None = None) -> None:
@@ -166,6 +174,8 @@ class CodingTaskWorkflow(TaskWorkflow):
         return await super()._run(task_id)
 
     async def _run_best_of(self, task_id: str, spec: dict) -> str:
+        if spec.get("_user_interjection"):
+            self._interjections.enable()
         self._admission = spec.get("_admission", False)
         await self._acquire_slot(task_id)
         await self._set_state(task_id, "PROVISIONING")
@@ -245,6 +255,10 @@ class CodingTaskWorkflow(TaskWorkflow):
         if passed and spec.get("ci") is not None:
             passed = (await self._extension("coding.after_verify", task_id, spec, turn))["passed"]
         while True:
+            if self._interjections.pending:
+                turn, passed, session = await self._revise_best_of(
+                    task_id, spec, turn, session, None, intents,
+                )
             await workflow.execute_activity(
                 "coding.publish", PublishInput(task_id, turn, passed),
                 start_to_close_timeout=timedelta(minutes=5), retry_policy=_retry(3),
@@ -260,21 +274,20 @@ class CodingTaskWorkflow(TaskWorkflow):
             await self._set_state(task_id, "AWAITING_REVIEW")
             if spec.get("auto_finish"):
                 state = "SUCCEEDED" if passed else "FAILED"
-                await self._set_state(task_id, state, None if passed else "verification failed")
-                return state
+                if await self._complete(task_id, state, None if passed else "verification failed"):
+                    return state
+                continue
             if self._sandbox_up:
                 try:
                     await workflow.wait_condition(
-                        lambda: bool(self._reviews),
+                        self._review_ready,
                         timeout=timedelta(seconds=spec.get("review_idle_release_s", 600)),
                     )
                 except TimeoutError:
                     await self._release_sandbox(task_id, turn)
-            await workflow.wait_condition(lambda: bool(self._reviews))
-            decision, feedback = self._reviews.pop(0)
-            self._reviews.clear()
-            if decision == "approve":
-                await self._set_state(task_id, "SUCCEEDED")
+            await workflow.wait_condition(self._review_ready)
+            decision, feedback = self._next_review()
+            if decision == "approve" and await self._complete(task_id, "SUCCEEDED"):
                 if spec.get("memory_enabled"):
                     try:
                         await workflow.execute_activity(
@@ -297,7 +310,8 @@ class CodingTaskWorkflow(TaskWorkflow):
         )
         if session is None:
             prompt += "\n\nOriginal task:\n" + spec["instruction"]
-        for fix in range(spec["max_fix_attempts"] + 1):
+        fix, limit = 0, spec["max_fix_attempts"]
+        while True:
             if self._pause_requested:
                 await self._release_sandbox(task_id, turn)
                 await self._set_state(task_id, "PAUSED")
@@ -306,17 +320,21 @@ class CodingTaskWorkflow(TaskWorkflow):
             await self._restore_sandbox(task_id, turn)
             await self._set_state(task_id, "RUNNING")
             turn += 1
-            response = await workflow.execute_activity(
-                "run_agent_turn", TurnInput(task_id, turn, prompt, session), result_type=TurnResult,
-                start_to_close_timeout=timedelta(seconds=spec["turn_timeout_s"] + 60),
-                heartbeat_timeout=timedelta(seconds=spec.get("turn_heartbeat_timeout_s", 120)),
-                retry_policy=_retry(2),
-            )
-            session = response.session_id
+            messages = await self._interjections.deliver(task_id, turn)
+            interrupted = False
+            try:
+                response = await self._run_agent_turn(task_id, spec, turn, prompt, session, messages)
+                session = response.session_id
+            except TurnInterrupted:
+                interrupted = True
             await workflow.execute_activity(
                 "coding.checkpoint_workspace", StepInput(task_id, turn), result_type=CheckpointResult,
                 start_to_close_timeout=timedelta(minutes=2), retry_policy=_retry(3),
             )
+            if interrupted:
+                continue
+            if messages and not response.skipped:
+                await self._interjections.apply(task_id, messages)
             await self._check_budget(task_id, turn)
             await self._set_state(task_id, "VERIFYING")
             verify_steps = ["coding.run_verification", "verify_intents"] if intents else ["coding.run_verification"]
@@ -332,38 +350,51 @@ class CodingTaskWorkflow(TaskWorkflow):
             if passed and spec.get("ci") is not None:
                 ci = await self._extension("coding.after_verify", task_id, spec, turn)
                 passed, prompt = ci["passed"], ci["prompt"]
-            elif not passed and fix < spec["max_fix_attempts"]:
+            elif not passed and fix < limit:
                 prompt = await workflow.execute_activity(
                     "render_fix_prompt",
                     args=[spec, next(r.exit_code for r in results if not r.passed),
                           "\n".join(r.output_tail for r in results)], **_QUICK,
                 )
-            if passed or fix == spec["max_fix_attempts"]:
+            if passed or fix == limit:
                 return turn, passed, session
-        raise AssertionError("No revision turn ran")
+            fix += 1
+
+    # Task interjection
+
+    def _route_interjections(self, name: str | None) -> bool:
+        return name == "coding.before_turn"
 
 
 @workflow.defn(name="coding.before_turn")
 class CodingBeforeTurn(TaskWorkflow):
     @workflow.run
     async def run(self, task_id: str, spec: dict) -> dict:
+        if spec.get("_user_interjection"):
+            self._interjections.enable()
         self._admission = spec.get("_admission", False)
         turn_timeout = timedelta(seconds=spec["turn_timeout_s"] + 60)
         subtasks = spec.get("subtasks", [])
         shared_paths = spec.get("shared_paths", [])
+        guidance: list[Guidance] = []
         if spec.get("plan") == "auto":
             await self._set_state(task_id, "RUNNING")
             attempt, feedback = 0, None
             while True:
                 attempt += 1
+                messages = await self._interjections.deliver(task_id, attempt, planning=True)
                 try:
-                    plan = await workflow.execute_activity(
+                    plan = await self._interjections.run_activity(
                         "coding.plan_task",
-                        PlanningInput(task_id, attempt, feedback),
+                        PlanningInput(task_id, attempt, feedback,
+                                      [message.text for message in [*guidance, *messages]],
+                                      self._interjections.enabled),
                         start_to_close_timeout=turn_timeout + timedelta(minutes=15),
                         heartbeat_timeout=timedelta(minutes=5),
                         retry_policy=_NO_RETRY,
                     )
+                except TurnInterrupted:
+                    continue
                 except ActivityError as exc:
                     if patched_provider_account_error(exc):
                         raise
@@ -373,6 +404,11 @@ class CodingBeforeTurn(TaskWorkflow):
                         **_QUICK,
                     )
                     plan = None
+                if plan:
+                    await self._interjections.apply(task_id, messages)
+                    guidance.extend(messages)
+                    if self._interjections.pending:
+                        continue
                 if not plan or not plan["split"]:
                     break
                 if spec.get("plan_review"):
@@ -381,8 +417,11 @@ class CodingBeforeTurn(TaskWorkflow):
                     if self._admission:
                         await workflow.execute_activity("release_slot", task_id, **_QUICK)
                     await self._set_state(task_id, "AWAITING_REVIEW")
-                    await workflow.wait_condition(lambda: bool(self._reviews))
-                    decision, feedback = self._reviews.pop(0)
+                    await workflow.wait_condition(self._review_ready)
+                    if self._interjections.pending:
+                        decision, feedback = self._next_review()
+                    else:
+                        decision, feedback = self._reviews.pop(0)
                     if decision == "reject":
                         await self._set_state(task_id, "CANCELLED", feedback)
                         return {"cancelled": True}
@@ -395,6 +434,10 @@ class CodingBeforeTurn(TaskWorkflow):
                 break
         statuses = []
         if subtasks:
+            if guidance:
+                spec = {**spec, "_context_notes": with_guidance(
+                    spec.get("_context_notes", ""), [message.text for message in guidance],
+                )}
             await workflow.execute_activity(
                 "coding.prepare_mirror",
                 task_id,
@@ -445,6 +488,9 @@ class CodingBeforeTurn(TaskWorkflow):
         return {
             "skip_turn": bool(subtasks),
             "unresolved": [r for r in statuses if r["status"] not in MERGED_STATUSES],
+            **({"applied_messages": self._interjections.applied_ids, "guidance": [
+                message.text for message in guidance
+            ]} if guidance else {}),
         }
 
 

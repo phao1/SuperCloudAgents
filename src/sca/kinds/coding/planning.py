@@ -18,6 +18,7 @@ from sca.codegraph.index import CodeIndex, analyze_impact
 from sca.codegraph.repository import index_commit
 from sca.core.errors import WorkspaceError
 from sca.core.models import EventType
+from sca.kernel.interjection import with_guidance
 from sca.kinds.coding.activities import CodingActivities, TurnInput
 from sca.kinds.coding.prompts import planning_prompt
 from sca.kinds.coding.spec import SubtaskSpec, path_scope, subtask_order, validate_shared_paths
@@ -120,6 +121,12 @@ class PlanningActivities:
 
     @activity.defn(name="coding.plan_task")
     async def plan_task(self, inp: PlanningInput) -> dict | None:
+        if inp.interjectible:
+            async with self.acts._turn_heartbeats(interjectible=True):
+                return await self._plan_task(inp)
+        return await self._plan_task(inp)
+
+    async def _plan_task(self, inp: PlanningInput) -> dict | None:
         acts = self.acts
         await acts.store.append_event(
             inp.task_id,
@@ -161,18 +168,15 @@ class PlanningActivities:
                 },
             )
             sandbox_id = await child.create_sandbox(inp.task_id)
+            prompt = planning_prompt(spec.instruction, inp.feedback, spec.prompt_version)
+            prompt += "\n" + "\n".join([
+                _PLAN_DEPENDENCY_GUIDANCE,
+                context,
+                *task.result.get("intents", {}).get("notes", []),
+                task.result.get("memory_note", ""),
+            ])
             await child.run_agent_turn(
-                TurnInput(
-                    inp.task_id,
-                    0,
-                    planning_prompt(spec.instruction, inp.feedback, spec.prompt_version)
-                    + "\n" + "\n".join([
-                        _PLAN_DEPENDENCY_GUIDANCE,
-                        context,
-                        *task.result.get("intents", {}).get("notes", []),
-                        task.result.get("memory_note", ""),
-                    ]),
-                )
+                TurnInput(inp.task_id, 0, with_guidance(prompt, inp.guidance))
             )
             exit_event, output = await child._run(
                 sandbox_id,

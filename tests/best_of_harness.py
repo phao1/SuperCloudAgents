@@ -66,7 +66,10 @@ class FakeStore:
             raise NotFoundError("Task not found")
         return self.task.model_copy(deep=True)
 
-    async def set_state(self, task_id, state, reason=None) -> Task:
+    async def deliver_task_messages(self, task_id: str, turn: int, *, planning: bool) -> list:
+        return []
+
+    async def set_state(self, task_id, state, reason=None, *, wait_for_messages=False) -> Task:
         previous = self.task.state
         if previous != state:
             assert can_transition(previous, state), (previous, state)

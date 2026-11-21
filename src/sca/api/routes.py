@@ -14,7 +14,17 @@ _builtin_kinds.load()
 from sca.api.authz import authorize
 from sca.api.terminal import router as terminal_router
 from sca.core.errors import ConflictError, InvalidTaskError, NotFoundError
-from sca.core.models import TERMINAL_STATES, Artifact, Event, Principal, Review, Task, TaskState
+from sca.core.models import (
+    TERMINAL_STATES,
+    Artifact,
+    Event,
+    Principal,
+    Review,
+    Task,
+    TaskMessage,
+    TaskMessageInput,
+    TaskState,
+)
 from sca.kernel.kind import all as all_kinds
 from sca.kernel.kind import get
 from sca.kinds.coding.best_of import CHOSEN_KEY, PLAN_KEY, SELECT_DECISION_PREFIX, candidate_key
@@ -409,3 +419,26 @@ async def select_best_of(
         str(task_id), f"{SELECT_DECISION_PREFIX}{body.attempt}", user.subject,
     )
     return body
+
+
+# Task interjection
+@router.post("/tasks/{task_id}/messages", status_code=201)
+async def send_task_message(
+    task_id: UUID,
+    body: TaskMessageInput,
+    request: Request,
+    user: Annotated[Principal, Depends(authorize("task-message"))],
+) -> TaskMessage:
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    message = await store.add_task_message(task_id, body, user.subject)
+    await request.app.state.orchestrator.submit_task_message(str(task_id), str(message.id), body.mode)
+    return message
+
+
+@router.get("/tasks/{task_id}/messages")
+async def list_task_messages(
+    task_id: UUID,
+    request: Request,
+    user: Annotated[Principal, Depends(authorize("read"))],
+) -> list[TaskMessage]:
+    return await request.app.state.store.for_tenant(user.tenant_id).list_task_messages(task_id)

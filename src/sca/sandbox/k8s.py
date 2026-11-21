@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from collections.abc import AsyncIterator
+from contextlib import aclosing
 from ipaddress import ip_network
 from pathlib import Path, PurePosixPath
 from typing import Literal
@@ -818,8 +819,10 @@ class K8sSandboxProvider:
         async def cleanup(script, marker):
             await self._cli("exec", sandbox_id, "--", "python3", "-c", script, marker, check=False)
 
-        async for event in stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s):
-            yield event
+        stream = stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+        async with aclosing(stream):
+            async for event in stream:
+                yield event
 
     async def upload(self, sandbox_id: str, target_dir: str, archive: AsyncIterator[bytes]) -> None:
         await self._cli("exec", sandbox_id, "--", "mkdir", "-p", "--", target_dir)

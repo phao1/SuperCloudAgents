@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 from sca.core.errors import AgentTurnError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import (
     AgentContext,
     AgentEvent,
@@ -65,13 +65,15 @@ class FakeBackend:
         if script is not None:
             output = ""
             result = None
-            async for event in sandbox.exec(
+            stream = sandbox.exec(
                 sandbox_id, ["bash", "-lc", script], workdir=ctx.workdir, timeout_s=timeout_s
-            ):
-                if isinstance(event, ExecExit):
-                    result = event
-                else:
-                    output = tail(output + event.text + "\n")
+            )
+            async with closing_stream(stream):
+                async for event in stream:
+                    if isinstance(event, ExecExit):
+                        result = event
+                    else:
+                        output = tail(output + event.text + "\n")
             if result is None or result.timed_out:
                 raise AgentTurnError("Fake script timed out or did not exit")
             yield AgentEvent(

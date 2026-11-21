@@ -719,6 +719,18 @@ body[data-trace-expanded] { overflow: hidden; }
           </div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
+          <form id="task-message-form" class="task-message-form stack">
+            <fieldset id="task-message-controls" class="stack" disabled>
+              <label for="task-message-text">插话：给正在运行的任务补充要求</label>
+              <textarea id="task-message-text" rows="2" maxlength="4000" required
+                        placeholder="回车发送，Shift + 回车换行"></textarea>
+              <div class="form-actions">
+                <label class="portal-check"><input id="task-message-interrupt" type="checkbox">立即打断当前轮</label>
+                <button type="submit" class="primary">发送</button>
+              </div>
+            </fieldset>
+            <p id="task-message-status" class="status-text portal-message" role="status"></p>
+          </form>
           <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
         </div>
       </div>
@@ -1286,7 +1298,12 @@ Object.assign(eventLabels,{
   'champion.applied':'已应用冠军',
   'best_of.attempt_completed':'候选尝试已完成',
   'best_of.selected':'候选已选中',
+  'user.message':'用户插话',
+  'user.message.delivered':'插话已送达',
+  'user.message.applied':'插话轮次已完成',
+  'agent.turn_interrupted':'轮次已打断',
 });
+const taskMessageStatus={pending:'待送达',delivered:'已送达',applied:'已应用'};
 
 function finishedTask(state){return ['SUCCEEDED','FAILED','CANCELLED'].includes(state)}
 
@@ -1535,6 +1552,10 @@ async function streamTask(taskId){
         renderTaskState(currentTask);
         portalTasks.render(currentTask,taskEvents);
         renderArchitecture(currentTask);
+        if(batch.some(event=>event.type.startsWith('user.message'))){
+          renderTimeline();
+          renderedEventCursor=eventCursor;
+        }
       }
     }
   }catch{
@@ -1548,6 +1569,8 @@ function renderTimeline(){
   const root=$('timeline'),expanded=new Set([...root.querySelectorAll('details[open]')].map(n=>n.dataset.seq));
   root.replaceChildren();
   const selected=taskTimeline?.selectedSeq();
+  const messageStates=new Map(taskEvents.filter(event=>event.type.startsWith('user.message'))
+    .map(event=>[event.payload.message_id,event.payload.status]));
   let group=null,current=null,summary=null,usage={},start=null,turn=0;
   for(const event of taskEvents){
     const p=event.payload||{};
@@ -1567,15 +1590,20 @@ function renderTimeline(){
       summary.textContent='输入 '+(usage.input_tokens||0)+' · 输出 '+(usage.output_tokens||0)+' · 缓存 '+(usage.cached_input_tokens||0)+' · 推理 '+(usage.reasoning_tokens||0)+' Token · '+money(usage.cost)
     }
     const failed=p.passed===false||p.exit_code>0||p.status==='failed', active=event.seq===selected;
-    const card=el('details',undefined,'event-card'+(failed?' bad':'')+(active?' highlighted':''));
+    const guidance=event.type==='user.message';
+    const card=el('details',undefined,'event-card'+(guidance?' task-message-card':'')+(failed?' bad':'')+(active?' highlighted':''));
     card.dataset.seq=String(event.seq);
-    card.open=active||expanded.has(String(event.seq))||failed;
+    card.open=active||expanded.has(String(event.seq))||failed||guidance;
     card.id='event-'+event.seq;
     const icon=event.type==='agent.command'?'⌘':event.type==='agent.file_change'?'✎':event.type==='agent.tool'?({
       read:'▤',search:'⌕',glob:'⌕',webfetch:'◎'
     }
     [p.name]||'⚙'):'●';
     const title=el('summary',icon+' '+(eventLabels[event.type]||event.type)+(p.name?' · '+p.name:''));
+    if(guidance){
+      const state=messageStates.get(p.message_id)||'pending';
+      title.append(el('span',taskMessageStatus[state]||state,'badge'+(state==='applied'?' good':'')));
+    }
     if(p.exit_code!==undefined&&p.exit_code!==null)title.append(el('span','退出码 '+p.exit_code,'badge '+(p.exit_code===0?'good':'bad')));
     let duration=p.duration_s;
     if(duration===undefined&&p.duration_ms!==undefined)duration=p.duration_ms/1000;
@@ -1599,6 +1627,11 @@ function renderTimeline(){
         card.append(view)
       }
       if(!patches.length&&event.type==='agent.file_change')field('编辑详情（服务端未提供统一差异）',p)
+    } else if(guidance){
+      card.append(
+        el('p',p.text,'task-message-bubble'),
+        el('small',p.actor+' · '+(p.mode==='interrupt'?'立即打断':'排队送达')),
+      );
     } else if(event.type==='agent.message')field('内容',p.text??p.message);
     else if(event.type==='acceptance.completed'||event.type==='verification.completed'){
       field('判定',p.passed===true?'通过':p.passed===false?'失败':'见执行结果');

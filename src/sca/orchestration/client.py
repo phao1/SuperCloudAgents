@@ -11,6 +11,7 @@ from sca.kinds import builtin as _builtin_kinds
 _builtin_kinds.load()
 from sca.config import Settings
 from sca.core.errors import ConflictError
+from sca.core.models import MessageMode
 from sca.kernel.kind import get
 from sca.observability import tracing_interceptors
 
@@ -18,6 +19,7 @@ REVIEW_SIGNAL = "submit_review"
 PAUSE_SIGNAL = "pause"
 RESUME_SIGNAL = "resume"
 CI_SIGNAL = "ci_result"
+USER_MESSAGE_SIGNAL = "user_message"
 
 
 def workflow_id(task_id: str) -> str:
@@ -81,3 +83,6 @@ class TemporalOrchestrator:
             if e.status == RPCStatusCode.NOT_FOUND:
                 raise ConflictError("task is no longer running") from e
             raise
+
+    async def submit_task_message(self, task_id: str, message_id: str, mode: MessageMode) -> None:
+        await self._signal(task_id, USER_MESSAGE_SIGNAL, [message_id, mode])

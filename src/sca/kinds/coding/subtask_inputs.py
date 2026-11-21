@@ -24,6 +24,8 @@ class PlanningInput:
     task_id: str
     attempt: int = 1
     feedback: str | None = None
+    guidance: list[str] = field(default_factory=list)
+    interjectible: bool = False
 
 
 @dataclass

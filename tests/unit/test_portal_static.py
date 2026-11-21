@@ -80,10 +80,11 @@ const flowModel = require(process.argv[2]);
 const {buildRecords, activeTiming} = require(process.argv[3]);
 class Element {
  constructor(){this.children=[];this.dataset={};this.textContent='';this.className='';this.value='';
- this.classList={add: name=>{this.className+=' '+name}}}
+ this.parentElement={};this.classList={add: name=>{this.className+=' '+name},toggle:()=>{}}}
  append(...items){this.children.push(...items)}
  replaceChildren(...items){this.children=items}
  querySelectorAll(){return []}
+ focus(){}
 }
 const nodes=new Map();
 const document={getElementById:id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id)},createElement:()=>new Element()};
@@ -305,7 +306,48 @@ renderTimeline();
 assert.equal(nodes.get('timeline').children.length,2);
 assert(nodes.get('timeline').children[0].children[1].textContent.includes('20'));
 assert(nodes.get('timeline').children[1].children.at(-1).open);
+taskEvents=[
+ {seq:1,type:'user.message',payload:{message_id:'m',actor:'member',text:'<img src=x>',mode:'queue',status:'pending'}},
+ {seq:2,type:'user.message.delivered',payload:{message_id:'m',turn:1,status:'delivered'}},
+ {seq:3,type:'user.message.applied',payload:{message_id:'m',turn:1,status:'applied'}},
+];
+renderTimeline();
+const guidance=nodes.get('timeline').children[0].children.at(-1);
+assert.equal(guidance.children[0].children[0].textContent,'已应用');
+assert.equal(guidance.children[2].textContent,'<img src=x>');
+assert(guidance.children[3].textContent.includes('member'));
+assert.equal(buildRecords(taskEvents)[0].kind,'input');
+
 (async()=>{
+ global.location={hash:'#/tasks/task-id'};
+ selectedTask='task-id';
+ currentTask={id:selectedTask,spec:{},result:{},state:'RUNNING'};
+ portalIdentity={tenant_id:'team',role:'viewer'};
+ portalTasks.render(currentTask,[]);
+ const controls=$('task-message-controls'),input=$('task-message-text'),form=$('task-message-form');
+ assert(controls.disabled);
+ portalIdentity={tenant_id:'team',role:'member'};
+ portalTasks.render(currentTask,[]);
+ assert(!controls.disabled);
+ let submitted;
+ form.requestSubmit=()=>{submitted=form.onsubmit({preventDefault(){}})};
+ const enter={key:'Enter',preventDefault(){}};
+ input.value='添加测试';
+ input.onkeydown({...enter,isComposing:true});assert(!submitted);
+ input.onkeydown({...enter,shiftKey:true});assert(!submitted);
+ $('task-message-interrupt').checked=true;
+ data=async(path,body)=>{
+   assert.equal(path,'/tasks/task-id/messages');
+   assert.deepEqual(body,{text:'添加测试',mode:'interrupt'});
+   assert(controls.disabled);
+ };
+ input.onkeydown(enter);
+ await submitted;
+ assert.equal(input.value,'');
+ assert(!controls.disabled);
+ portalTasks.render({...currentTask,state:'SUCCEEDED'},[]);
+ assert(controls.disabled);
+
  const old='11111111-1111-1111-1111-111111111111';
  const failed='22222222-2222-2222-2222-222222222222';
  runs=[{id:old,suite:'opencode-demo'},
@@ -348,7 +390,9 @@ assert(nodes.get('timeline').children[1].children.at(-1).open);
 })().catch(e=>{console.error(e);process.exitCode=1});
 '''
     path = tmp_path / 'portal.cjs'
-    path.write_text(harness + script + checks)
+    static = Path('src/sca/api/static')
+    task_assets = '\n'.join((static / name).read_text() for name in ('portal-ui.js', 'portal-tasks.js'))
+    path.write_text(harness + script + task_assets + checks)
     flow_model = Path('src/sca/api/static/task-flow.js').resolve()
     timeline = Path('src/sca/api/static/task-timeline.js').resolve()
     result = subprocess.run([node, str(path), str(flow_model), str(timeline)],
@@ -370,3 +414,12 @@ def test_portal_routes_evidence_and_themes():
     assert "window.addEventListener('hashchange'" in source
     assert 'data-theme=dark' in source
     assert 'keydown' in source and 'Escape' in source
+
+
+def test_interjection_composer_is_below_the_event_log():
+    source = Path('src/sca/api/static/portal.html').read_text()
+    composer = source.split('id="task-message-form"', 1)[1].split('</form>', 1)[0]
+    assert source.index('id="timeline"') < source.index('id="task-message-form"')
+    assert '插话：给正在运行的任务补充要求' in composer
+    assert '立即打断当前轮' in composer and 'maxlength="4000"' in composer
+    assert 'id="task-message-controls" class="stack" disabled' in composer

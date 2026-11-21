@@ -7,7 +7,7 @@ from pathlib import Path
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import (
     AgentContext,
     AgentEvent,
@@ -143,30 +143,32 @@ class CodexBackend:
         stderr = ""
         completed = False
         result = None
-        async for output in sandbox.exec(
+        stream = sandbox.exec(
             sandbox_id,
             argv,
             workdir=ctx.workdir,
             env=env,
             stdin=prompt.encode(),
             timeout_s=timeout_s,
-        ):
-            if isinstance(output, ExecExit):
-                result = output
-            elif output.stream == "stderr":
-                stderr = tail(stderr + output.text + "\n")
-            else:
-                line = output.text
-                if ctx.model_api_key:
-                    line = line.replace(ctx.model_api_key, "[redacted]")
-                for event in parse_codex_line(line):
-                    if event.type == "message":
-                        final_message = event.data["text"]
-                    elif event.type == "error":
-                        error_message = event.data["message"]
-                    elif event.type == "usage":
-                        completed = True
-                    yield event
+        )
+        async with closing_stream(stream):
+            async for output in stream:
+                if isinstance(output, ExecExit):
+                    result = output
+                elif output.stream == "stderr":
+                    stderr = tail(stderr + output.text + "\n")
+                else:
+                    line = output.text
+                    if ctx.model_api_key:
+                        line = line.replace(ctx.model_api_key, "[redacted]")
+                    for event in parse_codex_line(line):
+                        if event.type == "message":
+                            final_message = event.data["text"]
+                        elif event.type == "error":
+                            error_message = event.data["message"]
+                        elif event.type == "usage":
+                            completed = True
+                        yield event
         if result is None or result.exit_code != 0 or result.timed_out or not completed:
             diagnostic = model_error_event(stderr, "Codex turn did not complete")
             if diagnostic.data.get("model_provider_error"):
