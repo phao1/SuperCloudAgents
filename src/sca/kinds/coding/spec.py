@@ -48,12 +48,19 @@ class CiSpec(BaseModel):
     timeout_s: int = Field(default=3600, ge=1, le=24 * 3600)
 
 
+class SubtaskBestOfSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    n: int = Field(ge=2, le=5)
+
+
 class SubtaskSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{0,30}$")
     instruction: str = Field(min_length=1)
     depends_on: list[str] = Field(default_factory=list, max_length=7)
     paths: list[str] = Field(default_factory=list, max_length=128)
+    best_of: SubtaskBestOfSpec | None = None
 
     @field_validator("paths")
     @classmethod
@@ -151,6 +158,9 @@ class CodingSpec(CommonSpec):
 
     def model_dump(self, **kwargs) -> dict:
         data = super().model_dump(**kwargs)
+        for subtask in data.get("subtasks", []):
+            if subtask.get("best_of") is None:
+                subtask.pop("best_of", None)
         if self.best_of is None:
             data.pop("best_of", None)
         if not self.fork_from_snapshot:

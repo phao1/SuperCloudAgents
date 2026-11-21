@@ -241,6 +241,10 @@ def create_app(
     from sca.api.projects import router as projects_router
 
     app.include_router(projects_router)
+    # Task execution DAG
+    from sca.api.task_dag import router as dag_router
+
+    app.include_router(dag_router)
     return app
 
 

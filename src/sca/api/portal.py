@@ -140,6 +140,8 @@ _ASSETS = {
     "portal-evolution.js": "text/javascript",
     "portal-settings.js": "text/javascript",
     "portal-projects.js": "text/javascript",
+    "task-dag.js": "text/javascript",
+    "task-dag.css": "text/css",
 }
 
 

@@ -61,12 +61,14 @@ class RecordAttempt:
     task_id: str
     attempt: Attempt
     result: SubtaskResult
+    subtask: str | None = None
 
 
 @dataclass(frozen=True)
 class AttemptStep:
     attempt: Attempt
     step: SubtaskInput
+    subtask: str | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +76,14 @@ class SelectAttempt:
     task_id: str
     attempt: int
     actor: str | None = None
+    subtask: str | None = None
+
+
+@dataclass(frozen=True)
+class SubtaskAttempts:
+    task_id: str
+    name: str
+    n: int
 
 
 def candidate_key(attempt: int) -> str:
