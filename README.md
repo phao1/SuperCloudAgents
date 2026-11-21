@@ -82,6 +82,7 @@ make portal-setup
 密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
 脚本打印 `http://127.0.0.1:8000/portal` 和随机登录令牌；可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
+在本机可直接打开「任务进度」，查看 eval 任务状态、架构回放和事件。连接令牌后可查看完整证据并审核。
 在 Portal 中可用 `opencode-demo` 验证文件工具修复，也可用 `opencode-prompt` 让 OpenCode
 根据评测证据迭代系统提示词。macOS 的逐步操作见 [验证流程](Milestone/verification-flow.md#v4b-现场opencode-系统提示词自演进)。
 本次真实任务、回放说明和逐事件归档见 [Portal 运行记录](Milestone/portal-run-2026-11-19.md)。

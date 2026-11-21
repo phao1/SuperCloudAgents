@@ -71,7 +71,7 @@ const SCAJobFlow = (() => {
           [(task.spec?.intents || []).some(source => ['rules', 'visual'].includes(source.type))
             ? 'ui_dispatch>design_in>design_spec>design_intent>task_entry' : 'design_intent'], 'seen', 'design_intent');
       } else if (kind === 'memory.injected') {
-        const count = p.ids?.length || 0;
+        const count = p.count ?? p.ids?.length ?? 0;
         add(count ? '注入项目记忆 · ' + count + ' 条' : '已查询项目记忆', ['memory']);
       } else if (kind === 'subtask.started') {
         add('进入子任务队列 · ' + child,
@@ -421,7 +421,7 @@ const SCAJobFlow = (() => {
         fact('初始化命令', excerpt(p.command));
         break;
       case 'memory.injected': {
-        const count = p.ids?.length;
+        const count = p.count ?? p.ids?.length;
         summary = 'Worker 在当前租户查找已启用的记忆，按租户、任务类型和仓库范围匹配。命中的项目约定、常用命令和踩坑经验会写入工作区，作为 Agent 的参考。';
         fact('本次注入', count == null ? '' : count + ' 条');
         fact('查询范围', ['当前租户', task.kind && '类型 ' + task.kind, spec.repo_url && '同一代码仓'].filter(Boolean).join(' · '));

@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     api_tokens: str = "dev-token:default"
     api_url: str = "http://localhost:8000"
     api_token: str = "dev-token"  # used by the CLI
+    portal_local_task_progress: bool = False
 
     # The API may log in with a less privileged role so row-level security applies.
     api_database_url: str | None = None

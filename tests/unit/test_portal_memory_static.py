@@ -69,7 +69,8 @@ def test_analysis_upload_submission_and_report_reuse_task_view():
     assert "kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}" in source
     assert 'await openTask(task.id)' in source
     assert "artifacts.some(a=>a.name==='report.md')" in source
-    assert "api('/tasks/'+enc(id)+'/artifacts/report.md')" in source
+    assert "const taskPath='/tasks/'+enc(id)" in source
+    assert "api(taskPath+'/artifacts/report.md')" in source
     assert "$('analysis-report-panel').hidden=true" in source
 
 
