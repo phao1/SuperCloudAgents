@@ -362,6 +362,7 @@ SQL
     run .venv/bin/alembic upgrade head
     run "$SCA_DOCKER_BIN" build -t sca-sandbox:latest deploy/sandbox
     run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
+    run "$SCA_DOCKER_BIN" build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/dsh
     run "$SCA_DOCKER_BIN" build -t sca-sandbox-analysis:latest deploy/sandbox-analysis
     # TLS-inspecting egress proxy for restricted sandboxes (see docs/design-phase4.md).
     run "$SCA_DOCKER_BIN" build -t sca-egress:tls-v1 deploy/egress

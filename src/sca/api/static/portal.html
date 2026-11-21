@@ -547,7 +547,7 @@ body[data-trace-expanded] { overflow: hidden; }
         <form id="run-form" class="stack" data-access="member" hidden>
           <div class="fields">
             <label>套件<select id="suite" required></select></label>
-            <label>后端<select id="backend"><option value="opencode">OpenCode</option><option value="pi">pi</option><option value="codex">Codex</option></select></label>
+            <label>后端<select id="backend"><option value="opencode">OpenCode</option><option value="pi">Pi</option><option value="dsh">DeepSeek Harness</option><option value="codex">Codex</option></select></label>
             <label>OpenCode 版本<select id="version"><option value="">默认版本</option></select></label>
             <label>模型<input id="model" list="models" value="deepseek-flash"></label>
             <datalist id="models"></datalist>
@@ -1002,7 +1002,7 @@ async function loadConfig(){
     :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
   if(!$('model').value)$('model').value=c.default_model;
   options('models',c.models,x=>x,x=>x);
-  options('backend',c.agent_backends,x=>x,x=>({opencode:'OpenCode',codex:'Codex',fake:'脚本后端'})[x]||x)
+  options('backend',c.agent_backends,x=>x,portalUI.backendLabel)
 }
 async function loadSuites(){
   const first=!suites.length;
@@ -1068,7 +1068,7 @@ function runBody(){
   const variant={
     agent_backend:$('backend').value
   };
-  for(const [key,id] of [['agent_version','version'],['model','model'],['prompt_version','prompt-version']])if($(id).value&&(key!=='agent_version'||variant.agent_backend!=='pi'))variant[key]=$(id).value;
+  for(const [key,id] of [['agent_version','version'],['model','model'],['prompt_version','prompt-version']])if($(id).value&&(key!=='agent_version'||!['pi','dsh'].includes(variant.agent_backend)))variant[key]=$(id).value;
   return {
     suite:$('suite').value,variant,repeat:Number($('repeat').value),concurrency:Number($('concurrency').value),budget:Number($('budget').value),case_budget:Number($('case-budget').value)
   }

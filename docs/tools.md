@@ -36,7 +36,7 @@ curl -fsS "$SCA_URL/v1/tasks" -H "Authorization: Bearer $USER_TOKEN" \
   }'
 ```
 
-Worker 按任务提交者检查授权，并在每轮加载工具配置。`tools.attached` 事件记录工具名称和版本。运行中的沙箱沿用创建时的主机列表。Codex、Pi 和 `opencode-brain` 任务携带 `tools` 时会在启动阶段返回错误。
+Worker 按任务提交者检查授权，并在每轮加载工具配置。`tools.attached` 事件记录工具名称和版本。运行中的沙箱沿用创建时的主机列表。Codex、Pi、DeepSeek Harness 和 `opencode-brain` 任务携带 `tools` 时会在启动阶段返回错误。
 
 ## 上传和检索知识
 

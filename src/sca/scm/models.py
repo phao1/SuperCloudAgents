@@ -20,6 +20,8 @@ class IssueDefaults(BaseModel):
     base_ref: str | None = Field(default=None, min_length=1)
     trigger_labels: list[str] = Field(default_factory=list)
     pull_request: PullRequestSpec = Field(default_factory=PullRequestSpec)
+    agent_backend: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
+    model: str | None = None
 
 
 class IntegrationInput(BaseModel):

@@ -278,6 +278,11 @@ class Settings(BaseSettings):
         self.billing_cancel_url = self.billing_cancel_url or AnyHttpUrl(team_url)
         return self
 
+    # DeepSeek Harness
+    dsh_sandbox_image: str = "sca-sandbox-dsh:latest"
+    dsh_version: str = "0.2.2-rc.5"
+    dsh_gateway_protocol: Literal["auto", "messages", "openai"] = "auto"
+
     # Local source mode
     def _opencode_binary_root(self, root: Path) -> Path:
         if self.sandbox_driver == "local":

@@ -89,6 +89,16 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
             auth_file=None if settings.model_gateway_url else settings.codex_auth_file.expanduser(),
             default_model=settings.default_model,
         )
+    # DeepSeek Harness
+    if settings.agent_backend == "dsh":
+        from sca.agents.dsh import DshBackend
+
+        protocol = settings.dsh_gateway_protocol
+        if protocol == "auto":
+            # The optional limiter supports Chat Completions with bearer authentication.
+            protocol = "openai" if settings.gateway_limiter else "messages"
+        return DshBackend(settings.default_model, settings.dsh_version,
+                          settings.dsh_sandbox_image, protocol=protocol)
     raise ValueError(f"unknown agent backend: {settings.agent_backend}")
 
 
@@ -164,7 +174,7 @@ async def build_worker(client: Client, settings: Settings, store: Store | None =
         await maintenance.replenish_sandbox_pool()  # do not wait an hour for a warm pool
     kernel = _kernel_activities(deps)
     backends = {settings.agent_backend: deps.agent}
-    for name in ("fake", "codex", "opencode", "opencode-brain", "pi"):
+    for name in ("fake", "codex", "opencode", "opencode-brain", "pi", "dsh"):
         if name not in backends:
             try:
                 backends[name] = make_agent_backend(settings.model_copy(update={"agent_backend": name}))

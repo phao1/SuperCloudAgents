@@ -128,6 +128,8 @@ for (const role of ['viewer','member','admin']){
 assert(portalUI.can('eval-admin',{tenant_id:'eval',role:'admin'}));
 assert(portalUI.can('platform',{platform_admin:true}));
 assert(!portalUI.can('tenant',{platform_admin:true}));
+assert.deepEqual(portalUI.backendChoices({agent_backends:['codex','dsh'],default_agent_backend:'dsh'}),
+  [['','默认 · DeepSeek Harness'],['codex','Codex'],['dsh','DeepSeek Harness']]);
 assert.deepEqual(portalEvolution.lineChanges('相同\n旧行\n下文','相同\n新行\n下文'),
   [' 相同','-旧行','+新行',' 下文']);
 assert.deepEqual(portalEvolution.lineChanges(undefined,'新增'),['+新增']);
@@ -171,7 +173,7 @@ def test_portal_phase6_browser_submission():
             return route.fulfill(status=201, json={"id": task_id})
         fixtures = {
             "/v1/portal/whoami": {"tenant_id": "acme", "role": "member", "platform_admin": False},
-            "/v1/portal/config": {"models": ["model-a"], "agent_backends": ["opencode", "codex"],
+            "/v1/portal/config": {"models": ["model-a"], "agent_backends": ["opencode", "codex", "dsh"],
                                   "default_agent_backend": "codex", "default_model": "model-a"},
             "/v1/agents/opencode/versions": [],
             "/v1/tools/available": [{"name": "knowledge", "description": "知识检索"}],
@@ -197,6 +199,8 @@ def test_portal_phase6_browser_submission():
         assert not page.locator('nav a[href="#/platform"]').is_visible()
         page.get_by_label("仓库地址").fill("https://example.test/org/repo.git")
         page.get_by_label("任务指令").fill("补测试")
+        page.get_by_label("Agent 后端").select_option("dsh")
+        assert page.get_by_label("OpenCode 版本（可选）").is_disabled()
         page.get_by_label("Agent 后端").select_option("opencode")
         form = page.locator("#submit-form")
         form.get_by_text("Best-of-N 与执行设置", exact=True).click()

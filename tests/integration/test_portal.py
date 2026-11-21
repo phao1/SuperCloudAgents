@@ -50,7 +50,7 @@ async def test_gateway_probe_authenticated(tmp_path, monkeypatch, models_status)
     from sca.api import portal
     from sca.config import Settings
 
-    settings = Settings(_env_file=None, model_gateway_url='http://gateway',
+    settings = Settings(_env_file=None, model_gateway_url='http://gateway', agent_backend='dsh',
                         model_gateway_master_key='sentinel-master')
     monkeypatch.setattr(portal, 'get_settings', lambda: settings)
     paths = []
@@ -74,5 +74,7 @@ async def test_gateway_probe_authenticated(tmp_path, monkeypatch, models_status)
     assert response.status_code == 200
     assert response.json()['gateway_reachable'] is True
     assert response.json()['models'] == (['model-one'] if models_status == 200 else [])
+    assert 'dsh' in response.json()['agent_backends']
+    assert response.json()['default_agent_backend'] == 'dsh'
     assert 'sentinel-master' not in response.text
     assert paths == ['/health/liveliness', '/v1/models']

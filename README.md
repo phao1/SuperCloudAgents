@@ -177,6 +177,47 @@ make up-all    # also start the optional services (needs a .env with provider ke
 Benchmarks for evolution live in `evals/opencode-evolve*`. See [Basic commercial readiness](docs/commercial-readiness.md)
 for the acceptance checklist, API and Portal entry points, and live smoke commands.
 
+### Agent 后端
+
+| `agent_backend` | 运行方式 |
+| --- | --- |
+| `codex` | 沙箱内运行 Codex CLI |
+| `opencode` | 沙箱内运行 OpenCode |
+| `opencode-brain` | 沙箱外运行 OpenCode，工具在沙箱内执行 |
+| `pi` | 使用 `sca-sandbox-pi:latest` 运行 Pi |
+| `dsh` | 使用 `sca-sandbox-dsh:latest` 运行 DeepSeek Harness `0.2.2-rc.5` |
+| `fake` | 使用脚本化 Agent 验证任务流程 |
+
+#### 使用 DeepSeek Harness
+
+`make portal-setup` 会构建 DSH 镜像。也可单独构建。
+
+```bash
+make image
+docker build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/dsh
+```
+
+在 Worker 启用 LiteLLM 网关后，在 Portal「提交任务」选 DeepSeek Harness，模型填 `deepseek-flash`
+或 `deepseek-v4-pro`。省略模型时使用 `SCA_DEFAULT_MODEL`。如需设为全局默认后端，配置
+`SCA_AGENT_BACKEND=dsh` 和 `SCA_DEFAULT_MODEL=deepseek-flash` 后重启 API 与 Worker。也可用 API 提交。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/tasks" -H "Authorization: Bearer $SCA_API_TOKEN" --json @- <<'JSON'
+{"kind":"coding","spec":{"repo_url":"https://example.com/repo.git",
+ "instruction":"为计算函数补边界测试","verify_command":"pytest -q",
+ "agent_backend":"dsh","model":"deepseek-flash"}}
+JSON
+```
+
+`SCA_DSH_GATEWAY_PROTOCOL` 默认 `auto`。直连 LiteLLM 使用 `/v1/messages` 和 `x-api-key`。
+启用 SCA 网关限流代理时使用 `/v1/chat/completions` 和 Bearer 认证。可用 `messages` 或 `openai`
+指定协议。DSH 使用每轮虚拟密钥，关闭内置网页搜索、抓取和遥测。后续轮次从 `/agent_home/dsh`
+恢复会话。仓库工单的默认后端与模型可在 Portal 的 SCM 配置中设置。[工单配置](docs/scm.md#通过工单触发任务)
+
+自建镜像时同步设置 `SCA_DSH_SANDBOX_IMAGE`、`SCA_DSH_VERSION` 和构建参数 `DSH_VERSION`。
+上游包声明 Node ≥24.9，当前镜像沿用 Node 22.22.2。部署时需验证完整 headless 运行及续接。
+[上游 CLI 包元数据](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/cli/package.json#L186-L188)
+
 ## Tests
 
 ```bash

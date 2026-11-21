@@ -1,6 +1,18 @@
 'use strict';
 
 const portalUI = (() => {
+  function backendLabel(name) {
+    return {codex: 'Codex', opencode: 'OpenCode', 'opencode-brain': 'OpenCode（脑手分离）',
+      pi: 'Pi', dsh: 'DeepSeek Harness', fake: '脚本后端'}[name] || name;
+  }
+
+  function backendChoices(config, selected = '') {
+    const names = new Set(config.agent_backends);
+    if (selected) names.add(selected);
+    return [['', '默认 · ' + backendLabel(config.default_agent_backend)],
+      ...Array.from(names, name => [name, backendLabel(name)])];
+  }
+
   function can(access, identity = portalIdentity) {
     const tenant = Boolean(identity?.tenant_id && !identity.platform_admin);
     const admin = tenant && identity.role === 'admin';
@@ -218,7 +230,8 @@ const portalUI = (() => {
   }
 
   return {
-    action, actions, can, check, checked, control, copy, cost, date, externalLink, field, fields,
+    action, actions, backendChoices, backendLabel, can, check, checked, control, copy, cost,
+    date, externalLink, field, fields,
     form, items, lines, list, object, panel, percent, scroll, setMessage, svg, upload, value,
   };
 })();
