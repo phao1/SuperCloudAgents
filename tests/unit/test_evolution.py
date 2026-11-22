@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from sca.evolve.checks import gate, metrics, overlay_hash, select_best, static_check
+from sca.evolve.checks import dev_basis, gate, metrics, overlay_hash, select_best, static_check
 from sca.evolve.models import EvolutionConfig, Proposal
 
 
@@ -75,14 +75,30 @@ def test_gate():
 
 
 def test_dev_basis_quality_and_efficiency():
-    from sca.evolve.checks import dev_basis
-
     baseline = run((True, True))
     assert dev_basis(run(), baseline) == 'quality'
     assert dev_basis(baseline, run((True, True), .85)) == 'efficiency'
     assert dev_basis(baseline, run((True, True), .86)) is None
     assert dev_basis(baseline, run((True, False), .1)) is None
     assert gate(baseline, run((True, True), .5), dev=True)
+
+
+@pytest.mark.parametrize("before,after", [(0, 0), (1, 0), (0, .5), (1, float("nan"))])
+def test_efficiency_requires_measured_cost_on_both_splits(before, after):
+    baseline, candidate = run((True, True), before), run((True, True), after)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate, 0)
+
+
+def test_errored_or_zero_cost_runs_cannot_win_quality_gate():
+    baseline, candidate = run(cost=0), run((True, True), cost=0)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate)
+    assert dev_basis(baseline, candidate, legacy=True) == "quality"
+    baseline, candidate = run(), run((True, True), cost=.5)
+    baseline["results"][0].update(acceptance_passed=None, verification_passed=None)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate)
 
 
 def test_policy_cannot_be_removed_and_hash_matches_agent():

@@ -5,10 +5,14 @@ import subprocess
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
+from sca.agents.docker_node import NODE_IMAGE, DockerNodeRuntime
 from sca.agents.dsh import KEY_ENV, LAUNCH, OVERLAY_FILENAME, OVERLAY_MODULE, DshBackend
 from sca.config import Settings
 from sca.core.errors import AgentTurnError, SandboxError
@@ -19,11 +23,16 @@ from sca.core.models import (
     ExecEvent,
     ExecExit,
     ExecOutput,
+    Mount,
     SandboxSpec,
 )
+from sca.gateway.litellm import LiteLLMGateway
 from sca.host import host_executable
+from sca.kernel.activities import KernelActivities, TurnInput
 from sca.kinds.coding.spec import CodingSpec
 from sca.orchestration.worker import make_agent_backend
+from sca.sandbox._exec import NODE_EXECUTABLE, NODE_RUNTIME_DIR, NODE_RUNTIME_LABEL
+from sca.sandbox.docker import DockerSandboxProvider
 from sca.sandbox.local import LocalSandboxProvider
 
 SESSION = "session-8b20b100-007a-4a19-927a-c1e1d1db1e00"
@@ -418,3 +427,228 @@ console.log(JSON.stringify({type: 'final', sessionId, reason: {kind: 'completed'
             assert (patch.parent / OVERLAY_FILENAME).read_text(encoding="utf-8") == OVERLAY_MODULE
     finally:
         await sandbox.destroy(sandbox_id)
+
+
+@pytest.mark.parametrize("arch,platform,oversized", [
+    ("x64", "linux/amd64", False), ("arm64", "linux/arm64", False), ("x64", "linux/amd64", True),
+])
+async def test_docker_runtime_is_pinned_reused_and_prunes_unmounted_versions(
+    tmp_path, monkeypatch, arch, platform, oversized,
+):
+    from sca.agents import docker_node
+
+    settings = Settings(_env_file=None, container_arch=arch, data_dir=tmp_path, docker_bin="fixture-docker")
+    runtime = DockerNodeRuntime(settings, "dsh")
+    runtime.root.mkdir(parents=True)
+    stale, in_use = (runtime.root / name for name in ("dsh-old", "node-mounted"))
+    stale.mkdir()
+    in_use.mkdir()
+    calls = []
+
+    def fake_install(args, **kwargs):
+        calls.append(args)
+        assert args[0:2] == ["fixture-docker", "run"]
+        assert args[args.index("--platform") + 1] == platform
+        assert NODE_IMAGE in args and "--rm" in args
+        assert args[-2:] == [f"@deepseek-ai/dsh@{settings.dsh_version}", "dsh"]
+        assert "node_modules/.bin/dsh --profile headless --help" in args[args.index("-ec") + 1]
+        stage = Path(args[args.index("--mount") + 1].split(",")[1].removeprefix("source="))
+        node = stage / "node/bin/node"
+        node.parent.mkdir(parents=True)
+        node.touch(mode=0o700)
+        modules = stage / "agent/node_modules"
+        package = modules / "@deepseek-ai/dsh"
+        package.mkdir(parents=True)
+        (package / "package.json").write_text(json.dumps({"version": settings.dsh_version}))
+        (modules / ".bin").mkdir()
+        (modules / ".bin/dsh").touch()
+
+    def fake_check_output(args, **kwargs):
+        return "sandbox\n" if args[1] == "ps" else f"{in_use}\n"
+
+    monkeypatch.setattr(docker_node.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(docker_node.os, "getgid", lambda: 1000, raising=False)
+    monkeypatch.setattr(docker_node.subprocess, "run", fake_install)
+    monkeypatch.setattr(docker_node.subprocess, "check_output", fake_check_output)
+    if oversized:
+        monkeypatch.setattr(docker_node, "MAX_RUNTIME_BYTES", 0)
+        with pytest.raises(SandboxError, match="超过磁盘上限"):
+            await runtime.mounts()
+        assert stale.is_dir() and not runtime.agent.exists()
+        assert not list(runtime.root.glob(".install-*"))
+        return
+    mounts = await runtime.mounts()
+    assert mounts == await runtime.mounts()
+    assert [mount.target for mount in mounts] == [NODE_RUNTIME_DIR, "/opt/sca-dsh"]
+    assert all(mount.read_only for mount in mounts)
+    assert (runtime.node / "bin/node").is_file()
+    assert len(calls) == 1 and not stale.exists() and in_use.is_dir()
+    assert not list(runtime.root.glob(".install-*"))
+
+
+async def test_kernel_mounts_dsh_in_the_requested_task_image(tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, agent_backend="dsh", data_dir=tmp_path, pip_cache=False)
+    backend = make_agent_backend(settings)
+    monkeypatch.setattr(backend.docker_runtime, "prepare", lambda: None)
+    sandbox = SimpleNamespace(create=AsyncMock(return_value="sandbox"))
+    store = SimpleNamespace(
+        get_task=AsyncMock(return_value=SimpleNamespace(kind="coding", result={})), update_result=AsyncMock(),
+    )
+    kernel = KernelActivities(settings=settings, sandbox=sandbox, store=store, agent=backend, objects=None)
+    kernel._ensure_state = AsyncMock()
+    spec = CodingSpec(repo_url="/repo", instruction="test", image="python:3.12")
+    kernel._spec = AsyncMock(return_value=spec)
+
+    assert await kernel._create_sandbox("task") == ("sandbox", "python:3.12")
+    spec = sandbox.create.await_args.args[-1]
+    assert [mount.target for mount in spec.mounts] == ["/workspace", "/agent_home", NODE_RUNTIME_DIR, "/opt/sca-dsh"]
+    assert all(mount.read_only for mount in spec.mounts[-2:])
+    assert spec.network == "restricted"
+
+
+@pytest.mark.parametrize("compatible", [True, False])
+async def test_docker_probes_glibc_and_uses_node_for_setup(tmp_path, monkeypatch, compatible):
+    from sca.sandbox import docker
+
+    monkeypatch.setattr(docker.os, "getuid", lambda: 1000, raising=False)
+    monkeypatch.setattr(docker.os, "getgid", lambda: 1000, raising=False)
+    provider = DockerSandboxProvider()
+    provider._cli = AsyncMock(side_effect=[
+        (1, "", "no such container"), (0, "", ""), (0 if compatible else 126, "", ""), (0, "", ""),
+    ])
+    spec = SandboxSpec(image="fixture", network="none", mounts=[
+        Mount(source=str(tmp_path), target=NODE_RUNTIME_DIR, read_only=True),
+    ])
+    if not compatible:
+        with pytest.raises(SandboxError, match="Alpine/musl"):
+            await provider.create("task", spec)
+        assert provider._cli.await_args.args == ("rm", "-f", "sca-task")
+        return
+
+    assert await provider.create("task", spec) == "sca-task"
+    assert f"{NODE_RUNTIME_LABEL}=1" in provider._cli.await_args_list[1].args
+    provider._node_exec.clear()  # A new worker recovers the interpreter from Docker metadata.
+    provider._cli.reset_mock(side_effect=True)
+    provider._cli.return_value = (0, "1\n", "")
+
+    async def stream(command, cleanup, **options):
+        args = command("wrapper", "/tmp/marker")
+        assert args[args.index("sca-task") + 1:] == [
+            NODE_EXECUTABLE, "--input-type=module", "-e", "wrapper", "--", "/tmp/marker", "bash", "-lc", "true",
+        ]
+        assert options["node"]
+        await cleanup("cleanup", "/tmp/marker")
+        yield ExecExit(exit_code=0)
+
+    monkeypatch.setattr(docker, "stream_exec", stream)
+    assert [event async for event in provider.exec("sca-task", ["bash", "-lc", "true"])] == [ExecExit(exit_code=0)]
+    assert provider._cli.await_args.args[2] == NODE_EXECUTABLE
+
+
+async def test_docker_node_launcher_preserves_overlay_stdin_and_session(tmp_path, ctx, launcher_env):
+    node = host_executable("node.exe" if sys.platform == "win32" else "node")
+    if node is None:
+        pytest.skip("Node.js is unavailable")
+    settings = Settings(_env_file=None, agent_backend="dsh", data_dir=tmp_path)
+    backend = make_agent_backend(settings)
+    home = tmp_path / "home"
+    home.mkdir()
+    cli = tmp_path / "headless.mjs"
+    cli.write_text(r"""
+import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+const args = process.argv;
+const path = args[args.indexOf('--patch') + 1];
+const patch = JSON.parse(readFileSync(path));
+assert.equal(patch.at(-1).insert[0].config.guidance, 'Keep {{literal}}');
+assert(existsSync(join(dirname(path), 'sca-dsh-overlay.mjs')));
+assert(existsSync(dirname(process.env.DSH_HOME)));
+assert.equal(args[args.indexOf('--permission-mode')+1], 'workspace-write');
+assert.equal(args[args.indexOf('--approval-policy')+1], 'never');
+const sessionId = args.includes('--session-id') ? args[args.indexOf('--session-id') + 1] : 'fixture-session';
+console.log(JSON.stringify({type: 'session', sessionId}));
+console.log(JSON.stringify({type: 'final', sessionId, reason: {kind: 'completed'}, text: readFileSync(0, 'utf8')}));
+""", encoding="utf-8")
+
+    class NodeSandbox:
+        async def exec(self, sandbox_id, argv, *, env, stdin, **kwargs):
+            assert argv[0] == NODE_EXECUTABLE and "python3" not in argv
+            assert argv.count(NODE_EXECUTABLE) == 2
+            mapped = [str(node) if arg == NODE_EXECUTABLE else str(cli) if arg == backend.docker_runtime.cli
+                      else arg for arg in argv]
+            process = await asyncio.create_subprocess_exec(
+                *mapped, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE, env={**launcher_env, **env, "TEMP": str(tmp_path)},
+            )
+            out, err = await asyncio.wait_for(process.communicate(stdin), 10)
+            for line in out.decode().splitlines():
+                yield ExecOutput(stream="stdout", text=line)
+            for line in err.decode(errors="replace").splitlines():
+                yield ExecOutput(stream="stderr", text=line)
+            yield ExecExit(exit_code=process.returncode)
+
+    context = ctx.model_copy(update={"image": "debian:bookworm", "agent_home": str(home),
+                                     "agent_overlay": AgentOverlay(tool_guidance="Keep {{literal}}")})
+    sandbox = NodeSandbox()
+    first = await collect(backend, sandbox, context)
+    assert first[0].data["session_id"] == "fixture-session"
+    assert first[-1].data["final_message"] == "修改测试"
+    resumed = await collect(backend, sandbox, context, "fixture-session")
+    assert [event.type for event in resumed] == ["turn_completed"]
+    assert resumed[-1].data["final_message"] == "修改测试"
+
+
+@pytest.mark.parametrize("limiter", [False, True])
+async def test_successful_dsh_turn_records_virtual_key_spend_and_tokens(tmp_path, monkeypatch, limiter):
+    requests = []
+
+    def respond(request):
+        requests.append(request.url.path)
+        match request.url.path:
+            case "/key/list":
+                keys = [{"token": "fixture-hash"}] if "/key/generate" in requests else []
+                return httpx.Response(200, json={"keys": keys})
+            case "/key/generate":
+                assert json.loads(request.content)["models"] == ["deepseek-flash"]
+                return httpx.Response(200, json={"key": KEY})
+            case "/key/info":
+                return httpx.Response(200, json={"info": {"spend": .0025}})
+            case "/key/delete":
+                return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+
+    gateway = LiteLLMGateway("http://admin", "fixture-master", "http://gateway/v1")
+    await gateway._http.aclose()
+    gateway._http = httpx.AsyncClient(base_url="http://admin", transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(gateway, "SETTLE_POLLS", 0)
+    monkeypatch.setattr("sca.kernel.activities.activity.info", lambda: SimpleNamespace(attempt=1))
+    monkeypatch.setattr("sca.kernel.activities.activity.heartbeat", lambda: None)
+    settings = Settings(_env_file=None, agent_backend="dsh", data_dir=tmp_path,
+                        default_model="deepseek-flash", gateway_limiter=limiter)
+    store = SimpleNamespace(
+        get_task=AsyncMock(return_value=SimpleNamespace(kind="coding", usage={}, result={})),
+        get_session_id=AsyncMock(return_value=None), set_session=AsyncMock(),
+        append_event=AsyncMock(), add_usage=AsyncMock(),
+    )
+    sandbox = Sandbox(
+        opening(), stdout(type="status", phase="step_end", usage={
+            "inputTokens": 8, "outputTokens": 2, "cacheReadTokens": 3,
+        }), final(text="Ready"), ExecExit(exit_code=0),
+    )
+    kernel = KernelActivities(settings=settings, sandbox=sandbox, store=store,
+                              agent=make_agent_backend(settings), objects=None, gateway=gateway)
+    kernel._ensure_state = AsyncMock(return_value=False)
+    kernel._spec = AsyncMock(return_value=CodingSpec(repo_url="/repo", instruction="test"))
+    kernel._sandbox_id = AsyncMock(return_value="sandbox")
+    try:
+        result = await kernel._run_agent_turn(TurnInput("task", 1, "prompt"))
+    finally:
+        await gateway.aclose()
+    assert result.final_message == "Ready"
+    assert [call.args[1] for call in store.add_usage.await_args_list] == [
+        {"input_tokens": 11, "cached_input_tokens": 3, "output_tokens": 2}, {"cost_micro_usd": 2500},
+    ]
+    assert store.append_event.await_args.args[2]["cost_usd"] == .0025
+    assert requests == ["/key/list", "/key/generate", "/key/list", "/key/info", "/key/delete"]
+    assert KEY not in repr(store.append_event.await_args_list)

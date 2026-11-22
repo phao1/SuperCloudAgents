@@ -264,11 +264,22 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" -H "Authorization: Bearer $
 
 ## 7 DeepSeek Harness 自演进（Phase 7）
 
-运行 `alembic upgrade head` 应用迁移 `0025` 后重启 API 和 Worker。Worker 需要可用的
-`dsh` 后端、模型网关和 `SCA_EVAL_API_TOKEN`。在 Portal「自动演进」选择 DeepSeek
-Harness、评测套件和模型。
+`scripts/portal_demo.sh up` 的 Docker 和源码模式，以及 Windows 上的
+`.\scripts\portal_source.ps1 up`，都会在启动 API 和 Worker 前运行
+`alembic upgrade head`，应用已有迁移（含 `0025`）。手动部署时，先运行同一条迁移命令。
+Worker 需要 `dsh` 后端、模型网关和 `SCA_EVAL_API_TOKEN`。在 Portal「自动演进」
+选择 DeepSeek Harness、评测套件和模型。
 基线版本填写已安装的 `@deepseek-ai/dsh` npm 版本，留空使用 `SCA_DSH_VERSION`（默认
 `0.2.2-rc.5`）。已有演进记录、冠军、灰度和定期计划默认归属 OpenCode。
+
+Docker 任务可设置 `"image":"python:3.12"`，或选择与容器架构一致的 glibc Linux 镜像。
+镜像需要兼容的 libstdc++、任务所需的工具，以及 SCA 使用的 Bash 和 Git。Agent
+启动和沙箱命令包装无需镜像自带 Python 或 Node.js。Alpine/musl 镜像会收到中文错误。
+Docker 启动脚本会准备 DSH 运行时，Worker 也会在首次需要时安装。版本化的运行时
+位于 `SCA_DATA_DIR/tools/docker-node`，以只读方式挂载。它使用官方 Node.js 24.22.3
+镜像安装指定的 npm 包和对应架构的原生依赖，清理未被容器使用的旧版本。单个 Agent 的运行时
+含共享的 Node.js，上限为 270 MB。
+[Node.js 24 Linux 二进制要求](https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#official-binary-platforms-and-toolchains)
 
 DSH 在每轮通过 `headless --patch` 载入附加提示词。它保留内置系统提示、工具定义和权限策略，
 将 `system_prompt`、`tool_guidance` 及按工具名组织的 `tool_descriptions` 追加到系统提示。
@@ -327,6 +338,15 @@ Portal「演进记录」按后端显示运行详情。单独跑开发集时，�
 `"split":"dev"`，在 `config` 中传入代数、候选和预算配置。`opencode-prompt` 是专用的
 OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 套件可用于 DSH。
 
+任务因 Agent 或环境故障结束且未完成一轮时，用例标记为 `errored`。评测详情返回
+`errored` 计数及逐题状态。超过半数已执行用例出错时，评测以 `failed` 结束并记录原因。
+演进需要完整的配对结果。基线无效会结束演进，候选评测无效会记录拒绝原因。
+效率晋升要求双方有正的实测费用，开发集通过率持平或提高，留出集通过率不降且费用不涨。
+Portal 的评测和演进详情显示失败原因，演进活动失败时还会显示错误类别。
+可通过 `GET /v1/evals/runs/{id}` 和 `GET /v1/evolutions/{id}` 查看这些字段。
+查看单个任务的实测费用时，读取 `GET /v1/tasks/{id}` 的 `usage.cost_micro_usd`。
+Token 用量和轮次费用可在任务的 `agent.usage` 与 `agent.turn_completed` 事件中核对。
+
 冠军按后端、版本和模型分别管理。使用 `GET /v1/champions?agent_backend=dsh` 查看冠军。
 访客模式开启时，可在本机直接读取 DSH 冠军详情。创建者、凭证字段和提示词里的敏感文本会脱敏。
 
@@ -341,5 +361,8 @@ curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
 
 ### 验证
 
-模拟 API 和 headless 进程覆盖评测变体、提示词追加、冠军选择与灰度。迁移 SQL 已离线生成并检查。
-当前工作区禁止 Postgres 套接字连接，真实数据库迁移与行级权限测试、Windows 实机和付费模型试跑待验证。
+模拟的 headless 进程和网关验证了提示词追加、续接、Token 用量和虚拟密钥费用。
+评测与演进测试覆盖多数用例出错、基线失效、候选拒绝和零费用门禁。启动测试验证迁移
+先于 API 和 Worker，迁移 `0025` 的 SQL 已离线检查。
+当前沙箱拒绝 Postgres 和 Temporal 套接字连接。真实服务、Docker 安装体积、Windows 实机
+和付费模型仍需现场验证。

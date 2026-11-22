@@ -622,6 +622,7 @@ class WindowsSource:
         prepare_gateway(self.data)
         self.start_postgres()
         env = self.environment(config)
+        # Every up must apply migrations against the running source-mode database.
         run_logged([self.python, "-m", "alembic", "upgrade", "head"],
                    self.runtime / "migrations.log", cwd=self.root, env=env, timeout=120)
         temporal_dir = self.data / "temporal"

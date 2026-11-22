@@ -72,6 +72,7 @@ async def test_fragmented_frames_and_binary():
 
 async def test_provider_start_failure_falls_back(monkeypatch):
     provider = DockerSandboxProvider()
+    provider._node_exec["one"] = False
     provider._handd_enabled = True
     provider._unpause = AsyncMock()
     monkeypatch.setattr(HanddClient, 'start', AsyncMock(side_effect=SandboxError('unavailable')))
@@ -86,6 +87,7 @@ async def test_provider_start_failure_falls_back(monkeypatch):
 
 async def test_provider_disconnect_does_not_replay(monkeypatch):
     provider = DockerSandboxProvider()
+    provider._node_exec["one"] = False
     provider._handd_enabled = True
     provider._unpause = AsyncMock()
     monkeypatch.setattr(HanddClient, 'start', AsyncMock())

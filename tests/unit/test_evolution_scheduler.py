@@ -166,7 +166,7 @@ async def test_scheduled_promotion_can_set_zero_percent():
                "config": {"agent_backend": "dsh", "agent_version": evolution.settings.dsh_version, "model": "m"},
                "auto_rollout_percent": 0,
                "candidate": {"id": str(uuid4()), "overlay": {}, "overlay_sha256": "hash",
-                             "dev_metrics": {}, "holdout_metrics": {}}}
+                             "dev_metrics": {"cost_usd": .1}, "holdout_metrics": {"cost_usd": .1}}}
     await evolution.promote(request)
     assert store.activate_champion.call_args.kwargs["rollout"] == (0, "schedule:test")
     assert store.activate_champion.call_args.args[1]["agent_backend"] == "dsh"

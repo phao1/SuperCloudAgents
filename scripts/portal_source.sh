@@ -81,7 +81,6 @@ SELECT 'CREATE DATABASE litellm' WHERE NOT EXISTS (SELECT FROM pg_database WHERE
 SQL
         fail '初始化数据库失败，请查看 .data/run/postgres.log。'
     load_source_env
-    run "$ROOT/.venv/bin/alembic" upgrade head
 }
 
 stop_postgres() {

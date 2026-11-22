@@ -72,7 +72,10 @@ def demo(tmp_path, monkeypatch):
         'find_postgres() { :; }\nsource_port() { :; }\nload_source_env() { :; }\n'
         'start_source_services() { gateway_config > source-gateway-config; }\n'
         'stop_source_services() { echo "stopped native services"; }\n'
-        'up() { load_env; echo "started $SCA_RUNTIME_MODE"; }\n'
+        'start() { echo "$1" >> startup-calls; }\n'
+        'owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }\n'
+        'request() { :; }\n'
+        'stop() { :; }\n'
     )
     portal_env = tmp_path / ".data" / "portal.env"
     portal_env.parent.mkdir()
@@ -80,7 +83,15 @@ def demo(tmp_path, monkeypatch):
     (tmp_path / ".env").touch()
     (tmp_path / ".venv" / "bin").mkdir(parents=True)
     python = tmp_path / ".venv" / "bin" / "python"
-    python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+    python.write_text(
+        '#!/bin/sh\n'
+        'if [ "$1" = -m ]; then\n'
+        '  printf "%s\\n" "$*" >> startup-calls\n'
+        '  if [ "$2" = alembic ]; then exit "${DEMO_MIGRATE_STATUS:-0}"; fi\n'
+        '  if [ "$2" = sca.agents.docker_node ]; then exit 0; fi\n'
+        'fi\n'
+        f'exec {shlex.quote(sys.executable)} "$@"\n'
+    )
     python.chmod(0o700)
     binaries = tmp_path / "bin"
     binaries.mkdir()
@@ -126,7 +137,7 @@ def test_mode_selection(demo, monkeypatch, args, env_mode, down_mode, info_code,
     monkeypatch.setenv("DEMO_COMPOSE_STATUS", compose_code)
     result = run("up", *args)
     assert result.returncode == 0, result.stderr
-    assert f"started {expected}" in result.stdout
+    assert "Portal: http://127.0.0.1:8000/portal" in result.stdout
     assert f"SCA_RUNTIME_MODE='{expected}'" in portal_env.read_text()
     fallback = not args and not env_mode and expected == "source"
     assert ("自动切换到源码模式" in result.stderr) is fallback
@@ -158,3 +169,18 @@ def test_gateway_starts_with_and_without_a_model_key(demo, mode):
         result = run("up", "--mode", mode)
         assert result.returncode == 0, result.stderr
         assert selected.read_text().strip() == expected
+
+
+@pytest.mark.parametrize("mode", ["docker", "source"])
+@pytest.mark.parametrize("migration_status", ["0", "1"])
+def test_up_migrates_before_starting_api_and_worker(demo, monkeypatch, mode, migration_status):
+    run, portal_env = demo
+    monkeypatch.setenv("DEMO_MIGRATE_STATUS", migration_status)
+    result = run("up", "--mode", mode)
+    assert result.returncode == int(migration_status), result.stderr
+    calls = ["-m alembic upgrade head"]
+    if migration_status == "0":
+        if mode == "docker":
+            calls.append("-m sca.agents.docker_node")
+        calls.extend(("api", "worker"))
+    assert (portal_env.parents[1] / "startup-calls").read_text().splitlines() == calls

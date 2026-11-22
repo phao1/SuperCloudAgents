@@ -144,11 +144,13 @@ const portalEvolution = (() => {
       const next = JSON.stringify(rows);
       if (signature === next) return;
       signature = next;
-      ui.list(list, ['套件 / 演进 ID', '后端 / 基线版本 / 模型', '状态', '支出 / 预算', '创建时间'], rows.map(row => [
-        detailLink('runs', row.id, suiteLabel(row.config.suite) + ' · ' + short(row.id)),
-        targetLabel(row.config),
-        stateLabel(row.status), ui.cost(row.spent_usd) + ' / ' + ui.cost(row.config.budget_usd), ui.date(row.created_at),
-      ]), '尚无自动演进。');
+      ui.list(list, ['套件 / 演进 ID', '后端 / 基线版本 / 模型', '状态', '支出 / 预算', '创建时间'], rows.map(row => {
+        const state = el('div', stateLabel(row.status), 'stack');
+        if (row.config.reason) state.append(el('small', row.config.reason, 'bad portal-reason'));
+        return [detailLink('runs', row.id, suiteLabel(row.config.suite) + ' · ' + short(row.id)),
+          targetLabel(row.config), state, ui.cost(row.spent_usd) + ' / ' + ui.cost(row.config.budget_usd),
+          ui.date(row.created_at)];
+      }), '尚无自动演进。');
     };
   }
 
@@ -302,7 +304,7 @@ const portalEvolution = (() => {
       const row = await data(path);
       if (!active(state)) return;
       state.dag.refresh(id, true);
-      const nextSignature = JSON.stringify([row.status, row.spent_usd, row.best_champion_id,
+      const nextSignature = JSON.stringify([row.status, row.reason, row.spent_usd, row.best_champion_id,
         row.candidates.map(c => [c.id, c.decision, c.reason, c.dev_run_id, c.holdout_run_id]),
         row.journal.filter(entry => entry.type === 'evaluation').map(entry => [entry.id, entry.status])]);
       state.polling = activeStates.includes(row.status);
@@ -310,7 +312,8 @@ const portalEvolution = (() => {
       const baseline = row.journal.find(entry => entry.type === 'evaluation' && entry.split === 'dev');
       if (!initial && baseline?.status === 'completed' && row.candidates.length) {
         const run = await data('/evals/runs/' + enc(baseline.id));
-        if (run.result_count) initial = {pass_rate: run.passed / run.result_count, cost_usd: run.cost_usd};
+        const scored = run.passed + run.failed;
+        if (scored) initial = {pass_rate: run.passed / scored, cost_usd: run.cost_usd};
       }
       const byId = new Map(row.candidates.map(candidate => [candidate.id, candidate.overlay]));
       if (!parents && row.candidates.some(candidate => candidate.parent_id && !byId.has(candidate.parent_id))) {
@@ -322,6 +325,7 @@ const portalEvolution = (() => {
       header.replaceChildren(el('h3', suiteLabel(config.suite) + ' · ' + targetLabel(config)),
         el('p', stateLabel(row.status) + ' · 已用 ' + ui.cost(row.spent_usd) + ' / ' + ui.cost(config.budget_usd)),
         el('small', id + ' · ' + ui.date(row.created_at)));
+      if (row.reason) header.append(el('p', row.reason, 'bad portal-reason'));
       actions.replaceChildren(evidenceLink('返回演进记录', pageHref('runs')));
       if (canManage && state.polling) actions.append(ui.action('停止演进', async () => {
         if (!confirm('确认停止这次演进？')) return;

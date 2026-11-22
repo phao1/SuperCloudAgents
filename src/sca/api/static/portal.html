@@ -959,8 +959,10 @@ const pendingActions=new Set();
 $('token').value=portalToken;
 let canRescore=false;
 function overallPassed(row){return row.acceptance_passed===true&&row.trajectory_passed!==false}
+function evalCaseErrored(row){return row.status==='errored'||Boolean(row.infrastructure_error)}
 function resultLabel(row){
   if(row.infrastructure_error)return '⚠ 基础设施错误 · '+providerAccountLabel(row.infrastructure_error.kind);
+  if(evalCaseErrored(row))return '⚠ 用例执行错误';
   return row.acceptance_passed===true&&row.trajectory_passed===false?'⚠ 验收通过 · 过程未通过':overallPassed(row)?'✓ 总体通过':row.acceptance_passed===false?'✕ 验收失败':'◷ 待验收';
 }
 function error(e){
@@ -1227,7 +1229,8 @@ function renderRunProgress(run,total){
   progress.max=Math.max(1,total);
   progress.value=run.results.length;
   progress.setAttribute('aria-label','已记录用例数');
-  const caption=el('small',run.results.length+' / '+total+' 个用例结果 · '+statusText(run.status));
+  const caption=el('small',run.results.length+' / '+total+' 个用例结果 · '+statusText(run.status)
+    +(run.errored?' · '+run.errored+' 个执行错误':''));
   const links=el('div',undefined,'result-links');
   for(const task of running)links.append(evidenceLink(taskChoice(task)+' ↗','#/tasks/'+enc(task.id)));
   $('run-progress').replaceChildren(caption,progress,links);
@@ -1251,7 +1254,8 @@ async function loadRuns(){
     const batch=await Promise.all(runs.slice(i,i+4).map(r=>{
       const cached=runDetails.get(r.id);
       return cached?.status===r.status&&cached.result_count===r.result_count
-        &&cached.passed===r.passed&&cached.failed===r.failed?cached:data('/evals/runs/'+enc(r.id));
+        &&cached.passed===r.passed&&cached.failed===r.failed&&cached.errored===r.errored
+        &&cached.reason===r.reason?cached:data('/evals/runs/'+enc(r.id));
     }));
     if(!current())return;
     batch.forEach(r=>runDetails.set(r.id,r));
@@ -1296,9 +1300,9 @@ async function matrix(){
   $('matrix').replaceChildren(table(['用例',...Array.from({length:repeat},(_,i)=>'第 '+(i+1)+' 次')],cases.map(id=>[id,...Array.from({length:repeat},(_,i)=>{
     const row=rows.find(r=>r.case_id===id&&r.repeat===i),box=el('div');
     if(!row){box.append(el('small',['queued','running'].includes(run.status)?'等待结果':'无结果'));return box}
-    box.className=row.infrastructure_error?'bad cell':row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
-    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(row.infrastructure_error?'未执行':row.verification_passed?'✓ 通过':'✕ 未通过')));
-    if(allowPrompt)box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
+    box.className=evalCaseErrored(row)?'bad cell':row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
+    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(evalCaseErrored(row)?'未执行':row.verification_passed?'✓ 通过':'✕ 未通过')));
+    if(allowPrompt&&!evalCaseErrored(row))box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
     else if(portalUI.can('member')&&!overallPassed(row)&&typeof row.acceptance_passed==='boolean')box.append(button('诊断与修复 →',()=>selectCase(run,row,true)));
     return box;
   })])));
@@ -2062,12 +2066,13 @@ function median(values){return quantile(values,.5)}
 function quantile(values,q){const v=values.filter(Number.isFinite).sort((a,b)=>a-b);if(!v.length)return null;const i=(v.length-1)*q,lo=Math.floor(i);return v[lo]+(v[Math.ceil(i)]-v[lo])*(i-lo)}
 function dimensions(rows){
   const known=rows.filter(r=>typeof r.acceptance_passed==='boolean'),times=rows.map(r=>r.duration_s).filter(x=>x!==null&&x!==undefined).map(Number),mean=times.length?times.reduce((a,b)=>a+b,0)/times.length:0;
+  const verified=rows.filter(r=>typeof r.verification_passed==='boolean');
   const groups=new Map(),cases=new Map();
   known.forEach(r=>{if(!groups.has(r.repeat))groups.set(r.repeat,[]);groups.get(r.repeat).push(overallPassed(r));if(!cases.has(r.case_id))cases.set(r.case_id,[]);cases.get(r.case_id).push(overallPassed(r))});
   const rates=[...groups.values()].map(v=>100*v.filter(Boolean).length/v.length),flaky=[...cases.values()].filter(v=>v.includes(true)&&v.includes(false)).length;
   const repeated=[...cases.values()].some(v=>v.length>1),spread=rates.length>1?(Math.max(...rates)-Math.min(...rates)).toFixed(1)+' pp':'—';
   const totalCost=rows.reduce((n,r)=>n+Number(r.cost_usd||0),0),tokensKnown=rows.some(r=>r.tokens!==undefined&&r.tokens!==null);
-  return {acceptanceRate:known.length?Math.round(100*known.filter(r=>r.acceptance_passed).length/known.length)+'%':'—',rateValue:known.length?100*known.filter(overallPassed).length/known.length:null,rate:known.length?Math.round(100*known.filter(overallPassed).length/known.length)+'%':'—',verification:rows.length?Math.round(100*rows.filter(r=>r.verification_passed===true).length/rows.length)+'%':'—',mean,duration:times.length?mean.toFixed(1)+' 秒':'—',p50:quantile(times,.5),p90:quantile(times,.9),stability:repeated?flaky+' 项波动':'样本不足',spread,flaky,totalCost,cost:money(totalCost),tokens:tokensKnown?rows.reduce((n,r)=>n+Number(r.tokens||0),0).toLocaleString('zh-CN'):'—'};
+  return {acceptanceRate:known.length?Math.round(100*known.filter(r=>r.acceptance_passed).length/known.length)+'%':'—',rateValue:known.length?100*known.filter(overallPassed).length/known.length:null,rate:known.length?Math.round(100*known.filter(overallPassed).length/known.length)+'%':'—',verification:verified.length?Math.round(100*verified.filter(r=>r.verification_passed).length/verified.length)+'%':'—',mean,duration:times.length?mean.toFixed(1)+' 秒':'—',p50:quantile(times,.5),p90:quantile(times,.9),stability:repeated?flaky+' 项波动':'样本不足',spread,flaky,totalCost,cost:money(totalCost),tokens:tokensKnown?rows.reduce((n,r)=>n+Number(r.tokens||0),0).toLocaleString('zh-CN'):'—'};
 }
 function renderDimensions(target,rows){const m=dimensions(rows);target.replaceChildren(metric('准 · 总通过率',m.rate,'仅验收 '+m.acceptanceRate+' · 验证 '+m.verification+' · '+rows.length+' 个已记录结果'),metric('快 · 平均时长',m.duration,rows.length>1?'p50 '+m.p50?.toFixed(1)+' / p90 '+m.p90?.toFixed(1)+' 秒':'分位数需要多个样本'),metric('稳 · 重复一致性',m.stability,'按重复组通过率极差 '+m.spread),metric('省 · 总费用',m.cost,'Token '+m.tokens+' · 缓存见任务证据'))}
 function caseChange(a,b){if(!a.length||!b.length||[...a,...b].some(r=>typeof r.acceptance_passed!=='boolean'))return '数据不足';const rate=v=>v.filter(overallPassed).length/v.length;return rate(b)<rate(a)?'✕ 回归':rate(b)>rate(a)?'✓ 已修复':'持平'}
@@ -2094,8 +2099,8 @@ function verdictFor(a,b){
   const processFailures=b.results.filter(row=>row.acceptance_passed===true&&row.trajectory_passed===false).length;
   const signal=processFailures?'验收通过但过程检查未通过 '+processFailures+' 项，属于过程回归信号。':'';
   const result=(adopt,reason)=>({adopt,fixed,regressions,reason:signal+reason});
-  if([a,b].some(run=>run.results.some(row=>row.infrastructure_error)))
-    return result(false,'评测遇到基础设施错误。'+[a.reason,b.reason].filter(Boolean).join(' · '));
+  if([a,b].some(run=>run.results.some(evalCaseErrored)))
+    return result(false,'评测存在执行错误。'+[a.reason,b.reason].filter(Boolean).join(' · '));
   if(!comparable)return result(false,'套件、模型或运行参数不同，无法直接归因。');
   if(missing||!complete(a)||!complete(b))return result(false,'等待完整的配对评测结果。');
   const promptSuite=a.suite===portalConfig?.prompt_evolution?.suite;
@@ -2264,11 +2269,11 @@ function renderTaskObservability(t){
   );
   renderSwimlane(t);
   for(const run of runDetails.values()){
-    const row=run.results.find(r=>r.task_id===t.id&&!r.infrastructure_error&&!overallPassed(r));
+    const row=run.results.find(r=>r.task_id===t.id&&!evalCaseErrored(r)&&!overallPassed(r));
     if(row&&!fixSelection&&!flow.fixTask){chooseFix(run,row,canOptimize(run)?'system_prompt':'source',false);break}
   }
   const result=[...runDetails.values()].flatMap(r=>r.results).find(r=>r.task_id===t.id);
-  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(result.infrastructure_error?'未执行':result.acceptance_passed?'通过':'未通过')))}
+  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(evalCaseErrored(result)?'未执行':result.acceptance_passed?'通过':'未通过')))}
   renderTaskDiagnostics();
 }
 

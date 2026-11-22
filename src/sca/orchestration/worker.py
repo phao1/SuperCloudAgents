@@ -73,9 +73,7 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
         return OpenCodeBackend(settings.opencode_versions_dir,
                                settings.opencode_default_version, settings.default_model)
     if settings.agent_backend == "pi":
-        from sca.agents.pi import PiBackend
-
-        return PiBackend(settings.default_model, settings.pi_version, settings.pi_sandbox_image)
+        return _make_pi_backend(settings)
     if settings.agent_backend == "codex":
         from sca.agents.codex import CodexBackend
 
@@ -319,6 +317,7 @@ def _make_local_agent_backend(settings: Settings) -> AgentBackend:
 
 # Native DeepSeek Harness
 def _make_dsh_backend(settings: Settings, executable: Path | None = None) -> AgentBackend:
+    from sca.agents.docker_node import DockerNodeRuntime
     from sca.agents.dsh import DshBackend
     from sca.host import host_executable
 
@@ -333,7 +332,17 @@ def _make_dsh_backend(settings: Settings, executable: Path | None = None) -> Age
             raise FileNotFoundError("找不到 Node.js，请运行 winget install -e --id OpenJS.NodeJS.LTS")
     return DshBackend(settings.default_model, settings.dsh_version, settings.dsh_sandbox_image,
                       protocol=protocol, executable=str(executable) if executable else None,
-                      node_executable=str(node) if node else None)
+                      node_executable=str(node) if node else None,
+                      docker_runtime=DockerNodeRuntime(settings, "dsh") if settings.sandbox_driver == "docker" else None)
+
+
+# Mounted Docker runtimes for Node agents
+def _make_pi_backend(settings: Settings) -> AgentBackend:
+    from sca.agents.docker_node import DockerNodeRuntime
+    from sca.agents.pi import PiBackend
+
+    runtime = DockerNodeRuntime(settings, "pi") if settings.sandbox_driver == "docker" else None
+    return PiBackend(settings.default_model, settings.pi_version, settings.pi_sandbox_image, docker_runtime=runtime)
 
 
 if __name__ == "__main__":

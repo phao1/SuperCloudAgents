@@ -6,7 +6,7 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError, SandboxError
@@ -20,6 +20,10 @@ from sca.core.models import (
     SandboxAdditions,
     tail,
 )
+from sca.sandbox._exec import NODE_SCRIPT
+
+if TYPE_CHECKING:
+    from sca.agents.docker_node import DockerNodeRuntime
 
 DSH_VERSION = "0.2.2-rc.5"
 # Fixed opener and headless persona from the pinned npm release. Plugins assemble the rest per step.
@@ -67,6 +71,40 @@ with tempfile.TemporaryFile() as task:
     os.dup2(task.fileno(), sys.stdin.fileno())
     os.execvp(argv[0], argv)
 '''
+
+NODE_LAUNCH = r"""
+import { spawnSync } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { closeSync, mkdtempSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join } from 'node:path';
+const [patch, moduleName, moduleSource, _, executable, ...argv] = process.argv.slice(1);
+const input = readFileSync(0);
+const newline = input.indexOf(10);
+if (newline < 0) throw new Error('Missing DSH patch');
+const temporary = mkdtempSync(join(tmpdir(), 'sca-dsh-'));
+try {
+  process.env.DSH_HOME = join(dirname(patch), 'dsh');
+  const file = moduleSource ? join(temporary, basename(patch)) : patch;
+  if (moduleSource) writeFileSync(join(temporary, moduleName), moduleSource);
+  const staged = file + '.' + randomUUID();
+  writeFileSync(staged, input.subarray(0, newline), {flag: 'wx', mode: 0o600});
+  renameSync(staged, file);
+  argv[argv.indexOf('--patch') + 1] = file;
+  const prompt = join(temporary, 'task');
+  writeFileSync(prompt, input.subarray(newline + 1), {mode: 0o600});
+  const stdin = openSync(prompt, 'r');
+  try {
+    const result = spawnSync(executable, argv, {stdio: [stdin, 'inherit', 'inherit']});
+    if (result.error) throw result.error;
+    process.exitCode = result.status ?? 1;
+  } finally {
+    closeSync(stdin);
+  }
+} finally {
+  rmSync(temporary, {force: true, recursive: true});
+}
+"""
 
 
 def _overlay_guidance(overlay: AgentOverlay | None) -> str:
@@ -255,13 +293,15 @@ class DshBackend:
     def __init__(self, default_model: str, version: str = DSH_VERSION,
                  sandbox_image: str = "sca-sandbox-dsh:latest", *,
                  protocol: GatewayProtocol = "messages", executable: str | None = None,
-                 node_executable: str | None = None, python_executable: str | None = None) -> None:
+                 node_executable: str | None = None, python_executable: str | None = None,
+                 docker_runtime: DockerNodeRuntime | None = None) -> None:
         self.default_model = default_model
         self.version = version
         self.sandbox_image = sandbox_image if executable is None else None
         self.protocol = protocol
         self.executable = executable
         self.node_executable = node_executable
+        self.docker_runtime = docker_runtime
         self.python_executable = python_executable or (sys.executable if executable is not None else "python3")
         if executable is not None:
             self.state_transport = "sync"
@@ -291,11 +331,16 @@ class DshBackend:
             base_url += "/v1"
         patch = f"{ctx.agent_home}/sca-dsh.patch.yml"
         guidance = _overlay_guidance(ctx.agent_overlay)
-        command = [self.executable or "dsh"]
-        if self.node_executable is not None:
-            command.insert(0, self.node_executable)
+        if self.docker_runtime is not None and ctx.image:
+            launcher = [*NODE_SCRIPT, NODE_LAUNCH, "--"]
+            command = [NODE_SCRIPT[0], self.docker_runtime.cli]
+        else:
+            launcher = [self.python_executable, "-c", LAUNCH]
+            command = [self.executable or "dsh"]
+            if self.node_executable is not None:
+                command.insert(0, self.node_executable)
         # Only the launcher path before -- is mapped by the local sandbox.
-        argv = [self.python_executable, "-c", LAUNCH, patch, OVERLAY_FILENAME, OVERLAY_MODULE if guidance else "",
+        argv = [*launcher, patch, OVERLAY_FILENAME, OVERLAY_MODULE if guidance else "",
                 "--", *command, "--profile", "headless", "--patch", patch,
                 "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"]
         if session_id is not None:

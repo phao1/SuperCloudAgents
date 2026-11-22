@@ -1,12 +1,19 @@
+import asyncio
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 from test_pi_fixture import REAL_FAILURE_TRANSCRIPT, TRANSCRIPT
 
-from sca.agents.pi import KEY_ENV, PiBackend, parse_pi_line, render_config
+from sca.agents.pi import KEY_ENV, NODE_LAUNCH, PiBackend, parse_pi_line, render_config
 from sca.config import Settings
 from sca.core.errors import AgentTurnError
 from sca.core.models import AgentContext, ExecExit, ExecOutput
+from sca.host import host_executable
+from sca.orchestration.worker import make_agent_backend
+from sca.sandbox._exec import NODE_EXECUTABLE
 
 
 def test_parser():
@@ -101,10 +108,6 @@ def test_recorded_failure():
 
 
 def test_launcher_writes_only_env_reference(tmp_path):
-    import os
-    import subprocess
-    import sys
-
     from sca.agents.pi import LAUNCH
 
     home = tmp_path / 'agent'
@@ -121,3 +124,45 @@ def test_launcher_writes_only_env_reference(tmp_path):
     assert result.stdout == b'prompt'
     assert (home / 'models.json').read_text() == config
     assert 'launcher-test-credential' not in (home / 'models.json').read_text()
+
+
+async def test_pi_mount_launcher_keeps_session_and_credential_reference(tmp_path):
+    node = host_executable("node.exe" if sys.platform == "win32" else "node")
+    if node is None:
+        pytest.skip("Node.js is unavailable")
+    cli = tmp_path / "fixture.mjs"
+    cli.write_text("""
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+assert.equal(readFileSync(0, 'utf8'), 'prompt');
+assert.equal(process.env.SCA_PI_CONFIG, undefined);
+assert(process.env.SCA_MODEL_KEY);
+assert.equal(process.argv.at(-1), 'fixture-session');
+console.log(JSON.stringify({type:'agent_settled', aborted:false}));
+console.log(JSON.stringify({type:'message_end', message:{role:'assistant', stopReason:'stop'}}));
+""", encoding="utf-8")
+    settings = Settings(_env_file=None, data_dir=tmp_path, agent_backend="pi")
+    backend = make_agent_backend(settings)
+    home = tmp_path / "agent"
+    ctx = AgentContext(task_id="task", agent_home_host=str(home), agent_home=str(home),
+                       model_base_url="http://gateway/v1", model_api_key="fixture-key", image="debian:bookworm")
+
+    class Sandbox:
+        async def exec(self, sid, argv, *, stdin, env, **kwargs):
+            assert argv[:5] == [NODE_EXECUTABLE, "--input-type=module", "-e", NODE_LAUNCH, "--"]
+            assert argv[5] == "/opt/sca-pi/node_modules/.bin/pi"
+            if sys.platform == "win32":
+                env = {**env, "SystemRoot": os.environ["SystemRoot"]}
+            result = await asyncio.to_thread(
+                subprocess.run, [node, *argv[1:5], cli, *argv[6:]], input=stdin, env=env,
+                capture_output=True, check=True, timeout=5,
+            )
+            for line in result.stdout.decode().splitlines():
+                yield ExecOutput(stream="stdout", text=line)
+            yield ExecExit(exit_code=0)
+
+    events = [event async for event in backend.run_turn(
+        Sandbox(), "sandbox", ctx, "prompt", session_id="fixture-session", timeout_s=10,
+    )]
+    assert events[-1].type == "turn_completed"
+    assert json.loads((home / "pi/models.json").read_text())["providers"]["sca"]["apiKey"] == "$SCA_MODEL_KEY"
