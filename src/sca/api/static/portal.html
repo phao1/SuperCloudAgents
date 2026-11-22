@@ -650,7 +650,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <a id="task-project-link" href="#/projects">项目</a><span aria-hidden="true"> › </span>
           <span aria-current="page">线程</span>
         </nav>
-        <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span></header>
+        <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span><span id="task-imported" class="badge" hidden>导入</span></header>
         <p id="task-extras-status" class="status-text portal-message" role="status"></p>
         <div class="panel" hidden><h2>拉取请求与工单</h2><div id="task-delivery" class="stack"></div></div>
         <div class="panel" hidden><h2>工具与冠军</h2><div id="task-tools-champion" class="stack"></div></div>
@@ -2015,7 +2015,7 @@ async function loadPromptPreview(){
 }
 function statusText(value){
   return ({
-    running:'运行中',completed:'已完成',succeeded:'已成功',failed:'失败',queued:'排队中',
+    running:'运行中',completed:'已完成',succeeded:'已成功',failed:'失败',queued:'排队中',stopped:'已停止',
     budget_exhausted:'预算已用尽',QUEUED:'排队中',PROVISIONING:'环境准备',RUNNING:'执行中',
     VERIFYING:'验证中',AWAITING_REVIEW:'待审核',PAUSED:'已暂停',SUCCEEDED:'已成功',
     FAILED:'失败',CANCELLED:'已取消',
@@ -2215,6 +2215,7 @@ function renderTaskDiagnostics(patch=''){
 }
 function renderTaskState(t){
   $('task-title').textContent=[taskCase(t),t.id,t.state_reason].filter(Boolean).join(' · ');
+  $('task-imported').hidden=t.result?.history_imported!==true;
   const state=$('task-state');
   state.textContent=t.state==='QUEUED'&&t.result?.admission?.position
     ?'排队第 '+t.result.admission.position+' 位':statusText(t.state);

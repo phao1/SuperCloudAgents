@@ -37,7 +37,7 @@ from sca.core.models import (
 )
 from sca.kernel.kind import all as all_kinds
 from sca.kinds.coding.best_of import CHOSEN_KEY, PLAN_KEY, SELECT_DECISION_PREFIX, candidate_key
-from sca.storage.local import key_for
+from sca.storage.local import history_artifact_key, key_for
 
 router = APIRouter(prefix="/v1")
 router.include_router(terminal_router)
@@ -233,12 +233,13 @@ async def download(
     user: Annotated[Principal, Depends(authorize("read", guest=True))],
 ) -> Response:
     store = request.app.state.store.for_tenant(user.tenant_id)
-    await store.get_task(task_id, user.tenant_id)
+    task = await store.get_task(task_id, user.tenant_id)
     artifact = await store.get_artifact(task_id, name)
     guest = isinstance(user, GuestPrincipal)
     if guest and not guest_downloadable(artifact):
         raise ForbiddenError("访客只能读取文本制品")
-    data = await request.app.state.object_store.get(key_for(task_id, artifact.name))
+    artifact_key = history_artifact_key if task.result.get("history_imported") is True else key_for
+    data = await request.app.state.object_store.get(artifact_key(task_id, artifact.name))
     return Response(guest_artifact_text(data) if guest else data,
                     media_type="text/plain" if guest else artifact.content_type,
                     headers={"Content-Disposition": "attachment", "X-Content-Type-Options": "nosniff"})
