@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import shutil
 import tempfile
 from pathlib import Path
 
 from sca.core.errors import WorkspaceError
 from sca.core.interfaces import SandboxProvider
 from sca.core.models import ExecExit, Mount
+from sca.host import remove_tree
 from sca.workspace.git import GitWorkspace
 from sca.workspace.tarsafe import chunks, extract, pack, receive
 
@@ -85,5 +85,5 @@ class SyncTransport(MountTransport):
                 await asyncio.to_thread(extract, archive, target)
             home = task_dir / "agent_home"
             if home.exists():
-                shutil.rmtree(home)
+                remove_tree(home)
             (target / "agent_home").replace(home)

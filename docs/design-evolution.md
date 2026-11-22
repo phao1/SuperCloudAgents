@@ -261,3 +261,157 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" -H "Authorization: Bearer $
 `gateway_provider_error` 提供最近一次已识别故障的 `kind` 和 UTC 时间 `at`。
 `gateway_provider_account_error` 保留账户故障，直到成功调用。`rate_limit` 和 `unavailable`
 继续走原有重试流程。
+
+## 7 DeepSeek Harness 自演进（Phase 7）
+
+`scripts/portal_demo.sh up` 的 Docker 和源码模式，以及 Windows 上的
+`.\scripts\portal_source.ps1 up`，都会在启动 API 和 Worker 前运行
+`alembic upgrade head`，应用已有迁移（含 `0025` 和 `0026`）。手动部署时，先运行同一条迁移命令。
+Worker 需要 `dsh` 后端、模型网关和 `SCA_EVAL_API_TOKEN`。在 Portal「自动演进」
+选择 DeepSeek Harness、评测套件和模型。
+基线版本填写已安装的 `@deepseek-ai/dsh` npm 版本，留空使用 `SCA_DSH_VERSION`（默认
+`0.2.2-rc.5`）。已有演进记录、冠军、灰度和定期计划默认归属 OpenCode。
+
+Docker 任务可设置 `"image":"python:3.12"`，或选择与容器架构一致的 glibc Linux 镜像。
+镜像需要兼容的 libstdc++、任务所需的工具，以及 SCA 使用的 Bash 和 Git。Agent
+启动和沙箱命令包装无需镜像自带 Python 或 Node.js。Alpine/musl 镜像会收到中文错误。
+Docker 启动脚本会准备 DSH 运行时，Worker 也会在首次需要时安装。版本化的运行时
+位于 `SCA_DATA_DIR/tools/docker-node`，以只读方式挂载。它使用官方 Node.js 24.22.3
+镜像安装指定的 npm 包和对应架构的原生依赖，清理未被容器使用的旧版本。
+[运行时磁盘配置和旧镜像清理](../README.md#docker-运行时磁盘空间)。
+[Node.js 24 Linux 二进制要求](https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#official-binary-platforms-and-toolchains)
+
+DSH 在每轮通过 `headless --patch` 载入附加提示词。它保留内置系统提示、工具定义和权限策略，
+将 `system_prompt`、`tool_guidance` 及按工具名组织的 `tool_descriptions` 追加到系统提示。
+提议者只编辑追加的文本。基线提供已知版本的内置开场白供参考，其余提示由 DSH 插件在运行时组装。
+配置写入沙箱中的临时目录，任务仓库无需添加指令文件。
+[DSH 系统提示组装](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/core/system-prompt/README.zh.md)
+
+### 最小试跑
+
+使用仓库已提交的 `evals/dsh-smoke` 套件，内含两个开发用例和一个留出用例。
+套件根目录默认为 `evals`。如果自定义了 `SCA_EVAL_SUITES_DIR`，请在 API 和 Worker
+上使用同一个包含 `dsh-smoke` 的套件根目录。
+
+用 `eval` 租户管理员令牌提交一代、两个候选、每题一次、串行的演进。先评测开发集，有候选
+通过开发集门禁才评测留出集。下例把编码评测开支限制在 0.20 美元，每题最多 0.02 美元。
+反思与提议的模型调用单独计费。
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:SCA_API_TOKEN" }
+$body = @{
+  suite = "dsh-smoke"
+  agent_backend = "dsh"
+  model = "deepseek-flash"
+  generations = 1
+  candidates = 2
+  repeat = 1
+  concurrency = 1
+  budget_usd = 0.20
+  case_budget = 0.02
+}
+$run = Invoke-RestMethod "$env:SCA_API_URL/v1/evolutions" -Method Post `
+  -Headers $headers -ContentType "application/json" -Body ($body | ConvertTo-Json)
+Invoke-RestMethod "$env:SCA_API_URL/v1/evolutions/$($run.id)" -Headers $headers
+```
+
+Portal「演进记录」按后端显示运行详情。单独跑开发集时，向 `POST /v1/evals/runs` 提交
+`{"suite":"dsh-smoke","split":"dev","variant":{"agent_backend":"dsh","model":"deepseek-flash"},"budget":0.04,"case_budget":0.02}`。
+定期演进使用 `POST /v1/evolution-schedules`，设置顶层 `"agent_backend":"dsh"` 与
+`"split":"dev"`，在 `config` 中传入代数、候选和预算配置。`opencode-prompt` 是专用的
+OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 套件可用于 DSH。
+
+任务因 Agent 或环境故障结束且未完成一轮时，用例标记为 `errored`。DSH 预算拒绝有单独的判定规则。
+评测详情返回 `errored` 计数及逐题状态。超过半数已执行用例出错时，评测以 `failed` 结束并记录原因。
+演进需要完整的配对结果。基线无效会结束演进，候选评测无效会记录拒绝原因。
+效率晋升要求双方有正的实测用量，已定价模型比较美元支出，未定价模型比较总 Token。
+开发集通过率持平或提高，留出集通过率不降且用量不涨。
+Portal 的评测和演进详情显示失败原因，演进活动失败时还会显示错误类别。
+可通过 `GET /v1/evals/runs/{id}` 和 `GET /v1/evolutions/{id}` 查看这些字段。
+查看单个任务的实测费用时，读取 `GET /v1/tasks/{id}` 的 `usage.cost_micro_usd`。
+Token 用量和轮次费用可在任务的 `agent.usage` 与 `agent.turn_completed` 事件中核对。
+
+冠军按后端、版本和模型分别管理。使用 `GET /v1/champions?agent_backend=dsh` 查看冠军。
+访客模式开启时，可在本机直接读取 DSH 冠军详情。创建者、凭证字段和提示词里的敏感文本会脱敏。
+
+```bash
+curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
+```
+
+在 Portal 提交 DSH 任务时选择「冠军覆盖 → 使用当前冠军」，或在 `POST /v1/tasks` 的
+`spec` 中加入 `"agent_backend":"dsh","use_champion":true`。要配置灰度，在
+`PUT /v1/champions/rollouts` 的请求中加 `"agent_backend":"dsh"`。DSH 冠军即时可用，
+调用固化接口会返回 HTTP 200 和说明。
+
+### DSH 单题预算
+
+Worker 的 `SCA_DSH_MAX_OUTPUT_TOKENS` 默认为 `8192`，适用于 Messages、Chat Completions
+和上下文压缩请求。修改环境变量后重启 Worker。Headless 模式关闭 `session-title-llm` 的后台模型请求。
+按仓库配置的峰值费率，`deepseek-flash` 的 8,192 个输出 Token 约为 $0.00983，预留时还会
+计入输入费用。`deepseek-v4-pro` 的输出费率更高，使用小额 `case_budget` 时需相应降低输出上限。
+[DSH Messages 默认值](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/llm/llm-deepseek/src/defaults.ts)
+
+LiteLLM 1.110.2 按估算输入费用加最大输出费用预留金额，输出上限取请求值和模型上限中的较小值。
+有剩余额度时，默认机制可把超大的预留缩到剩余额度，导致同一虚拟密钥的并发请求暂时被拒。
+Messages 流的成功回调在取得最终用量后按实测费用结算，多余预留随之释放，回调可能晚于客户端收到响应。
+失败路径会清理预留，取消时可能保留已发出的输入费用。平台保留预留机制以约束并发开支。
+启用 `disable_budget_reservation` 后并发请求可能透支。`fail_closed_budget_enforcement` 会直接拒绝
+估算费用超过剩余额度的请求。
+[金额预留与释放](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/spend_tracking/budget_reservation.py)
+[流式请求处理](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/common_request_processing.py#L3269-L3294)
+[费用回调](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/hooks/proxy_track_cost_callback.py#L1195-L1254)
+
+OpenCode 和 Pi 的网关配置走 Chat Completions，分别按模型目录及上下文余量、Pi 自定义模型的
+16,384 Token 默认值及上下文余量设置输出上限。Codex 走 Responses，其请求体省略输出上限时
+由 LiteLLM 估算。启用 SCA 限流代理时，默认的 `auto` 协议为 DSH 选用 Chat Completions。
+代理按请求体大小和输出上限预留 TPM，读到流中的 `usage.total_tokens` 后校正。LiteLLM 继续
+执行独立的美元预算检查。
+[OpenCode 请求构建](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/core/src/session/model-request.ts)
+[Pi 模型默认值](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/src/core/provider-composer.ts#L220-L237)
+[Pi 请求设置](https://github.com/earendil-works/pi/blob/v1.5.2/packages/ai/src/api/simple-options.ts#L44-L74)
+[Codex 请求结构](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/common.rs#L382-L412)
+
+模型已有响应后遇到预算拒绝时，评测计入一个失败用例并保留配对，`results[].reason` 为「预算耗尽」。
+任务的首个模型请求就被拒时，评测以配置错误结束，`reason` 提示检查预算和输出上限。可读取评测详情
+和任务事件核对分类与用量。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evals/runs/$EVAL_RUN_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+### 实时进度与费用
+
+在「自动演进」中选择评测模型和「反思与候选生成模型」。两个选择器读取
+`GET /v1/models`，启动接口用 `model` 和可选的 `evolve_model` 指定对应模型。
+反思摘要与候选假设使用简体中文，给 Agent 的覆盖内容可保留英文。[模型接入](models.md)
+
+运行中的演进和代际节点显示「进行中」。完成的评测按已收集、可评分的结果计算通过率。
+顶部「已用」随 DAG 刷新，包含各次评测已经记账的任务费用，以及 LiteLLM 随反思和提议响应
+返回的费用。页面另列评测预算。DAG 根节点的 `cost_usd` 为总额，`meta.eval_spent_usd` 和
+`meta.proposer_spent_usd` 提供明细。[LiteLLM 响应费用字段](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/common_request_processing.py#L1904-L1928)
+
+```bash
+curl -fsS "$SCA_API_URL/v1/models" -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/dag" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"guidance","text":"优先验证边界条件"}'
+```
+
+### 验证
+
+在 GitHub Actions 的 **Source mode** 工作流中选择 **Run workflow**，可在 Windows、macOS
+和 Ubuntu 上验证源码模式。烟测提交 `fake` 任务后，通过各平台的源码启动脚本导出 ZIP 并重新导入，
+确认新增记录为 0，再用 `GET /v1/tasks` 核对原任务。手工操作示例见 [历史导出与导入](history-transfer.md)。
+
+模拟的 headless 进程和网关验证了提示词追加、续接、Token 用量和虚拟密钥费用。
+安装器单测模拟了 1,179 MB 的 DSH 安装，覆盖 DSH 与 Pi 的磁盘空间门槛及缓存复用。
+评测与演进测试覆盖多数用例出错、基线失效、候选拒绝和零费用门禁。启动测试验证迁移
+先于 API 和 Worker，迁移 `0025` 的 SQL 已离线检查。
+使用已安装的 DSH 0.2.2-rc.5 和模拟流式响应，核对了两个协议的 `max_tokens` 请求字段和标题请求数。
+单测验证了首个请求被拒和中途耗尽预算对应的评测结果。
+当前沙箱拒绝 Postgres 和 Temporal 套接字连接。真实服务、Docker 安装体积、Windows 实机
+和付费模型仍需现场验证。

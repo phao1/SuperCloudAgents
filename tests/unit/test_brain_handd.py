@@ -144,7 +144,7 @@ async def test_brain_tool_transport_and_latency(tmp_path, monkeypatch, record_pr
         gateway_url="http://example.invalid/v1", docker_prefix=prefix, settings=settings,
     )
     monkeypatch.setattr(agent, "materialize", lambda _: tmp_path)
-    monkeypatch.setattr(agent, "cleanup_command", lambda *_: ["/bin/true"])
+    monkeypatch.setattr(agent, "cleanup_command", lambda *_: [sys.executable, "-c", "pass"])
 
     async def inline(function, *args):
         return function(*args)

@@ -23,10 +23,11 @@ with workflow.unsafe.imports_passed_through():
     from sca.config import Settings
     from sca.db.repo import Store
     from sca.eval.suites import load_suite, select_cases
-    from sca.eval.trajectory import overall_passed
+    from sca.eval.trajectory import is_errored, overall_passed
     from sca.evolve.champions import PLATFORM_TENANT
     from sca.evolve.models import EvolutionConfig
     from sca.gateway.configuration import model_configured
+    from sca.gateway.model_providers import read_registry
 
 SCHEDULER_ID = "sca-evolution-scheduler"
 
@@ -38,7 +39,10 @@ def schedule_workflow_id(schedule_id: str | UUID) -> str:
 def should_evolve(current: dict, previous: dict | None, *, threshold: float, always: bool) -> bool:
     if current["status"] != "completed" or not current["results"]:
         return False
-    outcomes = {(row["case_id"], row["repeat"]): overall_passed(row) for row in current["results"]}
+    outcomes = {(row["case_id"], row["repeat"]): overall_passed(row) for row in current["results"]
+                if not is_errored(row)}
+    if not outcomes:
+        return False
     if always or sum(outcomes.values()) / len(outcomes) < threshold:
         return True
     return bool(previous and previous["status"] == "completed" and any(
@@ -127,12 +131,18 @@ class EvolutionSchedulerActivities:
         select_cases(suite, "holdout")
         config = EvolutionConfig(
             **schedule["config"], suite=str(path), agent_version=schedule["agent_version"],
-            model=schedule["model"],
+            model=schedule["model"], agent_backend=schedule.get("agent_backend", "opencode"),
         )
-        champion = await self.store.get_active_champion(config.agent_version, config.model)
+        values = config.model_dump()
+        model = read_registry(self.settings.data_dir).models.get(config.model)
+        if model and model.unpriced:
+            values['model_unpriced'] = True
+        champion = await self.store.get_active_champion(
+            schedule["agent_version"], config.model, agent_backend=config.agent_backend,
+        )
         return {
             "schedule_id": request["schedule_id"], "tenant_id": PLATFORM_TENANT,
-            "created_by": f"schedule:{request['schedule_id']}", "config": config.model_dump(),
+            "created_by": f"schedule:{request['schedule_id']}", "config": values,
             "suite_hash": suite["hash"], "overlay": champion["overlay"] if champion else {},
             "champion_id": str(champion["id"]) if champion else None,
             "previous_run_id": str(schedule["last_eval_run_id"]) if schedule["last_eval_run_id"] else None,
@@ -172,8 +182,10 @@ class EvolutionSchedulerActivities:
         previous = await self.store.get_eval_run(request["previous_run_id"])
         params, config = previous["variant"], request["config"]
         variant = params.get("variant", {})
-        if params.get("suite") == config["suite"] and all(
-            variant.get(key) == config[key] for key in ("agent_version", "model")
+        if (
+            params.get("suite") == config["suite"]
+            and variant.get("agent_backend", "opencode") == config.get("agent_backend", "opencode")
+            and all(variant.get(key) == config[key] for key in ("agent_version", "model"))
         ):
             return previous
         return None

@@ -18,7 +18,8 @@ from sca.evolve.scheduler import schedule_workflow_id
 
 @pytest.fixture
 async def api(tmp_path, monkeypatch):
-    settings = SimpleNamespace(eval_suites_dir=tmp_path, task_queue="queue")
+    settings = SimpleNamespace(data_dir=tmp_path, eval_suites_dir=tmp_path, task_queue="queue",
+                               dsh_version="0.2.2-rc.5")
     monkeypatch.setattr(evolutions, "get_settings", lambda: settings)
     monkeypatch.setattr(harvest, "get_settings", lambda: settings)
     (tmp_path / "suite").mkdir()
@@ -67,7 +68,9 @@ async def test_rollout_is_tenant_admin_scoped_and_rollback_is_platform_only(api)
     path = "/v1/champions/rollouts"
     response = await http.put(path, json=body)
     assert response.json() == {"tenant_id": "team", "percent": 30}
-    scopes["team"].put_champion_rollout.assert_awaited_once_with("v", "m", champion_id, 30, "operator")
+    scopes["team"].put_champion_rollout.assert_awaited_once_with(
+        "v", "m", champion_id, 30, "operator", agent_backend="opencode",
+    )
     assert (await http.get(path)).status_code == 200
     assert (await http.put(path, json={**body, "percent": 101})).status_code == 422
     assert (await http.put(path, json={**body, "tenant_id": "eval"})).status_code == 422
@@ -107,6 +110,20 @@ async def test_schedule_crud_and_run_now(api):
     )
     assert (await http.post(detail + "/run-now")).status_code == 409
     assert (await http.delete(detail)).status_code == 204
+
+
+async def test_dsh_schedule_defaults_and_validation(api):
+    http, user, scopes, _ = api
+    user.tenant_id = "eval"
+    path = "/v1/evolution-schedules"
+    body = {"suite": "suite", "agent_backend": "dsh", "interval_hours": 8, "threshold": .8}
+    assert (await http.post(path, json=body)).status_code == 201
+    assert (await http.put(f"{path}/{uuid4()}", json=body)).status_code == 200
+    for save, index in ((scopes["eval"].create_evolution_schedule, 0), (scopes["eval"].update_evolution_schedule, 1)):
+        values = save.call_args.args[index]
+        assert values["agent_backend"] == "dsh" and values["agent_version"] == "0.2.2-rc.5"
+    assert (await http.post(path, json={**body, "agent_backend": "pi"})).status_code == 422
+    assert (await http.post(path, json={**body, "agent_version": "0.2.1"})).status_code == 422
 
 
 async def test_harvest_intake_and_publication_have_separate_scope(api, monkeypatch):

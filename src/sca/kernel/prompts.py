@@ -44,7 +44,7 @@ def render_prompt(spec: dict, name: str, **values: object) -> str:
         commands = [c for c in [spec.get("verify_command"), *spec.get("verify_commands", [])] if c]
         mode = "single" if len(commands) == 1 else "multiple" if commands else "none"
         paragraph = PROMPTS_ROOT / kind / "prompts" / version / f"verify_{mode}.txt"
-        context["verification"] = Template(paragraph.read_text()).substitute(
+        context["verification"] = Template(paragraph.read_text(encoding="utf-8")).substitute(
             command=commands[0] if commands else "",
             listing="\n".join(f"    {command}" for command in commands),
         )
@@ -58,4 +58,4 @@ def render_prompt(spec: dict, name: str, **values: object) -> str:
         context.setdefault("checks", [])
         context.setdefault("report_format", "markdown")
     path = PROMPTS_ROOT / kind / "prompts" / version / f"{name}.txt"
-    return Template(path.read_text()).substitute(context)
+    return Template(path.read_text(encoding="utf-8")).substitute(context)

@@ -4,8 +4,11 @@ import ast
 import hashlib
 import runpy
 import shutil
+import signal
 from collections import Counter
 from pathlib import Path
+
+import pytest
 
 from sca.eval.suites import archive_directory, load_suite, select_cases
 from sca.kernel.acceptance import extract_acceptance
@@ -81,6 +84,7 @@ def test_acceptance_archive_contains_only_the_hidden_runner(tmp_path: Path) -> N
         assert (destination / "hidden.py").read_bytes() == (acceptance / "hidden.py").read_bytes()
 
 
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Long-haul acceptance uses a POSIX interval timer")
 def test_acceptance_rejects_changes_to_public_verification(tmp_path: Path) -> None:
     checker = runpy.run_path(str(SUITE / "check_cases.py"))
     case = SUITE / "cases/purchase-rounds"

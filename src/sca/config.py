@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import platform
+import sys
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
@@ -25,6 +26,9 @@ HOST_ARCH: Literal["x64", "arm64"] = (
     "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
 )
 
+# DSH request budgets
+DSH_DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+
 
 class IntentCredential(BaseModel):
     token: SecretStr = Field(min_length=1, repr=False)
@@ -33,7 +37,9 @@ class IntentCredential(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SCA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SCA_", env_file=".env", env_file_encoding="utf-8", extra="ignore",
+    )
 
     memory_max_items: int = Field(default=30, ge=0, le=1000)
     memory_max_chars: int = Field(default=3000, ge=0, le=100000)
@@ -316,6 +322,23 @@ class Settings(BaseSettings):
         if info.data.get("guest_view") == "all" and ack != "1":
             raise ValueError("SCA_GUEST_VIEW=all requires SCA_GUEST_VIEW_ACKNOWLEDGE_RISK=1")
         return ack
+
+    # Windows source mode
+    @model_validator(mode="after")
+    def windows_source_defaults(self) -> Settings:
+        if sys.platform == "win32" and self.sandbox_driver == "local":
+            if "agent_backend" not in self.model_fields_set:
+                self.agent_backend = "dsh"
+            if self.agent_backend == "dsh" and "default_model" not in self.model_fields_set:
+                self.default_model = "deepseek-flash"
+        return self
+
+    # Mounted Docker runtimes for Node agents
+    node_runtime_max_mb: int = Field(default=2000, ge=1)
+    pi_node_runtime_max_mb: int = Field(default=270, ge=1)
+
+    # DSH request budgets
+    dsh_max_output_tokens: int = Field(default=DSH_DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=2**53 - 1)
 
 
 # Local source mode

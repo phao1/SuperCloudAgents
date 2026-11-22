@@ -6,6 +6,10 @@ import pytest
 
 from sca.sandbox.handd import DAEMON, MAX_PTY_OUTPUT, HanddClient, HanddProcess
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="handd runs inside Linux sandboxes only",
+)
+
 
 @pytest.fixture
 async def handd():
@@ -64,13 +68,13 @@ time.sleep(30)
     async with asyncio.timeout(5), handd.open_pty(
         [sys.executable, "-c", program, str(target)], timeout_s=4,
     ) as job:
-        await read_until(job, b"ready")
+        assert await read_until(job, b"ready\r\n") == b"ready\r\n"
         await job.close()
         assert (await job.receive())["exit"] == -9
     await asyncio.sleep(.4)
     assert not target.exists()
     assert not handd.pending
-    assert [event.exit_code async for event in handd.exec(["/bin/true"])] == [0]
+    assert [event.exit_code async for event in handd.exec([sys.executable, "-c", "pass"])] == [0]
 
 
 async def test_pty_timeout_and_spawn_error(handd):
@@ -81,7 +85,7 @@ async def test_pty_timeout_and_spawn_error(handd):
             assert await job.receive() == {"id": job.id, "exit": 124, "timed_out": True}
         async with handd.open_pty(["/does-not-exist"]) as job:
             assert await job.receive() == {"id": job.id, "exit": 127, "timed_out": False}
-        async with handd.open_pty(["/bin/true"], rows=0) as job:
+        async with handd.open_pty([sys.executable, "-c", "pass"], rows=0) as job:
             assert await job.receive() == {"id": job.id, "exit": 127, "timed_out": False}
 
 

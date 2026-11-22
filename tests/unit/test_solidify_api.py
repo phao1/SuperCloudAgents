@@ -114,8 +114,23 @@ async def test_source_mode_rejects_builds_before_dispatch(api):
         response = await client.post(path, json={})
         assert response.status_code == 409
         assert response.json()["error"]["message"] == DOCKER_BUILD_REQUIRED
-    tenant.get_champion.assert_not_called()
+    tenant.get_champion.assert_awaited_once()
     temporal.start_workflow.assert_not_called()
+    assert not settings.opencode_versions_dir.exists()
+
+
+@pytest.mark.parametrize("driver", ["docker", "local"])
+async def test_dsh_solidify_is_a_runtime_noop(api, driver):
+    client, settings, _, temporal, champion = api
+    settings.sandbox_driver = driver
+    champion.update(agent_backend="dsh", candidate_id=None)
+    path = f"/v1/champions/{champion['id']}"
+    response = await client.post(f"{path}/solidify")
+    assert response.status_code == 200
+    assert response.json()["status"] == "succeeded"
+    assert "无需固化构建" in response.json()["message"]
+    assert (await client.get(path)).json()["solidify_builds"] == []
+    temporal.start_workflow.assert_not_awaited()
     assert not settings.opencode_versions_dir.exists()
 
 

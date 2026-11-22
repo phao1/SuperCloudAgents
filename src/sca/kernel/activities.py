@@ -17,9 +17,12 @@ from temporalio.exceptions import ApplicationError
 
 from sca.config import Settings
 from sca.core.errors import (
+    MODEL_BUDGET_EXHAUSTED,
+    MODEL_BUDGET_MISCONFIGURED,
     AgentTurnError,
     ConflictError,
     InvalidTaskError,
+    ModelBudgetRefused,
     NotFoundError,
     SandboxError,
 )
@@ -40,6 +43,7 @@ from sca.core.models import (
     AgentOverlay,
     EventType,
     ExecExit,
+    Mount,
     SandboxSpec,
     Task,
     TaskState,
@@ -47,6 +51,7 @@ from sca.core.models import (
 )
 from sca.db.repo import Store
 from sca.gateway.health import ProviderHealth
+from sca.gateway.model_providers import read_registry
 from sca.kernel.interjection import (
     HEARTBEAT_INTERVAL,
     MESSAGES_PENDING,
@@ -287,18 +292,21 @@ class KernelActivities:
         model = spec.model or self.settings.default_model
         # A champion is tuned for one version and model; an explicit different pin (for example a
         # Best-of-N attempt on another model) runs without it.
-        if champion is not None and (version or champion["agent_version"]) == champion["agent_version"] \
-                and model == champion["model"] and overlay is None:
+        if (champion is not None and overlay is None
+                and (version or champion["agent_version"]) == champion["agent_version"]
+                and model == champion["model"]
+                and champion.get("agent_backend", "opencode") == self._backend(spec).name):
             overlay = AgentOverlay.model_validate(champion["overlay"])
             version = champion["agent_version"]
-        if overlay is not None and self._backend(spec).name != "opencode":
-            raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode"))
+        if overlay is not None and self._backend(spec).name not in {"opencode", "dsh"}:
+            raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode and dsh"))
         return AgentContext(
             task_id=task_id,
             agent_home_host=str(self._task_dir(task_id) / "agent_home"),
             agent_version=version,
             agent_overlay=overlay,
             model=model,
+            image=getattr(spec, "image", None),
         )
 
     # OpenCode platform default
@@ -756,6 +764,7 @@ class KernelActivities:
         ctx = self._agent_ctx(task_id, spec, champion)
         await self._resolve_opencode_version(ctx, backend, task_id)
         additions = backend.sandbox_additions(ctx)
+        runtime_mounts = await self._docker_node_mounts(backend, spec.image)
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -768,6 +777,7 @@ class KernelActivities:
             mounts=[
                 *self.transport.mounts(self._task_dir(task_id)),
                 *additions.mounts,
+                *runtime_mounts,
                 *cache_mounts,
             ],
             env={**cache_env, **additions.env},
@@ -910,6 +920,7 @@ class KernelActivities:
             await self.restore_sandbox(StepInput(task_id, turn - 1))
         spec = await self._spec(task_id)
         agent = self._backend(spec)
+        gateway = None if self.settings.sandbox_driver == "local" and agent.name == "fake" else self.gateway
         sandbox_id = await self._sandbox_id(task_id)
         await self._before_agent_turn(task_id, sandbox_id)
         # A session first created by the interrupted turn is absent from the snapshot.
@@ -919,8 +930,11 @@ class KernelActivities:
             else inp.session_id or await self.store.get_session_id(task_id)
         )
 
-        turn_budget = self.settings.model_gateway_turn_budget_usd
-        if self.gateway and spec.max_cost_usd is not None:
+        # Local model providers
+        model = read_registry(self.settings.data_dir).models.get(
+            spec.model or self.settings.default_model) if gateway else None
+        turn_budget = None if model and model.unpriced else self.settings.model_gateway_turn_budget_usd
+        if gateway and turn_budget is not None and spec.max_cost_usd is not None:
             task = await self.store.get_task(task_id)
             remaining = spec.max_cost_usd - task.usage.get("cost_micro_usd", 0) / 1e6
             if remaining <= 0:
@@ -928,6 +942,9 @@ class KernelActivities:
             turn_budget = min(turn_budget, remaining)
 
         ctx = await self._attach_tools(task_id, spec, key, champion)
+        if model is not None:
+            ctx.model_context_window = model.context_window
+            ctx.model_registered = True
         overlay_metadata = ({"overlay_sha256": ctx.agent_overlay.sha256()}
                             if ctx.agent_overlay is not None else {})
         if overlay_metadata:
@@ -945,10 +962,10 @@ class KernelActivities:
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):
             key_alias += f"-{getattr(self, 'scope', self.name)}"
-        if self.gateway:
+        if gateway:
             # The credential lives exactly as long as the turn and never enters the
             # workflow history.
-            ctx.model_base_url = self.gateway.sandbox_url
+            ctx.model_base_url = gateway.sandbox_url
             if getattr(spec, "tools", []):
                 from sca.tools.sandbox import ToolSandboxProvider
 
@@ -966,9 +983,9 @@ class KernelActivities:
         n = 0
         issued = False
         try:
-            if self.gateway:
+            if gateway:
                 # Wait for an in-progress issuance before revoking the alias on cancellation.
-                issue = asyncio.create_task(self.gateway.issue_key(
+                issue = asyncio.create_task(gateway.issue_key(
                     key_alias,
                     models=[ctx.model or self.settings.default_model],
                     ttl_s=spec.turn_timeout_s + 120,
@@ -1059,13 +1076,13 @@ class KernelActivities:
             if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
                 await self.store.append_event(task_id, "sandbox.transition",
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
-            if self.gateway and issued:
-                finalize = getattr(self.gateway, "finalize_key", None)
+            if gateway and issued:
+                finalize = getattr(gateway, "finalize_key", None)
                 try:
                     if finalize is not None:
                         spend, cost_final = await asyncio.shield(finalize(key_alias))
                     else:
-                        spend = await asyncio.shield(self.gateway.revoke_key(key_alias))
+                        spend = await asyncio.shield(gateway.revoke_key(key_alias))
                 except GatewayError:
                     if provider_error is None or not provider_error.is_account_error:
                         raise
@@ -1078,6 +1095,9 @@ class KernelActivities:
         if turn_error is not None:
             if provider_error is not None and provider_error.is_account_error:
                 raise account_failure(provider_error) from None
+            if isinstance(turn_error, ModelBudgetRefused):
+                budget_error = await self._model_budget_failure(inp, key, turn_error)
+                raise budget_error from None
             reason = await self.store.check_budget(task_id)
             if reason or "budget" in str(turn_error).lower():
                 raise ApplicationError(
@@ -1099,6 +1119,22 @@ class KernelActivities:
             dedup_key=f"{key}.completed",
         )
         return TurnResult(session_id=session_id, final_message=final_message)
+
+    # Model gateway budget refusals
+    async def _model_budget_failure(
+        self, inp: TurnInput, key: str, error: ModelBudgetRefused,
+    ) -> ApplicationError:
+        model_responded = error.model_responded
+        if not model_responded:
+            # Read after key settlement to include usage from interrupted and earlier turns.
+            usage = (await self.store.get_task(inp.task_id)).usage
+            model_responded = any(usage.get(field, 0) > 0 for field in (
+                "input_tokens", "output_tokens", "cost_micro_usd",
+            ))
+        reason = MODEL_BUDGET_EXHAUSTED if model_responded else MODEL_BUDGET_MISCONFIGURED
+        await self.store.append_event(inp.task_id, EventType.BUDGET_EXCEEDED,
+                                      {"turn": inp.turn, "reason": reason}, dedup_key=f"{key}.budget")
+        return ApplicationError(reason, type="BudgetExceeded", non_retryable=True)
 
     @activity.defn
     async def check_budget(self, inp: StepInput) -> str | None:
@@ -1226,12 +1262,14 @@ class KernelActivities:
             await clean.prepare(str(source.mirror), commit)
             await asyncio.to_thread(extract_acceptance, archive, clean.workspace,
                                     self.settings.max_upload_mb * 1024 * 1024)
+            backend = self._backend(spec)
+            runtime_mounts = await self._docker_node_mounts(backend, spec.image, node_only=True)
             sandbox_spec = SandboxSpec(
                 image=spec.image or self.settings.sandbox_image,
-                mounts=self.transport.mounts(clean.task_dir),
+                mounts=[*self.transport.mounts(clean.task_dir), *runtime_mounts],
                 cpus=self.settings.sandbox_cpus,
                 memory_mb=self.settings.sandbox_memory_mb,
-                network=getattr(self._backend(spec), "sandbox_network", self.settings.sandbox_network),
+                network=getattr(backend, "sandbox_network", self.settings.sandbox_network),
                 runtime=self.settings.sandbox_runtime,
                 labels={"sca.task_id": task_id, "sca.acceptance": "true"},
             )
@@ -1249,24 +1287,36 @@ class KernelActivities:
         await self.store.complete_acceptance(task_id, passed, code.exit_code, tail(output))
         return passed
 
-    # Evolution productization
+    # Mounted Docker runtimes for Node agents
+
+    async def _docker_node_mounts(
+        self, backend: AgentBackend, image: str | None, *, node_only: bool = False,
+    ) -> list[Mount]:
+        if image and (runtime := getattr(backend, "docker_runtime", None)) is not None:
+            return await runtime.mounts(node_only=node_only)
+        return []
+
+    # Evolution productization and DeepSeek Harness evolution
 
     async def _pin_champion(self, task: Task, spec: dict) -> None:
         from sca.evolve.champions import select_champion
 
         use_champion = spec.get("use_champion")
         backend = spec.get("agent_backend") or self.agent.name
-        if (backend != "opencode" or spec.get("agent_overlay") is not None
+        if (backend not in {"opencode", "dsh"} or spec.get("agent_overlay") is not None
                 or use_champion is False or "champion_id" in task.result):
             return
         # Unqualified evaluation variants measure the baseline independently of live rollout.
         if spec.get("eval_run_id") and use_champion is None:
             return
+        version = spec.get("agent_version")
+        if version is None:
+            version = self.settings.dsh_version if backend == "dsh" else (
+                await self.store.resolve_task_opencode_version(str(task.id), self.settings.opencode_default_version)
+            )
         champion = await select_champion(
-            self.store, task.id, task.tenant_id,
-            spec.get("agent_version") or await self.store.resolve_task_opencode_version(
-                str(task.id), self.settings.opencode_default_version),
-            spec.get("model") or self.settings.default_model, use_champion,
+            self.store, task.id, task.tenant_id, version,
+            spec.get("model") or self.settings.default_model, use_champion, agent_backend=backend,
         )
         selection = None
         if champion is not None:

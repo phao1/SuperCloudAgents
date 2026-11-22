@@ -189,6 +189,38 @@ assert.deepEqual(layout(folded).nodes.map(n => n.node.id),
 """)
 
 
+def test_evolution_dag_folds_cases_without_losing_paths_to_decisions():
+    run_node("""
+const assert = require('node:assert/strict');
+const {layout, projectEvolution} = require(process.argv[1]);
+const dag = {
+  nodes: [
+    {id: 'candidate', kind: 'candidate'}, {id: 'dev', kind: 'eval_run', score: .5, cost_usd: .02},
+    {id: 'case1', kind: 'case_task', meta: {parent: 'dev'}},
+    {id: 'case2', kind: 'case_task', meta: {parent: 'dev'}},
+    {id: 'holdout', kind: 'eval_run'}, {id: 'holdout-case', kind: 'case_task', meta: {parent: 'holdout'}},
+    {id: 'decision', kind: 'promotion'},
+  ],
+  edges: [
+    ['candidate', 'dev'], ['dev', 'case1'], ['dev', 'case2'], ['case1', 'holdout'], ['case2', 'holdout'],
+    ['holdout', 'holdout-case'], ['holdout-case', 'decision'],
+  ].map(([from, to]) => ({from, to, kind: 'sequence'})),
+};
+const folded = projectEvolution(dag);
+assert.deepEqual(folded.nodes.map(node => node.id), ['candidate', 'dev', 'holdout', 'decision']);
+assert.deepEqual(folded.edges.map(e => [e.from, e.to]),
+  [['candidate', 'dev'], ['dev', 'holdout'], ['holdout', 'decision']]);
+assert.deepEqual(folded.nodes[1], {...dag.nodes[1], caseCount: 2, collapsible: true, expanded: false});
+const opened = projectEvolution(dag, new Set(['dev']));
+assert(opened.nodes.find(node => node.id === 'dev').expanded);
+assert.deepEqual(opened.nodes.filter(node => node.kind === 'case_task').map(node => node.id), ['case1', 'case2']);
+assert.equal(layout(folded).nodes.length, 4);
+const graph = layout(opened);
+assert.equal(graph.nodes.length, opened.nodes.length);
+assert(graph.edges.every(e => e.source.y < e.target.y));
+""")
+
+
 def test_stream_refresh_keeps_open_groups_and_the_pan_and_zoom(demo_dag):
     run_node("""
 const assert = require('node:assert/strict');
@@ -249,9 +281,45 @@ const toggle = id => svg.listeners.click({target: rendered(id), detail: 1});
   assert.equal(horizontal.getAttribute('aria-pressed'), 'true');
   assert.equal(vertical.getAttribute('aria-pressed'), 'false');
   fit.onclick();
-  assert.match(camera(), /scale\\(0\\.85\\)$/);
+  assert(Number(camera().match(/scale\\(([^)]+)/)[1]) < .85);
   toggle(currency.id);
   assert.equal(rendered(currency.id).getAttribute('aria-expanded'), 'false');
-  assert.equal(rendered(dag.nodes.find(n => n.meta.parent === currency.id).id), undefined);
+  const turn = dag.nodes.find(n => n.meta.parent === currency.id);
+  assert.equal(rendered(turn.id), undefined);
+  assert(controller.focus(turn.id));
+  assert.equal(rendered(currency.id).getAttribute('aria-expanded'), 'true');
+  assert.equal(rendered(turn.id).getAttribute('aria-pressed'), 'true');
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """, demo_dag)
+
+
+def test_evolution_bands_keep_each_candidate_with_its_evaluations():
+    run_node("""
+const assert = require('node:assert/strict');
+const {layoutEvolution, projectEvolution, highlightedPath} = require(process.argv[1]);
+const node = (id, kind, band, level, column, extra = {}) =>
+  ({id, kind, status: 'succeeded', meta: {band, level, column, ...extra}});
+const dag = {nodes: [
+  node('start', 'evolution', 0, 0, 0), node('base', 'eval_run', 0, 1, 1),
+  node('gen', 'generation', 1, 0, 0), node('a', 'candidate', 1, 1, 1), node('b', 'candidate', 1, 1, 2),
+  node('devA', 'eval_run', 1, 2, 1, {cases_passed: 1}), node('devB', 'eval_run', 1, 2, 2),
+  node('case', 'case_task', 1, 3, 1, {parent: 'devA'}), node('holdoutB', 'eval_run', 1, 4, 2),
+  node('gate', 'promotion', 1, 6, 0, {winner_column: 2}),
+  node('winner', 'champion', 2, 0, 0, {band_title: '冠军', best: true}),
+], edges: [
+  ['start', 'base'], ['base', 'gen'], ['gen', 'a'], ['gen', 'b'], ['a', 'devA'], ['b', 'devB'],
+  ['devA', 'case'], ['case', 'gate'], ['devB', 'holdoutB'], ['holdoutB', 'gate'], ['gate', 'winner'],
+].map(([from, to]) => ({from, to, kind: 'sequence'}))};
+const folded = projectEvolution(dag);
+assert.equal(folded.nodes.find(node => node.id === 'devA').casePassed, 1);
+const result = layoutEvolution(folded);
+const pos = Object.fromEntries(result.nodes.map(n => [n.node.id, n]));
+assert.deepEqual(result.bands.map(b => b.title), ['基线','第 1 代','冠军']);
+assert.equal(pos.a.y, pos.b.y);
+assert.equal(pos.devA.y, pos.devB.y);
+assert.equal(pos.a.x, pos.devA.x);
+assert.equal(pos.holdoutB.x, pos.b.x);
+assert(pos.a.x + pos.a.width < pos.b.x);
+assert(result.edges.every(e => e.source.y + e.source.height < e.target.y));
+assert.deepEqual([...highlightedPath(folded).nodes], ['winner','gate','holdoutB','devB','b','gen','base','start']);
+""")

@@ -2,7 +2,9 @@
 
 import asyncio
 import shutil
+from datetime import datetime
 from pathlib import Path
+from typing import TypedDict
 from uuid import UUID
 
 import httpx
@@ -10,8 +12,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from temporalio import activity
 
 from sca.config import Settings
+from sca.core.errors import MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED
 from sca.core.model_provider import ModelProviderError
-from sca.core.models import TERMINAL_STATES
+from sca.core.models import TERMINAL_STATES, EventType
 from sca.db.repo import Store
 from sca.eval.errors import invalid_eval_input, suite_changed
 from sca.eval.suites import (
@@ -22,6 +25,9 @@ from sca.eval.suites import (
     select_cases,
 )
 from sca.eval.trajectory import evaluate
+from sca.gateway.configuration import local_default_model
+from sca.gateway.model_providers import read_registry
+from sca.host import remove_tree
 from sca.orchestration.provider_errors import account_failure
 
 
@@ -39,8 +45,15 @@ def check_response(response: httpx.Response) -> None:
 
 
 class EvalSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SCA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SCA_", env_file=".env", env_file_encoding="utf-8", extra="ignore",
+    )
     eval_api_token: str = ""
+
+
+class CaseOutcome(TypedDict):
+    cost_usd: float
+    errored: bool
 
 
 class EvalActivities:
@@ -78,14 +91,21 @@ class EvalActivities:
             "created_by": "cli", "status": "running",
         })
         await self.store.start_eval_run(request["id"])
-        return {"cases": [{**case, "kind": suite.get("kind", "coding"),
-                           "suite_hash": suite["hash"],
-                           "spec": {**suite.get("defaults", {}), **case["spec"]}}
-                          for case in cases]}
+        models = read_registry(self.settings.data_dir).models
+        default = local_default_model(self.settings.data_dir, self.settings.default_model)
+        variant_model = request.get("variant", {}).get("model")
+        plan = []
+        for case in cases:
+            spec = {**suite.get("defaults", {}), **case["spec"]}
+            model = models.get(variant_model or spec.get("model") or default)
+            plan.append({**case, "kind": suite.get("kind", "coding"), "suite_hash": suite["hash"],
+                         "spec": spec, **({"model_unpriced": True} if model and model.unpriced else {})})
+        return {"cases": plan}
 
     async def git(self, directory: Path, *args: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args,
+            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "core.autocrlf=false", *args,
             cwd=directory, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         if await proc.wait():
             raise invalid_eval_input(f"Could not prepare the evaluation fixture (git {args[0]} failed)")
@@ -136,20 +156,23 @@ class EvalActivities:
                 async with locks._lock(root / "locks" / "fixture"):
                     if not (root / "ready").exists():
                         if repo.exists():
-                            shutil.rmtree(repo)
+                            remove_tree(repo)
                         if (source / "repo.bundle").exists():
-                            await self.git(root, "clone", "--bare", str(source / "repo.bundle"), str(repo))
+                            await self.git(root, "clone", "--bare", "-c", "core.autocrlf=false",
+                                           str(source / "repo.bundle"), str(repo))
                         else:
                             if not (source / "repo").is_dir():
                                 raise invalid_eval_input("Evaluation fixture repository is missing")
                             if seed.exists():
-                                shutil.rmtree(seed)
+                                remove_tree(seed)
                             shutil.copytree(source / "repo", seed)
                             await self.git(seed, "init", "-b", "main")
+                            await self.git(seed, "config", "core.autocrlf", "false")
                             await self.git(seed, "add", ".")
                             await self.git(seed, "-c", "user.name=Eval", "-c", "user.email=eval@invalid",
                                            "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
-                            await self.git(root, "clone", "--bare", str(seed), str(repo))
+                            await self.git(root, "clone", "--bare", "-c", "core.autocrlf=false",
+                                           str(seed), str(repo))
                         (root / "ready").touch()
                 spec["repo_url"] = str(repo)
             else:
@@ -171,18 +194,16 @@ class EvalActivities:
             return task["id"]
 
     @activity.defn(name="eval_collect")
-    async def collect(self, request: dict) -> float | None:
+    async def collect(self, request: dict) -> CaseOutcome | float | None:
         async with self.http() as http:
             response = await http.get(f"/v1/tasks/{request['task_id']}")
             check_response(response)
             task = response.json()
         if task["state"] not in TERMINAL_STATES:
             return None
-        from datetime import datetime
-
         result, usage = task["result"], task["usage"]
         provider = ModelProviderError.from_payload(result.get("model_provider_error"))
-        infrastructure_error = task["state"] == "FAILED" and provider is not None and provider.is_account_error
+        account_error = task["state"] == "FAILED" and provider is not None and provider.is_account_error
         events, cursor = [], 0
         async with self.http() as http:
             while True:
@@ -197,8 +218,16 @@ class EvalActivities:
         if turns is None:
             turns = max((event["payload"].get("turn", 0) for event in events
                          if event["type"] == "agent.turn_started"), default=0)
+        budget_reason = task.get("state_reason") if task["state"] == "FAILED" else None
+        budget_exhausted = budget_reason == MODEL_BUDGET_EXHAUSTED
+        budget_misconfigured = budget_reason == MODEL_BUDGET_MISCONFIGURED
+        errored = account_error or budget_misconfigured or (
+            task["state"] != "SUCCEEDED"
+            and not budget_exhausted
+            and not any(event["type"] == EventType.AGENT_TURN_COMPLETED for event in events)
+        )
         trajectory_passed, trajectory_findings = None, []
-        if not infrastructure_error:
+        if not errored:
             try:
                 trajectory_passed, trajectory_findings = evaluate(
                     events, request["case"].get("trajectory_checks", []))
@@ -208,17 +237,21 @@ class EvalActivities:
         await self.store.record_eval_result({
             "run_id": UUID(request["id"]), "tenant_id": "eval", "case_id": request["case"]["id"],
             "repeat": request["iteration"], "task_id": UUID(task["id"]),
-            "acceptance_passed": None if infrastructure_error else result.get("acceptance_passed", False),
+            "acceptance_passed": None if errored else not budget_exhausted and result.get("acceptance_passed", False),
             "trajectory_passed": trajectory_passed, "trajectory_findings": trajectory_findings,
-            "verification_passed": None if infrastructure_error else result.get("verification_passed", False),
+            "verification_passed": None if errored else not budget_exhausted and result.get("verification_passed", False),
             "turns": turns,
             "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             "cost_usd": cost,
             "duration_s": (datetime.fromisoformat(task["updated_at"]) -
                            datetime.fromisoformat(task["created_at"])).total_seconds(),
         })
-        if infrastructure_error and provider is not None:
+        if account_error and provider is not None:
             raise account_failure(provider)
+        if budget_misconfigured:
+            raise invalid_eval_input(MODEL_BUDGET_MISCONFIGURED)
+        if request.get("report_outcome"):
+            return {"cost_usd": cost, "errored": errored}
         return cost
 
     @activity.defn(name="eval_finish")

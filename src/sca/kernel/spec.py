@@ -1,9 +1,10 @@
 """Common fields for every scenario's specification."""
 
+import re
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 
 from sca.core.models import AgentOverlay
 from sca.intents.base import MAX_SOURCES, IntentSource
@@ -24,7 +25,7 @@ class CommonSpec(BaseModel):
     auto_finish: bool = False
     agent_overlay: AgentOverlay | None = None
     agent_backend: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9_-]*$")
-    agent_version: str | None = Field(default=None, pattern=r"^2\.3\.0-sca\.(0|[1-9][0-9]*)$")
+    agent_version: str | None = None
     prompt_version: str | None = Field(default=None, pattern=r"^[a-zA-Z0-9_-]+$")
     memory_enabled: bool | None = None
     eval_run_id: str | None = None
@@ -51,3 +52,17 @@ class CommonSpec(BaseModel):
 
     def model_dump(self, **kwargs) -> dict:
         return super().model_dump(**{"mode": "json", **kwargs})
+
+    # DeepSeek Harness evolution
+    @field_validator("agent_version")
+    @classmethod
+    def validate_agent_version(cls, version: str | None, info: ValidationInfo) -> str | None:
+        if version is None:
+            return None
+        if info.data.get("agent_backend") == "dsh":
+            label = r"[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*"
+            if not re.fullmatch(rf"(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){{2}}(?:-{label})?(?:\+{label})?", version):
+                raise ValueError("请选择有效的 DeepSeek Harness npm 版本")
+        elif not re.fullmatch(r"2\.3\.0-sca\.(0|[1-9][0-9]*)", version):
+            raise ValueError("请选择有效的 OpenCode 版本")
+        return version

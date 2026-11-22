@@ -250,6 +250,10 @@ def create_app(
     from sca.api.model_access import ModelNotConfiguredError, model_not_configured
 
     app.add_exception_handler(ModelNotConfiguredError, model_not_configured)
+    # Local model providers
+    from sca.api.model_providers import router as model_providers_router
+
+    app.include_router(model_providers_router)
     return app
 
 

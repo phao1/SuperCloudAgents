@@ -119,8 +119,8 @@ class LocalWorkflow:
         await self.task.submit_review(decision, feedback)
         self.signal.set()
 
-    async def run(self):
-        async with asyncio.timeout(20):
+    async def run(self, *, timeout_s: float = 20):
+        async with asyncio.timeout(timeout_s):
             return await self.task.run(str(TASK_ID))
 
 

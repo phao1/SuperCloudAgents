@@ -8,7 +8,7 @@ from collections import Counter
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import NoResultFound
 from temporalio.service import RPCError
@@ -20,7 +20,6 @@ from sca.agents.opencode_build import (
     write_record,
 )
 from sca.agents.opencode_prompt import (
-    PROMPT_MODELS,
     PROMPT_PATH,
     PROMPT_SUITE,
     PROMPT_TARGET,
@@ -29,9 +28,10 @@ from sca.agents.opencode_prompt import (
     read_source_prompt,
     version_commit,
 )
-from sca.api.authz import authorize
+from sca.api.authz import GuestPrincipal, authorize
 from sca.api.evals import RunRequest, enqueue_run, read_run, require_eval
-from sca.api.evolutions import Admin, client_for, scoped
+from sca.api.evolutions import Admin, HistoryReader, client_for, scoped
+from sca.api.guest_history import history_payload
 from sca.api.model_access import require_model
 from sca.config import Settings, get_settings
 from sca.core.errors import InvalidTaskError, NotFoundError
@@ -127,7 +127,7 @@ def prompt_fix_spec(
     row = next((row for row in run["results"] if str(row["task_id"]) == str(task.id)), None)
     if (
         run["status"] != "completed" or run["suite"] != PROMPT_SUITE or row is None
-        or variant.get("agent_backend") != "opencode" or model not in PROMPT_MODELS
+        or variant.get("agent_backend") != "opencode" or not model
         or not version or not variant.get("prompt_version")
         or any(task.spec.get(field) != variant[field]
                for field in ("agent_backend", "agent_version", "model", "prompt_version"))
@@ -242,7 +242,7 @@ def prompt_build_ready(task: Task) -> bool:
 @router.get("/versions")
 async def versions(user: Annotated[Principal, Depends(authorize("read"))]) -> list[dict]:
     root = get_settings().opencode_versions_dir
-    rows = [json.loads(p.read_text()) for p in root.glob("*/meta.json")]
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in root.glob("*/meta.json")]
     return sorted(rows, key=lambda r: r.get("built_at", ""), reverse=True)
 
 
@@ -436,7 +436,7 @@ async def retest(
 
 @router.get("/builds")
 async def builds_list(user: Annotated[Principal, Depends(authorize("read"))]) -> list[dict]:
-    rows = [json.loads(p.read_text()) for p in records_dir(get_settings()).glob("*.json")]
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in records_dir(get_settings()).glob("*.json")]
     rows = sorted(rows, key=lambda r: r.get("created_at", ""), reverse=True)
     return [await builds_get(UUID(r["id"]), user) for r in rows if r["tenant_id"] == user.tenant_id]
 
@@ -449,7 +449,7 @@ async def builds_get(
     path = root / f"{build_id}.json"
     if not path.exists():
         raise NotFoundError("构建不存在")
-    record = json.loads(path.read_text())
+    record = json.loads(path.read_text(encoding="utf-8"))
     if record["tenant_id"] != user.tenant_id:
         raise NotFoundError("构建不存在")
     log = root / f"{build_id}.log"
@@ -481,24 +481,34 @@ async def _champion(request: Request, user: Principal, champion_id: UUID) -> dic
     return champion
 
 
-@champions_router.get("/{champion_id}")
-async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> dict:
+@champions_router.get("/{champion_id:uuid}")
+async def champion_detail(champion_id: UUID, request: Request, user: HistoryReader) -> dict:
     champion = await _champion(request, user, champion_id)
+    if champion.get("agent_backend") == "dsh":
+        return history_payload(user, {**champion, "solidify_builds": []})
     builds = [build for build in await builds_list(user)
               if build.get("labels", {}).get("kind") == SOLIDIFY_KIND
               and build["labels"].get("champion_id") == str(champion_id)]
-    return {**champion, "solidify_builds": builds}
+    if isinstance(user, GuestPrincipal):
+        fields = ("id", "version", "created_at", "status", "regression_status",
+                  "overlay_eval_run_id", "solidified_eval_run_id")
+        builds = [{key: build[key] for key in fields if key in build} for build in builds]
+    return history_payload(user, {**champion, "solidify_builds": builds})
 
 
 @champions_router.post("/{champion_id}/solidify", status_code=202)
 async def solidify(
-    champion_id: UUID, request: Request, user: Admin, body: SolidifyRequest | None = None,
+    champion_id: UUID, request: Request, response: Response, user: Admin, body: SolidifyRequest | None = None,
 ) -> dict:
     require_eval(user)
+    champion = await _champion(request, user, champion_id)
+    if champion.get("agent_backend") == "dsh":
+        response.status_code = 200
+        return {"status": "succeeded", "champion_id": str(champion_id),
+                "message": "DeepSeek Harness 冠军在任务运行时应用，无需固化构建。"}
     require_model()
     settings = get_settings()
     _require_docker_build(settings)
-    champion = await _champion(request, user, champion_id)
     if not champion.get("candidate_id"):
         raise HTTPException(409, "冠军缺少原始评测记录")
     source_version = champion["agent_version"]

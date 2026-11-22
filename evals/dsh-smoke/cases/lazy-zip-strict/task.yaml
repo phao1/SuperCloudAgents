@@ -1,0 +1,11 @@
+split: holdout
+category: iteration
+instruction: 'Implement pairs(left,right): lazy zip with strict equal lengths. Yield
+  pairs until either ends; if exactly one iterator ends raise ValueError when advanced
+  to that point. Empty+empty succeeds. Do not materialize, support infinite input,
+  consume at most one element per source for each next() including mismatch detection.
+  Keep None as ordinary data. Public verifier contains streaming and mismatch checks.
+  Use only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

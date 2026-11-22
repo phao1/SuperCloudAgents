@@ -157,7 +157,7 @@ const portalProjects = (() => {
         ui.field('默认后端', 'default_backend', {
           choices: ui.backendChoices(portalConfig, project?.default_backend), value: project?.default_backend || '',
         }),
-        ui.field('默认模型', 'default_model', {maxLength: 200, value: project?.default_model || '',
+        portalModels.field('默认模型', 'default_model', {maxLength: 200, value: project?.default_model || '',
           placeholder: portalConfig.default_model}),
       ),
       repos.block, instructions,
@@ -349,7 +349,7 @@ const portalProjects = (() => {
     }
     showDocuments(library.documents);
     ui.list(artifacts, ['文件', '线程', '大小', '上传时间'], library.artifacts.map(item => [
-      ui.action(item.name, async () => {
+      item.missing_reason ? el('span', item.name + ' · ' + item.missing_reason) : ui.action(item.name, async () => {
         const name = item.name.split('/').map(enc).join('/');
         const response = await api('/tasks/' + enc(item.task_id) + '/artifacts/' + name);
         const blob = await response.blob();

@@ -215,6 +215,8 @@ curl -fsS "$SCA_API_URL/v1/tenant/billing" -H "Authorization: Bearer $TENANT_TOK
   可运行 `sudo apt install postgresql nodejs npm`。使用普通用户启动。
 - **macOS Intel 或 Apple Silicon**：运行 `brew install python@3.12 postgresql@16 node git`，
   确保 `python3.12`、`node` 和 `npm` 在 `PATH` 中。源码模式支持系统 Bash，无需 GNU timeout。
+- **Windows**：使用 PowerShell 运行 `.\scripts\portal_source.ps1 up`。
+  [Windows 安装与使用](windows.md)
 
 在仓库根目录运行下列命令。首次启动会从 PyPI、GitHub 和 Prisma 的发布服务下载依赖。
 
@@ -233,13 +235,16 @@ Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/tempor
 保存会重启本机网关。 [Temporal 发布包](https://github.com/temporalio/cli/releases/tag/v1.5.0) [LiteLLM 版本](https://pypi.org/project/litellm/1.110.2/)
 
 脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
+源码模式的登录令牌位于 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。
 停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
 `bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
 
 在 Portal 的「提交任务」页面选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
 `2.3.0-sca.0`，支持该版本和模型对应的运行时冠军覆盖。OpenCode 源码修复、构建和冠军固化
-需要 Docker。Codex 和 Pi 仅在找到本机可执行文件时提供。Pi 使用兼容 1.5.2 的 CLI，各 Agent
-使用对应接口支持的网关模型。
+需要 Docker。Codex 和 Pi 仅在找到本机可执行文件时提供。Pi 使用兼容 1.5.2 的 CLI。
+选择 DeepSeek Harness 可运行本机 `dsh`。启动脚本用 npm 安装 `SCA_DSH_VERSION` 指定的
+版本到 `.data/tools/dsh`，当前默认版本需要 Node.js 24.9 或更高。各 Agent 使用对应接口
+支持的网关模型。
 验证和准备命令使用本机的 Git、Python 和其他项目依赖，文件路径可使用当前工作目录、
 `$HOME` 和 `$TMPDIR`。临时任务目录在 `.data/sandboxes/`。使用 MCP `tools` 的任务仍需受限出口的
 Docker 沙箱。视觉 Intent 的 Playwright 检查依赖预设的浏览器和工具路径。

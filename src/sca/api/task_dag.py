@@ -3,9 +3,10 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 
 from sca.api.authz import authorize
+from sca.api.conversation import ConversationPage, task_page
 from sca.api.guest_history import history_dag
 from sca.core.errors import NotFoundError
 from sca.core.models import Event, Principal, Task
@@ -51,3 +52,12 @@ async def task_dag(
                     # Earlier links can outlive task retention.
                     continue
     return history_dag(user, build_task_dag(root, events, tasks[1:]))
+
+
+@router.get('/tasks/{task_id}/conversation', response_model_exclude_none=True)
+async def read_task_conversation(
+    task_id: UUID, request: Request, user: Annotated[Principal, Depends(authorize('read', guest=True))],
+    cursor: Annotated[int, Query(ge=0, le=2**63 - 1)] = 0,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> ConversationPage:
+    return await task_page(request.app.state.store.for_tenant(user.tenant_id), task_id, user, cursor, limit)

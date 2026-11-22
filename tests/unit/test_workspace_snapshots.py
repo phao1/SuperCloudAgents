@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import sys
 import tarfile
 from pathlib import Path
 
@@ -120,6 +121,7 @@ async def test_overlay_pin_and_age(tmp_path):
     assert await store.prune(1) == 0
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="Docker OverlayFS uses Linux host paths")
 async def test_overlay_lower_allows_only_managed_roots(tmp_path, monkeypatch):
     from sca.workspace.overlay import OverlayWorkspace
 

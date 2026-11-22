@@ -4,22 +4,29 @@ import json
 import re
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
+from sca.sandbox._exec import NODE_SCRIPT
+
+if TYPE_CHECKING:
+    from sca.agents.docker_node import DockerNodeRuntime
 
 PI_VERSION = "1.5.2"
 KEY_ENV = "SCA_MODEL_KEY"
 
 
-def render_config(base_url: str, model: str) -> str:
+def render_config(base_url: str, model: str, context_window: int | None = None) -> str:
+    catalog = {"id": model}
+    if context_window is not None:
+        catalog.update(contextWindow=context_window, maxTokens=min(4096, max(1, context_window // 4)))
     return json.dumps({"providers": {"sca": {
         "baseUrl": base_url.rstrip("/"), "api": "openai-completions",
-        "apiKey": "$" + KEY_ENV, "models": [{"id": model}],
+        "apiKey": "$" + KEY_ENV, "models": [catalog],
     }}})
 
 
@@ -102,10 +109,28 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
 LAUNCH = '''import json, os, pathlib, sys
 config = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "models.json"
 config.parent.mkdir(parents=True, exist_ok=True)
-config.write_text(os.environ.pop("SCA_PI_CONFIG"))
+config.write_text(os.environ.pop("SCA_PI_CONFIG"), encoding="utf-8")
 binary = os.environ.pop("SCA_PI_BIN", "pi")
+if os.name == "nt":
+    import subprocess
+    node = os.environ.pop("SCA_PI_NODE", None)
+    argv = [node, binary] if node else [binary]
+    sys.exit(subprocess.call([*argv, *sys.argv[1:]]))
 os.execvp(binary, ["pi", *sys.argv[1:]])
 '''
+
+NODE_LAUNCH = """
+import { spawnSync } from 'node:child_process';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+const directory = process.env.PI_CODING_AGENT_DIR;
+mkdirSync(directory, {recursive: true});
+writeFileSync(join(directory, 'models.json'), process.env.SCA_PI_CONFIG, {mode: 0o600});
+delete process.env.SCA_PI_CONFIG;
+const result = spawnSync(process.execPath, process.argv.slice(1), {stdio: 'inherit'});
+if (result.error) throw result.error;
+process.exitCode = result.status ?? 1;
+"""
 
 
 class PiBackend:
@@ -113,12 +138,16 @@ class PiBackend:
     state_transport = "mount"
 
     def __init__(self, default_model: str, version: str = PI_VERSION,
-                 sandbox_image: str = "sca-sandbox-pi:latest", *, executable: str | None = None):
+                 sandbox_image: str = "sca-sandbox-pi:latest", *, executable: str | None = None,
+                 node_executable: str | None = None,
+                 docker_runtime: DockerNodeRuntime | None = None) -> None:
         self.default_model = default_model
         self.version = version
         # pi is installed in its own image; the kernel uses it when the task names no image.
         self.sandbox_image = sandbox_image
         self.executable = executable
+        self.node_executable = node_executable
+        self.docker_runtime = docker_runtime
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         env = {"HOME": ctx.agent_home}
@@ -141,7 +170,10 @@ class PiBackend:
         if not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", sid) or sid in {".", ".."}:
             raise AgentTurnError("Invalid Pi session ID")
         model = ctx.model or self.default_model
-        argv = ["python3", "-c", LAUNCH, "--print", "--mode", "json", "--offline",
+        launcher = ([*NODE_SCRIPT, NODE_LAUNCH, "--", self.docker_runtime.cli]
+                    if self.docker_runtime is not None and ctx.image
+                    else ["python3", "-c", LAUNCH])
+        argv = [*launcher, "--print", "--mode", "json", "--offline",
                 "--no-approve", "--no-extensions", "--no-skills", "--no-prompt-templates",
                 "--no-themes", "--no-mcp", "--provider", "sca", "--model", model,
                 "--session-dir", f"{ctx.agent_home}/pi/sessions", "--session-id", sid]
@@ -153,7 +185,8 @@ class PiBackend:
             env={"HOME": ctx.agent_home, "PI_CODING_AGENT_DIR": f"{ctx.agent_home}/pi",
                  "PI_OFFLINE": "1", "PI_TELEMETRY": "0", KEY_ENV: ctx.model_api_key,
                  **({"SCA_PI_BIN": self.executable} if self.executable else {}),
-                 "SCA_PI_CONFIG": render_config(ctx.model_base_url, model)},
+                 **({"SCA_PI_NODE": self.node_executable} if self.node_executable else {}),
+                 "SCA_PI_CONFIG": render_config(ctx.model_base_url, model, ctx.model_context_window)},
         )
         async with closing_stream(stream):
             async for output in stream:

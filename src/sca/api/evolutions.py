@@ -5,14 +5,15 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response
 from pydantic import BaseModel
 from sqlalchemy.exc import NoResultFound
 from temporalio.client import Client
 from temporalio.exceptions import WorkflowAlreadyStartedError
-from temporalio.service import RPCError
+from temporalio.service import RPCError, RPCStatusCode
 
 from sca.api.authz import authorize
+from sca.api.conversation import ConversationPage, evolution_message, evolution_page
 from sca.api.evals import require_eval
 from sca.api.guest_history import history_payload
 from sca.api.model_access import require_model
@@ -20,13 +21,31 @@ from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.repo import Store
 from sca.eval.suites import load_suite
-from sca.evolve.models import ChampionRolloutSpec, EvolutionConfig, EvolutionScheduleSpec
+from sca.evolve.dag import EvolutionDAG, build_evolution_dag
+from sca.evolve.models import (
+    ChampionRolloutSpec,
+    EvolutionBackend,
+    EvolutionConfig,
+    EvolutionScheduleSpec,
+    EvolutionTarget,
+)
 from sca.evolve.scheduler import EvolutionSchedulerWorkflow, schedule_workflow_id
+from sca.evolve.steering import (
+    ACTIVE_EVOLUTION_STATES,
+    MESSAGE_EVENT,
+    EvolutionMessageInput,
+    receipt,
+)
 from sca.evolve.workflow import EvolutionWorkflow
+from sca.gateway.configuration import local_default_model
+from sca.gateway.model_providers import read_registry
 
 router = APIRouter(prefix='/v1')
 Admin = Annotated[Principal, Depends(authorize('tokens'))]
 HistoryReader = Annotated[Principal, Depends(authorize('tokens', guest=True))]
+EvolutionHistoryReader = Annotated[Principal, Depends(authorize('evolution-message', guest=True))]
+ConversationReader = Annotated[Principal, Depends(authorize('read', guest=True))]
+EvolutionWriter = Annotated[Principal, Depends(authorize('evolution-message'))]
 
 
 def scoped(request: Request, user: Principal) -> Store:
@@ -66,13 +85,28 @@ async def evolution_suite(name: str) -> tuple[Path, dict]:
     return resolved, suite
 
 
+def evolution_config(body: EvolutionTarget) -> dict:
+    values = body.model_dump()
+    if 'model' not in body.model_fields_set and 'model' in values:
+        values['model'] = local_default_model(get_settings().data_dir, values['model'])
+    if body.agent_backend == 'dsh':
+        installed = get_settings().dsh_version
+        if body.agent_version not in (None, installed):
+            raise HTTPException(422, '请选择已安装的 DeepSeek Harness 版本')
+        values['agent_version'] = installed
+    return values
+
+
 @router.post('/evolutions', status_code=201)
 async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
     store = scoped(request, user)
     require_model()
     settings = get_settings()
+    config = evolution_config(body)
+    model = read_registry(settings.data_dir).models.get(config['model'])
+    if model and model.unpriced:
+        config['model_unpriced'] = True
     resolved, suite = await evolution_suite(body.suite)
-    config = body.model_dump()
     config['suite'] = str(resolved)
     evolution_id = uuid4()
     payload = {'id': str(evolution_id), 'tenant_id': user.tenant_id, 'created_by': user.subject,
@@ -91,13 +125,22 @@ async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
 
 
 @router.get('/evolutions')
-async def listing(request: Request, user: HistoryReader) -> list[dict]:
+async def listing(request: Request, user: EvolutionHistoryReader) -> list[dict]:
     return history_payload(user, await scoped(request, user).list_evolutions())
 
 
 @router.get('/evolutions/{evolution_id}')
-async def get(evolution_id: UUID, request: Request, user: HistoryReader) -> dict:
+async def get(evolution_id: UUID, request: Request, user: EvolutionHistoryReader) -> dict:
     return history_payload(user, await detail(request, user, evolution_id))
+
+
+@router.get('/evolutions/{evolution_id}/dag', response_model=EvolutionDAG)
+async def evolution_dag(evolution_id: UUID, request: Request, user: EvolutionHistoryReader) -> dict:
+    try:
+        history = await scoped(request, user).get_evolution_dag_history(evolution_id)
+    except NoResultFound:
+        raise HTTPException(404, '演进记录不存在') from None
+    return history_payload(user, build_evolution_dag(history).model_dump())
 
 
 class Decision(BaseModel):
@@ -107,7 +150,7 @@ class Decision(BaseModel):
 async def signal(request: Request, user: Principal, evolution_id: UUID, name: str,
                  candidate_id: UUID | None = None) -> dict:
     row = await detail(request, user, evolution_id)
-    if row['status'] not in ('queued', 'running', 'awaiting_approval'):
+    if row['status'] not in ACTIVE_EVOLUTION_STATES:
         raise HTTPException(409, '演进已结束')
     if name != 'stop' and (row['status'] != 'awaiting_approval' or not any(
         str(c['id']) == str(candidate_id) and c['decision'] == 'pending'
@@ -143,9 +186,10 @@ async def reject(evolution_id: UUID, body: Decision, request: Request, user: Adm
 
 
 @router.get('/champions')
-async def champions(request: Request, user: Admin, agent_version: str | None = None,
-                    model: str | None = None) -> list[dict]:
-    return await scoped(request, user).list_champions(agent_version, model)
+async def champions(request: Request, user: HistoryReader, agent_version: str | None = None,
+                    model: str | None = None, agent_backend: EvolutionBackend | None = None) -> list[dict]:
+    return history_payload(user, await scoped(request, user).list_champions(
+        agent_version, model, agent_backend=agent_backend))
 
 
 @router.post('/champions/{champion_id}/activate')
@@ -166,6 +210,7 @@ async def put_rollout(body: ChampionRolloutSpec, request: Request, user: Admin) 
     store = request.app.state.store.for_tenant(user.tenant_id)
     return await store.put_champion_rollout(
         body.agent_version, body.model, body.champion_id, body.percent, user.subject,
+        agent_backend=body.agent_backend,
     )
 
 
@@ -177,8 +222,9 @@ async def rollback(champion_id: UUID, request: Request, user: Admin) -> dict:
 @router.post('/evolution-schedules', status_code=201)
 async def create_schedule(body: EvolutionScheduleSpec, request: Request, user: Admin) -> dict:
     store = scoped(request, user)
+    config = evolution_config(body)
     await evolution_suite(body.suite)
-    return await store.create_evolution_schedule(body.model_dump())
+    return await store.create_evolution_schedule(config)
 
 
 @router.get('/evolution-schedules')
@@ -196,8 +242,9 @@ async def update_schedule(
     schedule_id: UUID, body: EvolutionScheduleSpec, request: Request, user: Admin,
 ) -> dict:
     store = scoped(request, user)
+    config = evolution_config(body)
     await evolution_suite(body.suite)
-    return await store.update_evolution_schedule(schedule_id, body.model_dump())
+    return await store.update_evolution_schedule(schedule_id, config)
 
 
 @router.delete('/evolution-schedules/{schedule_id}', status_code=204)
@@ -224,3 +271,50 @@ async def run_schedule_now(schedule_id: UUID, request: Request, user: Admin) -> 
     except (RuntimeError, OSError, TimeoutError, RPCError):
         raise HTTPException(503, '演进服务暂不可用') from None
     return {'workflow_id': workflow_id}
+
+
+# Evolution conversation
+
+@router.post('/evolutions/{evolution_id}/messages', status_code=202)
+async def send_evolution_message(
+    evolution_id: UUID, body: EvolutionMessageInput, request: Request, user: EvolutionWriter,
+) -> dict:
+    store = scoped(request, user)
+    row = await store.add_evolution_message(evolution_id, body, user.subject)
+    message = {'id': row['payload']['item_id'], 'seq': row['id'], **body.model_dump(exclude_none=True)}
+    try:
+        async with asyncio.timeout(10):
+            client = await client_for(request)
+            handle = client.get_workflow_handle(f'evolve-{evolution_id}')
+            await handle.signal(EvolutionWorkflow.user_message, message)
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            await store.append_evolution_progress(evolution_id, [receipt(
+                message, '演进工作流已结束', f'evolution:{evolution_id}', status='rejected',
+            )])
+            raise HTTPException(409, '演进已结束，无法发送消息') from None
+        raise HTTPException(503, '消息已保存，演进服务暂不可用') from None
+    except (RuntimeError, OSError, TimeoutError):
+        raise HTTPException(503, '消息已保存，演进服务暂不可用') from None
+    return evolution_message(row)
+
+
+@router.get('/evolutions/{evolution_id}/messages')
+async def list_evolution_messages(evolution_id: UUID, request: Request, user: ConversationReader) -> list[dict]:
+    _, _, entries = await scoped(request, user).read_evolution_conversation(evolution_id, messages_only=True)
+    statuses = {entry['payload']['message_id']: entry['payload']['status']
+                for entry in entries if entry['type'] != MESSAGE_EVENT}
+    return history_payload(user, [evolution_message(entry, status=statuses.get(entry['payload']['item_id'], 'pending'))
+                                  for entry in entries if entry['type'] == MESSAGE_EVENT])
+
+
+@router.get('/evolutions/{evolution_id}/conversation', response_model_exclude_none=True)
+async def read_evolution_conversation(
+    evolution_id: UUID, request: Request, user: ConversationReader,
+    cursor: Annotated[str | None, Query(pattern=r'^[ehx]:[0-9]{1,19}$')] = None,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+) -> ConversationPage:
+    if cursor is not None and int(cursor.partition(':')[2]) > 2**63 - 1:
+        raise HTTPException(422, '对话游标无效')
+    page = await evolution_page(scoped(request, user), evolution_id, cursor, limit)
+    return ConversationPage.model_validate(history_payload(user, page.model_dump(exclude_none=True)))

@@ -32,6 +32,7 @@ from sca.kinds.coding.planning import PlanningActivities, validate_plan
 from sca.kinds.coding.spec import CodingSpec
 from sca.kinds.coding.subtask_inputs import PlanningInput
 from sca.kinds.coding.workflow import CodingBeforeTurn, CodingSubtaskWorkflow
+from sca.sandbox.local import LocalSandboxProvider
 from sca.storage.local import LocalObjectStore
 from sca.workspace.git import GitWorkspace
 from sca.workspace.tarsafe import extract
@@ -155,8 +156,11 @@ class Harness:
         self.store = FakeStore(spec, settings)
         self.task_id = str(self.store.task.id)
         self.objects = LocalObjectStore(root / "objects")
+        sandbox_root = root / "sandboxes"
+        sandbox = (LocalSandboxProvider(sandbox_root) if settings.sandbox_driver == "local"
+                   else LocalSandbox(sandbox_root))
         self.acts = CodingActivities(
-            settings=settings, store=self.store, sandbox=LocalSandbox(root / "sandboxes"),
+            settings=settings, store=self.store, sandbox=sandbox,
             agent=FakeBackend(), objects=self.objects,
         )
         self.planning = PlanningActivities(self.acts)
@@ -221,9 +225,9 @@ async def seed(tmp_path):
 
 @pytest.fixture
 def build(tmp_path, seed, monkeypatch):
-    def factory(*, transport="mount", **kw):
+    def factory(*, transport="mount", driver="docker", **kw):
         settings = Settings(_env_file=None, data_dir=tmp_path / "data", state_transport=transport,
-                            repo_cache=False, pip_cache=False,
+                            sandbox_driver=driver, repo_cache=False, pip_cache=False,
                             api_tokens="owner-fixture:acme,other-fixture:other")
         spec = CodingSpec(repo_url=str(seed), **{"instruction": "edit", **kw})
         return Harness(tmp_path, spec, settings, monkeypatch)
@@ -362,7 +366,7 @@ async def test_planning_activity_supplies_graph_and_accepts_shared_paths(build):
              "depends_on": ["impl"]},
         ],
     }
-    h = build(plan="auto", instruction="Change common.py." + script(
+    h = build(driver="local", plan="auto", instruction="Change common.py." + script(
         "mkdir -p .sca\ncat > .sca/plan.json <<'PLAN'\n" + json.dumps(plan) + "\nPLAN"
     ))
     result = await ActivityEnvironment().run(h.planning.plan_task, PlanningInput(h.task_id))
@@ -370,7 +374,7 @@ async def test_planning_activity_supplies_graph_and_accepts_shared_paths(build):
     prompt = h.events("agent.turn_started")[0]["prompt"]
     assert "Repository map" in prompt and "Candidate tests" in prompt
     assert "tests/test_common.py" in prompt and "prerequisite subtask names" in prompt
-    assert h.acts.sandbox.paths == {}
+    assert await h.acts.sandbox.list({}) == []
 
 
 async def test_impact_endpoint_uses_published_commit_and_durable_bundle(build, monkeypatch):

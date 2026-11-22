@@ -29,6 +29,7 @@ async def test_idempotent_freezer():
 
 async def test_exec_serializes_pause(monkeypatch):
     provider = DockerSandboxProvider()
+    provider._node_exec["one"] = False
     provider._suspend_enabled = True
     calls = []
     provider._cli = AsyncMock(side_effect=lambda *a, **kw: (calls.append(a[0]) or (0, "", "")))
@@ -58,6 +59,7 @@ async def test_exec_serializes_pause(monkeypatch):
 
 async def test_exec_retries_external_pause_once(monkeypatch):
     provider = DockerSandboxProvider()
+    provider._node_exec["one"] = False
     provider._suspend_enabled = True
     provider._cli = AsyncMock(return_value=(0, "", ""))
     attempts = 0
@@ -178,6 +180,7 @@ async def test_concurrent_execs_share_the_sandbox(monkeypatch):
     # Regression: the pause lock once serialised every command, so parallel checks ran in turn.
     provider = DockerSandboxProvider()
     provider._handd_enabled = False
+    provider._node_exec["one"] = False
     provider._cli = AsyncMock(return_value=(0, "", ""))
     running, release = 0, asyncio.Event()
     both = asyncio.Event()

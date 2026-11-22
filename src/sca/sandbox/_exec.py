@@ -1,12 +1,62 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from uuid import uuid4
 
 from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, ExecExit, ExecOutput
+
+# Docker images for mounted Node agents need no Python interpreter.
+NODE_RUNTIME_DIR = "/opt/sca-node"
+NODE_RUNTIME_LABEL = "sca.node_runtime"
+NODE_EXECUTABLE = f"{NODE_RUNTIME_DIR}/bin/node"
+NODE_SCRIPT = (NODE_EXECUTABLE, "--input-type=module", "-e")
+NODE_WRAP = """
+import { spawn } from 'node:child_process';
+import { renameSync, writeFileSync } from 'node:fs';
+import { constants } from 'node:os';
+import { dirname } from 'node:path';
+const [marker, executable, ...args] = process.argv.slice(1);
+process.env.PATH = dirname(process.execPath) + ':' + (process.env.PATH || '/usr/bin:/bin');
+const child = spawn(executable, args, {detached: true, stdio: 'inherit'});
+child.once('error', error => {
+  console.error('Cannot start command: ' + error.code);
+  process.exitCode = 127;
+});
+child.once('exit', (code, signal) => {
+  process.exitCode = code ?? 128 + constants.signals[signal];
+});
+if (child.pid) {
+  try {
+    const staged = marker + '.pid';
+    writeFileSync(staged, String(child.pid), {flag: 'wx', mode: 0o600});
+    renameSync(staged, marker);
+  } catch (error) {
+    try { process.kill(-child.pid, 'SIGKILL'); } catch {}
+    throw error;
+  }
+}
+"""
+NODE_CLEANUP = """
+import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { setTimeout } from 'node:timers/promises';
+const marker = process.argv[1];
+if (kill) {
+  for (let attempt = 0; attempt < 50 && !existsSync(marker); attempt++) {
+    await setTimeout(10);
+  }
+  try {
+    const group = Number(readFileSync(marker, 'utf8'));
+    if (Number.isSafeInteger(group) && group > 1) process.kill(-group, 'SIGKILL');
+  } catch (error) {
+    if (error.code !== 'ENOENT' && error.code !== 'ESRCH') throw error;
+  }
+}
+rmSync(marker, {force: true});
+"""
 
 
 async def wait_for_spawn(
@@ -33,6 +83,7 @@ async def stream_exec(
     *,
     stdin: bytes | None = None,
     timeout_s: float | None = None,
+    node: bool = False,
 ) -> AsyncIterator[ExecEvent]:
     marker = f"/tmp/sca-exec-{uuid4().hex}"
     wrapper = (
@@ -44,7 +95,7 @@ async def stream_exec(
         "open(sys.argv[1], 'w').write(str(os.getpgid(0)))\n"
         "os.execvp(sys.argv[2],sys.argv[2:])"
     )
-    args = command(wrapper, marker)
+    args = command(NODE_WRAP if node else wrapper, marker)
     spawn = asyncio.create_task(
         asyncio.create_subprocess_exec(
             *args,
@@ -70,7 +121,7 @@ async def stream_exec(
             )
             + "\ntry: os.unlink(p)\nexcept FileNotFoundError: pass\n"
         )
-        await cleanup_command(script, marker)
+        await cleanup_command(f"const kill = {str(kill).lower()};" + NODE_CLEANUP if node else script, marker)
         if kill and proc.returncode is None:
             try:
                 proc.kill()
@@ -104,9 +155,11 @@ async def stream_process(
                 pending += chunk
                 while b"\n" in pending:
                     line, pending = pending.split(b"\n", 1)
-                    await queue.put(ExecOutput(stream=name, text=line.decode(errors="replace")))
+                    if sys.platform == "win32":
+                        line = line.removesuffix(b"\r")
+                    await queue.put(ExecOutput(stream=name, text=line.decode("utf-8", errors="replace")))
             if pending:
-                await queue.put(ExecOutput(stream=name, text=pending.decode(errors="replace")))
+                await queue.put(ExecOutput(stream=name, text=pending.decode("utf-8", errors="replace")))
         finally:
             await queue.put(None)
 

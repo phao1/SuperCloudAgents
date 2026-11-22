@@ -17,8 +17,17 @@ from sca.api.authz import GuestPrincipal, authorize
 from sca.api.guest_history import history_dag
 from sca.config import Settings
 from sca.core.errors import AuthError, NotFoundError
-from sca.core.models import Artifact, Event, Principal, Task, TaskMessage, TaskState
+from sca.core.models import (
+    HISTORY_MISSING_ARTIFACT_URI,
+    Artifact,
+    Event,
+    Principal,
+    Task,
+    TaskMessage,
+    TaskState,
+)
 from sca.core.task_dag import DAGEdge, DAGNode, TaskDAG
+from sca.evolve.solidify import SOLIDIFY_KIND
 from sca.storage.local import LocalObjectStore, key_for
 
 
@@ -199,6 +208,107 @@ async def test_guest_history_and_credential_fields(demo_api):
     assert (await client.get(root, headers=auth)).json()["idempotency_key"] == "fixture-retry"
     assert "fixture-patch" in (await client.get(artifacts[0]["uri"], headers=auth)).text
     assert (await client.get("/v1/evolutions", headers={"Authorization": "Bearer viewer"})).status_code == 403
+
+
+async def test_missing_artifact_is_visible_without_bypassing_guest_download_rules(demo_api):
+    client, store, task_id, _ = demo_api
+    artifacts = store.list_artifacts.return_value
+    artifacts[:] = [a.model_copy(update={"uri": HISTORY_MISSING_ARTIFACT_URI}) for a in artifacts]
+    path = f"/v1/tasks/{task_id}/artifacts"
+    reason = "文件缺失（源机器上已清理）"
+    for headers in ({}, {"Authorization": "Bearer fixture"}):
+        response = await client.get(path, headers=headers)
+        assert response.status_code == 200
+        assert response.json()[0]["missing_reason"] == reason
+        gone = await client.get(path + "/changes.patch", headers=headers)
+        assert gone.status_code == 410
+        assert gone.json() == {"error": {"code": "artifact_missing", "message": reason}}
+    assert [item["name"] for item in (await client.get(path)).json()] == ["changes.patch"]
+    assert (await client.get(path + "/changes.bundle")).status_code == 403
+
+
+async def test_guest_evolution_dag_champions_and_write_permissions(demo_api, monkeypatch):
+    client, store, task_id, _ = demo_api
+    evolution_id, candidate_id, champion_id, run_id = (uuid4() for _ in range(4))
+    now = datetime.now(UTC)
+    store.get_evolution_dag_history = AsyncMock(return_value={
+        "evolution": {"id": evolution_id, "status": "running", "spent_usd": 0, "created_at": now,
+                      "finished_at": None, "config": {"reason": "Review with owner@example.org"}},
+        "candidates": [{"id": candidate_id, "generation": 1, "decision": "pending", "created_at": now,
+                        "hypothesis": "Ping owner@example.org", "overlay": {}, "dev_run_id": run_id}],
+        "runs": [{"id": run_id, "status": "running", "variant": {"split": "dev"},
+                  "created_at": now, "finished_at": None}],
+        "results": [], "champions": [],
+        "tasks": [{"id": task_id, "state": "RUNNING", "created_at": now, "updated_at": now,
+                   "eval_run_id": str(run_id), "idempotency_key": f"eval:{run_id}:owner@example.org:0"}],
+    })
+    champion = {"id": str(champion_id), "created_by": "owner@example.org", "overlay": {
+        "tool_guidance": "Review with owner@example.org", "api_key": "fixture-overlay",
+    }}
+    store.get_champion = AsyncMock(return_value=champion)
+    store.list_champions = AsyncMock(return_value=[champion])
+    build = {"id": str(uuid4()), "labels": {"kind": SOLIDIFY_KIND, "champion_id": str(champion_id)},
+             "status": "succeeded", "log_tail": "fixture-build-log", "created_by": "owner@example.org"}
+    monkeypatch.setattr("sca.api.agents.builds_list", AsyncMock(return_value=[build]))
+
+    evolution = f"/v1/evolutions/{evolution_id}"
+    champion_path = f"/v1/champions/{champion_id}"
+    guest_graph = await client.get(evolution + "/dag", params={"tenant_id": "other"})
+    assert guest_graph.status_code == 200 and "owner@example.org" not in guest_graph.text
+    nodes = {node["kind"]: node for node in guest_graph.json()["nodes"]}
+    assert nodes["candidate"]["meta"]["hypothesis"] == "Ping [redacted]"
+    assert nodes["case_task"]["task_id"] == str(task_id) and nodes["case_task"]["meta"]["parent"] == f"eval:{run_id}"
+    assert {edge["from"] for edge in guest_graph.json()["edges"]} >= {f"eval:{run_id}"}
+    store.get_evolution_dag_history.assert_awaited_once_with(evolution_id)
+
+    for path in ("/v1/champions", champion_path):
+        response = await client.get(path)
+        assert response.status_code == 200
+        assert all(value not in response.text for value in ("created_by", "owner@example.org", "fixture-overlay"))
+    assert (await client.get(champion_path)).json()["solidify_builds"] == [{"id": build["id"], "status": "succeeded"}]
+    admin = {"Authorization": "Bearer fixture"}
+    assert "owner@example.org" in (await client.get(evolution + "/dag", headers=admin)).text
+    assert (await client.get(champion_path, headers=admin)).json()["solidify_builds"] == [build]
+
+    viewer = {"Authorization": "Bearer viewer"}
+    for path in (evolution + "/dag", "/v1/champions", champion_path):
+        assert (await client.get(path, headers=viewer)).status_code == 403
+        assert (await client.get(path, headers={"Authorization": "Bearer invalid"})).status_code == 401
+    for method, path in [
+        ("POST", "/v1/evolutions"), ("POST", evolution + "/stop"), ("POST", evolution + "/approve"),
+        ("POST", evolution + "/reject"), ("POST", champion_path + "/activate"),
+        ("POST", champion_path + "/solidify"), ("POST", champion_path + "/rollback"),
+        ("GET", "/v1/champions/rollouts"), ("PUT", "/v1/champions/rollouts"),
+        ("GET", "/v1/evolution-schedules"), ("POST", "/v1/evolution-schedules"),
+        ("PUT", f"/v1/evolution-schedules/{candidate_id}"), ("DELETE", f"/v1/evolution-schedules/{candidate_id}"),
+        ("POST", f"/v1/evolution-schedules/{candidate_id}/run-now"),
+    ]:
+        assert (await client.request(method, path, json={})).status_code == 401, (method, path)
+        assert (await client.request(method, path, json={}, headers=viewer)).status_code == 403, (method, path)
+
+
+async def test_guest_dsh_champion_detail_redacts_overlay(demo_api, monkeypatch):
+    client, store, _, _ = demo_api
+    champion_id = str(uuid4())
+    champion = {
+        "id": champion_id, "agent_backend": "dsh", "created_by": "owner@example.org",
+        "overlay": {"tool_guidance": "Ask owner@example.org", "api_key": "fixture-key"},
+    }
+    store.get_champion = AsyncMock(return_value=champion)
+    builds = AsyncMock()
+    monkeypatch.setattr("sca.api.agents.builds_list", builds)
+    path = f"/v1/champions/{champion_id}"
+
+    guest = await client.get(path)
+    assert guest.status_code == 200
+    assert guest.json() == {
+        "id": champion_id, "agent_backend": "dsh", "solidify_builds": [],
+        "overlay": {"tool_guidance": "Ask [redacted]"},
+    }
+    admin = await client.get(path, headers={"Authorization": "Bearer fixture"})
+    assert admin.status_code == 200
+    assert admin.json() == {**champion, "solidify_builds": []}
+    builds.assert_not_awaited()
 
 
 async def test_guest_dag_and_message_history(demo_api):

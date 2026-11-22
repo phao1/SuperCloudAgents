@@ -3,6 +3,7 @@
 import ast
 import hashlib
 import runpy
+import signal
 from collections import Counter
 from pathlib import Path
 
@@ -171,6 +172,7 @@ def test_checker_does_not_count_a_syntax_error_as_an_expected_rejection(
     assert "0/1 starters rejected" in output
 
 
+@pytest.mark.skipif(not hasattr(signal, "setitimer"), reason="Expert acceptance uses a POSIX interval timer")
 def test_hidden_runner_rejects_modified_public_verifier(
     checker: dict, tmp_path: Path,
 ) -> None:

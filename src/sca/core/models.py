@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 # --------------------------------------------------------------------------- tasks
 
@@ -144,6 +144,14 @@ class Artifact(BaseModel):
     size_bytes: int
     created_at: datetime
 
+    # History transfer
+    @computed_field
+    @property
+    def missing_reason(self) -> str | None:
+        if self.uri == HISTORY_MISSING_ARTIFACT_URI:
+            return "文件缺失（源机器上已清理）"
+        return None
+
 
 class Principal(BaseModel):
     tenant_id: str
@@ -234,6 +242,13 @@ class AgentContext(BaseModel):
     model_base_url: str | None = None
     model_api_key: str | None = None
 
+    # Mounted Docker runtimes for Node agents
+    image: str | None = None
+
+    # Local model providers
+    model_context_window: int | None = None
+    model_registered: bool = False
+
 
 class SandboxAdditions(BaseModel):
     """Extra mounts/env an agent backend needs the sandbox to be created with."""
@@ -319,3 +334,7 @@ class TaskMessage(BaseModel):
     created_at: datetime
     turn: int | None
     plan_attempt: int | None
+
+
+# History transfer
+HISTORY_MISSING_ARTIFACT_URI = "history:missing"

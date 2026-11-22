@@ -50,6 +50,8 @@ async def store():
                     "0022_payments",
                     "0023_task_messages",
                     "0024_projects",
+                    "0025_evolution_backend",
+                    "0026_evolution_messages",
                 ):
                     import_module(f"sca.db.migrations.versions.{revision}").upgrade()
 

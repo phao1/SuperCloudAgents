@@ -3,12 +3,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 from sca.core.errors import InvalidTaskError, WorkspaceError
 from sca.core.models import RepoCredential
+from sca.host import remove_tree
 from sca.secrets import git_env, redact
 from sca.workspace.cache import RepoCache, _normalise
 from sca.workspace.layers import LayerStore
@@ -71,9 +71,9 @@ class GitWorkspace:
         if proc.returncode:
             error = InvalidTaskError if invalid else WorkspaceError
             raise error(
-                f"git {args[0]} failed: {redact(err.decode(errors='replace').strip(), credential)}"
+                f"git {args[0]} failed: {redact(err.decode('utf-8', errors='replace').strip(), credential)}"
             )
-        return out.decode(errors="replace")
+        return out.decode("utf-8", errors="replace")
 
     async def prepare(
         self,
@@ -91,13 +91,14 @@ class GitWorkspace:
                 if path.is_symlink() or path.is_file():
                     path.unlink()
                 elif path.exists():
-                    shutil.rmtree(path)
+                    remove_tree(path)
         except OSError as exc:
             raise WorkspaceError(f"Could not reset workspace: {exc}") from exc
         if self.cache is None:
             await self._git(
                 "clone",
                 "--mirror",
+                "-c", "core.autocrlf=false",
                 "--",
                 repo_url,
                 str(self.mirror),
@@ -111,6 +112,7 @@ class GitWorkspace:
                 await self._git(
                     "clone",
                     "--mirror",
+                    "-c", "core.autocrlf=false",
                     "--reference",
                     str(cached),
                     "--dissociate",
@@ -147,7 +149,7 @@ class GitWorkspace:
         )
         (self.task_dir / "layer-source.json").write_text(
             json.dumps({"repo_key": hashlib.sha256(_normalise(repo_url).encode()).hexdigest(),
-                        "tenant_id": tenant_id})
+                        "tenant_id": tenant_id}), encoding="utf-8",
         )
         if mirror_only:
             return Prepared(base.strip(), self.branch, self.workspace)
@@ -158,28 +160,31 @@ class GitWorkspace:
         if ready.exists():
             return Prepared(commit, self.branch, self.workspace)
         if self.workspace.exists():
-            shutil.rmtree(self.workspace)
+            remove_tree(self.workspace)
+        clone = ("clone", "--no-local", "-c", "core.autocrlf=false",
+                 "--", str(self.mirror), str(self.workspace))
         if self.layers is None:
-            await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
+            await self._git(*clone)
         else:
             metadata = self.task_dir / "layer-source.json"
             if metadata.exists():
-                source = json.loads(metadata.read_text())
+                source = json.loads(metadata.read_text(encoding="utf-8"))
                 await self.layers.copy(self.mirror, commit, source["repo_key"], self.workspace,
                                        source["tenant_id"])
                 await self._git("-C", str(self.workspace), "remote", "set-url", "origin",
                                 str(self.mirror))
+                await self._git("-C", str(self.workspace), "config", "core.autocrlf", "false")
             else:
-                await self._git("clone", "--no-local", "--", str(self.mirror), str(self.workspace))
+                await self._git(*clone)
         # Preparation is the only time the host touches the trusted, freshly cloned checkout.
         await self._git("-C", str(self.workspace), "checkout", "-B", self.branch, commit)
         # Running the verify command leaves caches behind; a repo without a .gitignore
         # would otherwise get them committed into the result.
         exclude = self.workspace / ".git" / "info" / "exclude"
         exclude.parent.mkdir(exist_ok=True)
-        with exclude.open("a") as f:
+        with exclude.open("a", encoding="utf-8", newline="\n") as f:
             f.write("\n".join(["", *DEFAULT_EXCLUDES, ""]))
-        ready.write_text(commit)
+        ready.write_text(commit, encoding="utf-8")
         return Prepared(commit, self.branch, self.workspace)
 
     def commit_argv(self, message: str) -> list[str]:

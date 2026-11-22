@@ -38,6 +38,8 @@ if TYPE_CHECKING:
         Thread,
         ThreadGroup,
     )
+    from sca.evolve.dag import EvolutionHistory
+    from sca.evolve.steering import EvolutionMessageInput, JournalItem
 
 
 def task_uuid(value: str | UUID) -> UUID:
@@ -1135,8 +1137,10 @@ class Store:
                 index_elements=['id'], set_={k: v for k, v in values.items() if k != 'id'},
                 where=evolution_candidates.c.tenant_id == self.tenant_id))
 
+    # DeepSeek Harness evolution
+
     async def list_champions(self, agent_version: str | None = None,
-                             model: str | None = None) -> list[dict]:
+                             model: str | None = None, *, agent_backend: str | None = None) -> list[dict]:
         from sca.db.schema import champions
 
         query = select(champions).where(champions.c.tenant_id == self.tenant_id)
@@ -1144,6 +1148,8 @@ class Store:
             query = query.where(champions.c.agent_version == agent_version)
         if model is not None:
             query = query.where(champions.c.model == model)
+        if agent_backend is not None:
+            query = query.where(champions.c.agent_backend == agent_backend)
         async with self._transaction() as session:
             return [dict(r) for r in (await session.execute(query.order_by(
                 champions.c.created_at.desc()))).mappings()]
@@ -1160,7 +1166,8 @@ class Store:
                     champions.c.id == task_uuid(champion_id),
                     champions.c.tenant_id == self.tenant_id))).mappings().one())
             else:
-                target = {**values, 'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
+                target = {'agent_backend': 'opencode', **values,
+                          'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
             await self._lock_champion(session, self.tenant_id, target)
             if values is not None:
                 inserted = await session.scalar(pg_insert(champions).values(
@@ -1176,8 +1183,10 @@ class Store:
                 await self._write_champion_rollout(session, row, percent, actor)
             return row
 
-    async def get_active_champion(self, agent_version: str, model: str) -> dict | None:
-        rows = await self.list_champions(agent_version, model)
+    async def get_active_champion(
+        self, agent_version: str, model: str, *, agent_backend: str = "opencode",
+    ) -> dict | None:
+        rows = await self.list_champions(agent_version, model, agent_backend=agent_backend)
         return next((row for row in rows if row['active']), None)
 
     async def evolution_evidence(self, task_id: str) -> list[dict]:
@@ -1223,8 +1232,8 @@ class Store:
 
     @staticmethod
     async def _lock_champion(session: AsyncSession, tenant_id: str | None, target: dict) -> None:
-        # Serialize changes by version and model, including the first promotion.
-        key = f"{tenant_id}:{target['agent_version']}:{target['model']}"
+        # Serialize changes by backend, version and model, including the first promotion.
+        key = f"{tenant_id}:{target['agent_backend']}:{target['agent_version']}:{target['model']}"
         await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                               {"key": key})
 
@@ -1233,6 +1242,7 @@ class Store:
 
         await session.execute(update(champions).where(
             champions.c.tenant_id == self.tenant_id, champions.c.active,
+            champions.c.agent_backend == target["agent_backend"],
             champions.c.agent_version == target["agent_version"], champions.c.model == target["model"],
             champions.c.id != target["id"]).values(active=False))
         return dict((await session.execute(update(champions).where(
@@ -1245,24 +1255,27 @@ class Store:
         c = champion_rollouts.c
         async with self._transaction() as session:
             return [dict(row) for row in (await session.execute(select(champion_rollouts).where(
-                c.tenant_id == self.tenant_id).order_by(c.agent_version, c.model))).mappings()]
+                c.tenant_id == self.tenant_id).order_by(c.agent_backend, c.agent_version, c.model))).mappings()]
 
-    async def get_champion_rollout(self, agent_version: str, model: str) -> dict | None:
+    async def get_champion_rollout(
+        self, agent_version: str, model: str, *, agent_backend: str = "opencode",
+    ) -> dict | None:
         from sca.db.schema import champion_rollouts
 
         c = champion_rollouts.c
         async with self._transaction() as session:
             row = (await session.execute(select(champion_rollouts).where(
-                c.tenant_id == self.tenant_id, c.agent_version == agent_version,
+                c.tenant_id == self.tenant_id, c.agent_backend == agent_backend, c.agent_version == agent_version,
                 c.model == model))).mappings().first()
             return dict(row) if row is not None else None
 
     async def put_champion_rollout(
-        self, agent_version: str, model: str, champion_id: UUID, percent: int, actor: str,
+        self, agent_version: str, model: str, champion_id: UUID, percent: int, actor: str, *,
+        agent_backend: str = "opencode",
     ) -> dict:
         champion = await self.for_tenant("eval").get_champion(champion_id)
-        if champion is None or (champion["agent_version"], champion["model"]) != (agent_version, model):
-            raise NotFoundError("该版本和模型的冠军不存在")
+        if champion is None or self._champion_target(champion) != (agent_backend, agent_version, model):
+            raise NotFoundError("该后端、版本和模型的冠军不存在")
         async with self._transaction() as session:
             await self._lock_champion(session, "eval", champion)
             return await self._write_champion_rollout(session, champion, percent, actor)
@@ -1273,11 +1286,12 @@ class Store:
         from sca.db.schema import champion_rollouts, evolution_events
 
         c = champion_rollouts.c
-        key = {"tenant_id": self.tenant_id, "agent_version": champion["agent_version"],
+        key = {"tenant_id": self.tenant_id, "agent_backend": champion["agent_backend"],
+               "agent_version": champion["agent_version"],
                "model": champion["model"]}
         values = {"champion_id": champion["id"], "percent": percent, "updated_by": actor}
         statement = pg_insert(champion_rollouts).values(**key, **values).on_conflict_do_update(
-            index_elements=[c.tenant_id, c.agent_version, c.model],
+            index_elements=[c.tenant_id, c.agent_backend, c.agent_version, c.model],
             set_={**values, "updated_at": func.now()},
             where=(c.champion_id != champion["id"]) | (c.percent != percent))
         row = (await session.execute(statement.returning(champion_rollouts))).mappings().first()
@@ -1285,7 +1299,7 @@ class Store:
             return dict((await session.execute(select(champion_rollouts).filter_by(**key))).mappings().one())
         await session.execute(insert(evolution_events).values(
             tenant_id=self.tenant_id, type="rollout.updated", actor=actor, payload={
-                "agent_version": key["agent_version"], "model": key["model"],
+                "agent_backend": key["agent_backend"], "agent_version": key["agent_version"], "model": key["model"],
                 "champion_id": str(champion["id"]), "percent": percent,
             }))
         return dict(row)
@@ -1300,9 +1314,7 @@ class Store:
             raise NotFoundError("冠军记录不存在")
         parent_id = child["parent_champion_id"]
         parent = await self.get_champion(parent_id) if parent_id is not None else None
-        if parent is None or (parent["agent_version"], parent["model"]) != (
-            child["agent_version"], child["model"]
-        ):
+        if parent is None or self._champion_target(parent) != self._champion_target(child):
             raise ConflictError("该冠军没有可回滚的父冠军")
         async with self._transaction() as session:
             await self._lock_champion(session, self.tenant_id, child)
@@ -1316,6 +1328,12 @@ class Store:
                     "rollouts_updated": count,
                 }))
             return row
+
+    # DeepSeek Harness evolution
+
+    @staticmethod
+    def _champion_target(champion: dict) -> tuple[str, str, str]:
+        return champion["agent_backend"], champion["agent_version"], champion["model"]
 
     @staticmethod
     def _schedule_due(now: datetime) -> Any:
@@ -1696,6 +1714,9 @@ class Store:
     async def _meter_finished_task(
         self, session: AsyncSession, task: Mapping[str, Any],
     ) -> None:
+        # History transfer records past execution and must never add local billable usage.
+        if task["result"].get("history_imported") is True:
+            return
         from sca.billing.metering import METERED_EVENTS, completion_time, daily_delta, task_usage
         from sca.config import get_settings
         from sca.db.schema import usage_daily
@@ -2547,22 +2568,35 @@ class Store:
             "config": evolutions.c.config.concat({"reason": reason}),
         })
 
-    # Model provider errors
+    # Evaluation case errors
 
     async def _eval_result_rows(self, session: AsyncSession, run_id: str) -> list[dict]:
+        from sqlalchemy import case
+
+        from sca.core.errors import MODEL_BUDGET_REASONS
         from sca.db.schema import eval_results
-        from sca.eval.trajectory import overall_passed
+        from sca.eval.trajectory import is_errored, overall_passed
 
         # A case stopped by an account error has nullable scores and a failure on its task.
         result = eval_results.c
+        # DSH request budgets carry their case reason on the failed task.
+        budget_failure = (tasks.c.state == TaskState.FAILED) & tasks.c.state_reason.in_(MODEL_BUDGET_REASONS)
         rows = (await session.execute(select(
-            eval_results, tasks.c.result["model_provider_error"].label("infrastructure_error"),
-        ).outerjoin(tasks, (tasks.c.id == result.task_id) & (tasks.c.tenant_id == result.tenant_id)
-                    & result.acceptance_passed.is_(None)).where(
+            eval_results,
+            case((result.acceptance_passed.is_(None), tasks.c.result["model_provider_error"])).label("infrastructure_error"),
+            case((budget_failure, tasks.c.state_reason)).label("reason"),
+        ).outerjoin(tasks, (tasks.c.id == result.task_id) & (tasks.c.tenant_id == result.tenant_id)).where(
             result.run_id == task_uuid(run_id), result.tenant_id == "eval",
         ).order_by(result.case_id, result.repeat))).mappings()
-        return [{**row, "passed": None if row["infrastructure_error"] else overall_passed(dict(row))}
-                for row in rows]
+        results = []
+        for row in rows:
+            result_row = dict(row)
+            if result_row["reason"] is None:
+                result_row.pop("reason")
+            passed = None if is_errored(result_row) else overall_passed(result_row)
+            status = "errored" if passed is None else ("passed" if passed else "failed")
+            results.append({**result_row, "passed": passed, "status": status})
+        return results
 
     # Task interjection
 
@@ -2919,3 +2953,287 @@ class Store:
                 tasks.c.result["parent_task_id"].astext == str(task_id),
             ).order_by(tasks.c.created_at, tasks.c.id))).mappings()
             return [Task.model_validate(dict(row)) for row in rows]
+
+    # Evolution DAG
+
+    async def get_evolution_dag_history(self, evolution_id: UUID) -> "EvolutionHistory":
+        from sca.db.schema import (
+            champions,
+            eval_results,
+            eval_runs,
+            evolution_candidates,
+            evolution_events,
+            evolutions,
+        )
+
+        tenant = self.tenant_id
+        if tenant is None:
+            raise ValueError("Evolution graph lookup requires a tenant")
+        c, r, t = evolution_candidates.c, eval_results.c, tasks.c
+        async with self._transaction() as session:
+            evolution = (await session.execute(select(evolutions).where(
+                evolutions.c.id == evolution_id, evolutions.c.tenant_id == tenant,
+            ))).mappings().one()
+            candidates = (await session.execute(select(evolution_candidates).where(
+                c.evolution_id == evolution_id, c.tenant_id == tenant,
+            ))).mappings().all()
+            referenced = {row[key] for row in candidates for key in ("dev_run_id", "holdout_run_id")
+                          if row[key] is not None}
+            owner = eval_runs.c.variant["evolution_id"].astext
+            runs = (await session.execute(select(eval_runs).where(
+                eval_runs.c.tenant_id == tenant,
+                (owner == str(evolution_id)) | (owner.is_(None) & eval_runs.c.id.in_(referenced)),
+            ))).mappings().all()
+            run_ids = [run["id"] for run in runs]
+            results = (await session.execute(select(
+                r.run_id, r.case_id, r.repeat, r.task_id, r.acceptance_passed, r.trajectory_passed,
+                r.cost_usd, r.duration_s, r.tokens, r.verification_passed,
+            ).join(tasks, (t.id == r.task_id) & (t.tenant_id == tenant)).where(
+                r.tenant_id == tenant, r.run_id.in_(run_ids),
+            ).order_by(r.run_id, r.case_id, r.repeat))).mappings().all()
+            run_ref = t.spec["eval_run_id"].astext
+            # Submissions are visible before the collector records their results.
+            case_tasks = (await session.execute(select(
+                t.id, t.state, t.created_at, t.updated_at, t.idempotency_key, run_ref.label("eval_run_id"),
+                t.usage["cost_micro_usd"].label("cost_micro_usd"),
+                t.result["model_provider_error"].label("model_provider_error"),
+            ).where(t.tenant_id == tenant, (
+                run_ref.in_([str(run_id) for run_id in run_ids])
+                | t.id.in_({row["task_id"] for row in results})
+            )).order_by(t.created_at, t.id))).mappings().all()
+            promoted = (await session.execute(select(champions).where(
+                champions.c.tenant_id == tenant,
+                champions.c.candidate_id.in_([row["id"] for row in candidates]),
+            ).order_by(champions.c.created_at, champions.c.id))).mappings().all()
+            journal = evolution_events.c
+            generation_rows = (await session.execute(self._conversation_events(evolution_id)
+                .where(journal.payload['kind'].astext == 'generation')
+                .with_only_columns(journal.payload, journal.created_at))).mappings().all()
+            proposer_spent = await self._evolution_proposer_spend(session, evolution_id)
+        return {
+            "evolution": dict(evolution), "candidates": list(map(dict, candidates)),
+            "runs": list(map(dict, runs)), "results": list(map(dict, results)),
+            "tasks": list(map(dict, case_tasks)), "champions": list(map(dict, promoted)),
+            "generations": [{**entry['payload'], 'created_at': entry['created_at']} for entry in generation_rows],
+            "proposer_spent_usd": proposer_spent,
+        }
+
+    # Evolution conversation
+
+    async def _conversation_evolution(
+        self, session: AsyncSession, evolution_id: UUID, *, lock: bool = False,
+    ) -> RowMapping:
+        from sca.db.schema import evolutions
+
+        query = select(evolutions).where(
+            evolutions.c.id == evolution_id, evolutions.c.tenant_id == self.tenant_id,
+        )
+        if lock:
+            query = query.with_for_update()
+        row = (await session.execute(query)).mappings().first()
+        if row is None:
+            raise NotFoundError('演进记录不存在')
+        return row
+
+    def _conversation_events(self, evolution_id: UUID) -> Select:
+        from sqlalchemy import literal_column
+
+        from sca.db.schema import evolution_events
+
+        c = evolution_events.c
+        return select(evolution_events).where(
+            c.tenant_id == self.tenant_id,
+            c.payload[literal_column("'evolution_id'")].astext == str(evolution_id),
+            text("type IN ('conversation.message', 'conversation.progress')"),
+        )
+
+    async def _append_conversation_event(
+        self, session: AsyncSession, evolution_id: UUID, event_type: str, actor: str, item: dict,
+    ) -> dict:
+        from sca.db.schema import evolution_events
+
+        # The caller holds the parent row lock, so stream IDs follow commit order for this run.
+        row = (await session.execute(pg_insert(evolution_events).values(
+            tenant_id=self.tenant_id, type=event_type, actor=actor,
+            payload={**item, 'evolution_id': str(evolution_id)}, created_at=func.clock_timestamp(),
+        ).on_conflict_do_nothing().returning(evolution_events))).mappings().first()
+        return dict(row) if row is not None else {}
+
+    async def add_evolution_message(
+        self, evolution_id: UUID, body: 'EvolutionMessageInput', actor: str,
+    ) -> dict:
+        from sca.evolve.steering import ACTIVE_EVOLUTION_STATES, MESSAGE_EVENT
+
+        async with self._transaction() as session:
+            row = await self._conversation_evolution(session, evolution_id, lock=True)
+            if row['status'] not in ACTIVE_EVOLUTION_STATES or row['config'].get('history_imported'):
+                raise ConflictError('演进已结束，无法发送消息')
+            item = {'item_id': str(uuid4()), **body.model_dump(exclude_none=True)}
+            return await self._append_conversation_event(session, evolution_id, MESSAGE_EVENT, actor, item)
+
+    async def append_evolution_progress(
+        self, evolution_id: UUID, items: list['JournalItem'], *, status: dict | None = None,
+    ) -> None:
+        from sca.db.schema import evolutions
+        from sca.evolve.steering import PROGRESS_EVENT
+
+        async with self._transaction() as session:
+            row = await self._conversation_evolution(session, evolution_id, lock=True)
+            inserted = []
+            for item in items:
+                inserted.append(await self._append_conversation_event(
+                    session, evolution_id, PROGRESS_EVENT, 'workflow', item,
+                ))
+            if status and (not items or any(inserted)):
+                status = dict(status)
+                if reason := status.pop('reason', None):
+                    status['config'] = {**row['config'], 'reason': reason}
+                await session.execute(update(evolutions).where(
+                    evolutions.c.id == evolution_id, evolutions.c.tenant_id == self.tenant_id,
+                ).values(**status, updated_at=func.clock_timestamp()))
+
+    async def read_evolution_conversation(
+        self, evolution_id: UUID, after: int = 0, limit: int | None = None,
+        *, messages_only: bool = False, check_legacy: bool = False,
+    ) -> tuple[dict, bool, list[dict]]:
+        from sca.db.schema import evolution_events
+        from sca.evolve.steering import MESSAGE_EVENT
+
+        c = evolution_events.c
+        query = self._conversation_events(evolution_id).where(c.id > after)
+        if messages_only:
+            query = query.where((c.type == MESSAGE_EVENT) | (c.payload['kind'].astext == 'receipt'))
+        async with self._transaction() as session:
+            row = await self._conversation_evolution(session, evolution_id)
+            legacy = check_legacy and not await session.scalar(select(
+                self._conversation_events(evolution_id).where(c.payload['item_id'].astext == 'started').exists(),
+            ))
+            entries = (await session.execute(query.order_by(c.id).limit(limit))).mappings().all()
+        return dict(row), legacy, list(map(dict, entries))
+
+    async def _evolution_budget_limit(self, session: AsyncSession) -> Decimal | None:
+        from sqlalchemy import Numeric, cast
+
+        from sca.db.schema import usage_daily
+
+        if self.tenant_id is None:
+            raise ValueError('Evolution budget requires a tenant')
+        tenant = await self._find_tenant(session, self.tenant_id)
+        if tenant is None:
+            return None
+        if tenant['status'] != 'active' or tenant['deleted_at'] is not None:
+            return Decimal(0)
+        now = datetime.now(UTC)
+        daily = tenant['daily_cost_budget_usd']
+        if daily is not None:
+            spent_today = await session.scalar(select(func.coalesce(func.sum(
+                cast(tasks.c.usage['cost_micro_usd'].astext, Numeric),
+            ), 0)).where(tasks.c.tenant_id == self.tenant_id,
+                         tasks.c.created_at >= now.replace(hour=0, minute=0, second=0, microsecond=0)))
+            daily -= spent_today / Decimal(1_000_000)
+        plan = await self._plan(session, tenant['plan'])
+        monthly = plan['monthly_cost_limit_usd']
+        if monthly is not None:
+            today = now.date()
+            monthly -= await session.scalar(select(func.coalesce(func.sum(usage_daily.c.cost_usd), 0)).where(
+                usage_daily.c.tenant_id == self.tenant_id, usage_daily.c.day.between(today.replace(day=1), today),
+            ))
+        return min((max(Decimal(0), limit) for limit in (daily, monthly) if limit is not None), default=None)
+
+    async def apply_evolution_budget(
+        self, evolution_id: UUID, message: dict, spent_usd: float, node_id: str,
+    ) -> float | None:
+        from sca.db.schema import evolution_events, evolutions
+        from sca.evolve.steering import PROGRESS_EVENT, receipt
+
+        async with self._transaction() as session:
+            row = await self._conversation_evolution(session, evolution_id, lock=True)
+            existing = await session.scalar(self._conversation_events(evolution_id).where(
+                evolution_events.c.payload['item_id'].astext == f'receipt:{message["id"]}',
+            ).with_only_columns(evolution_events.c.payload))
+            if existing is not None:
+                return existing.get('total_budget_usd')
+            remaining = Decimal(str(message['remaining_budget_usd']))
+            cap = await self._evolution_budget_limit(session)
+            total = None
+            if cap is not None and remaining > cap:
+                item = receipt(message, f'剩余预算超过租户可用额度（${cap:.6g}）', node_id, status='rejected')
+            else:
+                total = float(Decimal(str(spent_usd)) + remaining)
+                item = receipt(message, f'剩余预算已调整为 ${remaining:.6g}', node_id)
+                item['total_budget_usd'] = total
+                await session.execute(update(evolutions).where(
+                    evolutions.c.id == evolution_id, evolutions.c.tenant_id == self.tenant_id,
+                ).values(config={**row['config'], 'budget_usd': total}, updated_at=func.clock_timestamp()))
+            await self._append_conversation_event(session, evolution_id, PROGRESS_EVENT, 'workflow', item)
+            return total
+
+    # Task conversation
+
+    async def task_conversation_events(
+        self, task_id: UUID, after: int, limit: int, milestones: frozenset[str], context: frozenset[str],
+    ) -> tuple[Task, list[Event], list[Event]]:
+        from sqlalchemy.dialects.postgresql import array
+
+        async with self._transaction() as session:
+            row = await self._task(session, task_id, True)
+            task = Task.model_validate(dict(row))
+            if row['events_archived_at'] is not None:
+                from sca.archive import read_events
+
+                if self.objects is None:
+                    raise RuntimeError('Archived events require an object store')
+                history = await read_events(self.objects, task_id)
+                page = [event for event in history if event.seq > after and event.type in milestones][:limit]
+                return task, page, [event for event in history if page and event.seq <= page[-1].seq
+                                    and event.type in context]
+            c = events.c
+            query = select(events).where(c.task_id == task_id, c.tenant_id == task.tenant_id).order_by(c.seq)
+            rows = (await session.execute(query.where(c.seq > after, c.type.in_(milestones)).limit(limit))).mappings()
+            page = [Event.model_validate(dict(event)) for event in rows]
+            if not page:
+                return task, [], []
+            compact = c.payload.op('-')(array(['raw', 'text', 'output_tail', 'final_message', 'prompt']))
+            snapshot = query.with_only_columns(c.task_id, c.seq, c.type, compact.label('payload'), c.created_at)
+            rows = (await session.execute(snapshot.where(c.seq <= page[-1].seq, c.type.in_(context)))).mappings()
+            return task, page, [Event.model_validate(dict(event)) for event in rows]
+
+    # Evolution proposer spend
+
+    def _evolution_proposer_events(self, evolution_id: UUID) -> Select:
+        from sca.db.schema import evolution_events
+
+        c = evolution_events.c
+        return select(evolution_events).where(
+            c.tenant_id == self.tenant_id, c.type == "evolution.proposer_spend",
+            c.payload["evolution_id"].astext == str(evolution_id),
+        )
+
+    async def _evolution_proposer_spend(self, session: AsyncSession, evolution_id: UUID) -> float:
+        from sqlalchemy import Numeric, cast
+
+        from sca.db.schema import evolution_events
+
+        cost = evolution_events.c.payload["cost_usd"]
+        total = await session.scalar(self._evolution_proposer_events(evolution_id)
+            .where(func.jsonb_typeof(cost) == "number")
+            .with_only_columns(func.sum(cast(cost.astext, Numeric))))
+        return float(total or 0)
+
+    async def record_evolution_proposer_spend(
+        self, evolution_id: UUID, completion_id: UUID, cost_usd: float,
+    ) -> None:
+        from sca.db.schema import evolution_events
+
+        c = evolution_events.c
+        async with self._transaction() as session:
+            await self._conversation_evolution(session, evolution_id, lock=True)
+            existing = self._evolution_proposer_events(evolution_id).where(
+                c.payload["completion_id"].astext == str(completion_id),
+            ).exists()
+            if not await session.scalar(select(existing)):
+                await session.execute(insert(evolution_events).values(
+                    tenant_id=self.tenant_id, type="evolution.proposer_spend", actor="workflow",
+                    payload={"evolution_id": str(evolution_id), "completion_id": str(completion_id),
+                             "cost_usd": cost_usd},
+                ))

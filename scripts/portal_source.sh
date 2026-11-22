@@ -1,11 +1,23 @@
-# Native services for portal_demo.sh.
+#!/usr/bin/env bash
+# Entry point and native services for portal_demo.sh.
+
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    demo="$(dirname -- "$0")/portal_demo.sh"
+    case "${1:---help}" in
+        up|setup) exec bash "$demo" "$1" --mode source;;
+        import-history|export-history)
+            command=$1
+            shift
+            exec bash "$demo" "$command" --mode source "$@";;
+        *) exec bash "$demo" "$@";;
+    esac
+fi
 
 PG_DIR="$ROOT/.data/pg"
 PG_PASSWORD_FILE="$ROOT/.data/pg-password"
 PG_PORT_FILE=.data/run/postgres.port
 TEMPORAL="$ROOT/.data/bin/temporal"
 LITELLM_VENV="$ROOT/.data/litellm-venv"
-LITELLM_VERSION=1.110.2
 SOURCE_HELPER="$ROOT/scripts/portal_source.py"
 
 find_postgres() {
@@ -73,7 +85,6 @@ SELECT 'CREATE DATABASE litellm' WHERE NOT EXISTS (SELECT FROM pg_database WHERE
 SQL
         fail '初始化数据库失败，请查看 .data/run/postgres.log。'
     load_source_env
-    run "$ROOT/.venv/bin/alembic" upgrade head
 }
 
 stop_postgres() {
@@ -85,27 +96,6 @@ stop_postgres() {
         fi
     fi
     rm -f .data/run/postgres.pid .data/run/postgres.identity
-}
-
-prepare_litellm() {
-    local stamp="$LITELLM_VENV/.sca-version" litellm_python="$LITELLM_VENV/bin/python" schema
-    if [[ -x "$litellm_python" && -f "$stamp" && $(cat "$stamp") == "$LITELLM_VERSION" ]]; then return; fi
-    local tool
-    for tool in node npm; do
-        command -v "$tool" >/dev/null || fail 'LiteLLM 需要 Node.js 和 npm。Linux: sudo apt install nodejs npm。macOS: brew install node。'
-    done
-    echo '安装本机 LiteLLM 网关及其 PostgreSQL 客户端…'
-    [[ -x "$litellm_python" ]] || run "$PY" -m venv "$LITELLM_VENV"
-    run "$litellm_python" -m pip install -q "litellm[proxy]==$LITELLM_VERSION" \
-        'prisma==0.11.0' 'psycopg[binary]>=3.2,<4' >> .data/run/litellm.log 2>&1 ||
-        fail '安装 LiteLLM 失败，请查看 .data/run/litellm.log。'
-    schema=$(run "$litellm_python" -c 'from importlib.resources import files; print(files("litellm_proxy_extras").joinpath("schema.prisma"))')
-    (
-        cd "$LITELLM_VENV"
-        export PATH="$LITELLM_VENV/bin:$PATH" PRISMA_BINARY_CACHE_DIR="$LITELLM_VENV/prisma-cache"
-        run "$LITELLM_VENV/bin/prisma" generate --schema "$schema"
-    ) >> .data/run/litellm.log 2>&1 || fail '生成 LiteLLM 数据库客户端失败，请查看 .data/run/litellm.log。'
-    printf '%s\n' "$LITELLM_VERSION" > "$stamp"
 }
 
 wait_service() {
@@ -130,14 +120,15 @@ start_litellm() {
     config=$(gateway_config)
     DATABASE_URL="$LITELLM_DB_URL" PATH="$LITELLM_VENV/bin:$PATH" \
         PRISMA_BINARY_CACHE_DIR="$LITELLM_VENV/prisma-cache" \
-        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway "$ROOT/deploy/litellm/$config"
+        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway "$config"
     wait_service litellm "${1:-300}" "$PY" -c \
         'from urllib.request import urlopen; urlopen("http://127.0.0.1:4000/health/readiness", timeout=1).close()'
 }
 
 start_source_services() {
     run "$PY" "$SOURCE_HELPER" install "$ROOT/.data/bin"
-    prepare_litellm
+    run "$PY" "$SOURCE_HELPER" install-dsh "$ROOT/.data"
+    run "$PY" "$SOURCE_HELPER" prepare-gateway "$ROOT/.data"
     start_postgres
     mkdir -p .data/temporal
     start temporal "$TEMPORAL" server start-dev --db-filename "$ROOT/.data/temporal/dev.db" \

@@ -71,7 +71,7 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 ### Portal 快速启动
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
-用启动时生成的令牌登录。
+用首次启动时生成的令牌登录。令牌保存在 `.data/portal.env`，终端显示保存位置。
 
 ```bash
 # Docker 模式，首次安装并启动
@@ -88,6 +88,11 @@ bash scripts/portal_demo.sh down
 也可设置 `SCA_RUNTIME_MODE=docker` 或 `SCA_RUNTIME_MODE=source`。
 省略两种设置时，脚本优先使用可用的 Docker，否则会提示并进入源码模式。
 源码模式的系统依赖和 API 示例见 [运维文档](docs/operations.md#源码模式)。
+Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
+[Windows 源码模式指南](docs/windows.md) · [交给 Windows Agent 的启动提示词](docs/windows-agent-start.md)
+
+在「概览 → 模型接入」配置 vLLM、Ollama、LM Studio 或其他兼容服务的地址、可选密钥和模型。
+[模型接入与预算](docs/models.md)
 
 | 能力 | Docker 模式 | 源码模式 |
 | --- | --- | --- |
@@ -110,8 +115,11 @@ curl -fsS http://127.0.0.1:8000/v1/tasks
 ```
 
 在浏览器打开 `http://127.0.0.1:8000/portal`。新会话默认进入演示租户 `eval` 的任务历史，
-无需输入令牌或 DeepSeek API Key。顶部「只读访客模式 · 登录」可切换到令牌登录。缺少模型密钥时
-仍可查看轨迹和补丁，登录后可在概览配置密钥以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
+无需输入令牌或模型密钥。顶部「只读访客模式 · 登录」可切换到令牌登录。尚未接入模型时可查看轨迹和补丁，
+登录后可在概览添加模型以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
+
+从 Linux 服务器把任务、项目、评测和演进记录带到 Windows 源码实例时，使用
+[历史导出与导入](docs/history-transfer.md)。
 
 ### Docker 演示环境
 
@@ -127,7 +135,7 @@ make portal-setup
 首次运行自动创建 `.env` 和随机网关密钥，并准备数据库、镜像、OpenCode 2.3.0
 缺陷基线后启动 Portal。连接管理员令牌后，可在概览页填写 DeepSeek API Key；
 密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
-脚本打印 `http://127.0.0.1:8000/portal` 和随机登录令牌；可在首次运行时通过
+脚本打印 `http://127.0.0.1:8000/portal` 和登录令牌的保存位置。可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
 在 Portal 中可用 `opencode-demo` 验证文件工具修复，也可用 `opencode-prompt` 让 OpenCode
 根据评测证据迭代系统提示词。macOS 的逐步操作见 [验证流程](Milestone/verification-flow.md#v4b-现场opencode-系统提示词自演进)。
@@ -204,12 +212,12 @@ for the acceptance checklist, API and Portal entry points, and live smoke comman
 | `opencode` | 沙箱内运行 OpenCode |
 | `opencode-brain` | 沙箱外运行 OpenCode，工具在沙箱内执行 |
 | `pi` | 使用 `sca-sandbox-pi:latest` 运行 Pi |
-| `dsh` | 使用 `sca-sandbox-dsh:latest` 运行 DeepSeek Harness `0.2.2-rc.5` |
+| `dsh` | Docker 支持将 DeepSeek Harness 运行时挂载到任务镜像，源码模式使用项目本地安装 |
 | `fake` | 使用脚本化 Agent 验证任务流程 |
 
 #### 使用 DeepSeek Harness
 
-`make portal-setup` 会构建 DSH 镜像。也可单独构建。
+`make portal-setup` 会构建默认的 DSH 镜像。也可单独构建。
 
 ```bash
 make image
@@ -218,13 +226,16 @@ docker build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/d
 
 在 Worker 启用 LiteLLM 网关后，在 Portal「提交任务」选 DeepSeek Harness，模型填 `deepseek-flash`
 或 `deepseek-v4-pro`。省略模型时使用 `SCA_DEFAULT_MODEL`。如需设为全局默认后端，配置
-`SCA_AGENT_BACKEND=dsh` 和 `SCA_DEFAULT_MODEL=deepseek-flash` 后重启 API 与 Worker。也可用 API 提交。
+`SCA_AGENT_BACKEND=dsh` 和 `SCA_DEFAULT_MODEL=deepseek-flash` 后重启 API 与 Worker。
+Docker 模式下，在「沙箱镜像（可选）」填写 `sca-sandbox:latest` 即可挂载 DSH 运行时。
+省略镜像时使用 `SCA_DSH_SANDBOX_IMAGE`，默认为 `sca-sandbox-dsh:latest`。下例通过 API
+提交使用挂载运行时的 Docker 任务。
 
 ```bash
 curl -fsS "$SCA_API_URL/v1/tasks" -H "Authorization: Bearer $SCA_API_TOKEN" --json @- <<'JSON'
 {"kind":"coding","spec":{"repo_url":"https://example.com/repo.git",
  "instruction":"为计算函数补边界测试","verify_command":"pytest -q",
- "agent_backend":"dsh","model":"deepseek-flash"}}
+ "agent_backend":"dsh","image":"sca-sandbox:latest","model":"deepseek-flash"}}
 JSON
 ```
 
@@ -234,8 +245,30 @@ JSON
 恢复会话。仓库工单的默认后端与模型可在 Portal 的 SCM 配置中设置。[工单配置](docs/scm.md#通过工单触发任务)
 
 自建镜像时同步设置 `SCA_DSH_SANDBOX_IMAGE`、`SCA_DSH_VERSION` 和构建参数 `DSH_VERSION`。
-上游包声明 Node ≥24.9，当前镜像沿用 Node 22.22.2。部署时需验证完整 headless 运行及续接。
+上游包声明 Node ≥24.9，预构建镜像使用 Node 22.22.2。部署时需验证完整 headless 运行及续接。
 [上游 CLI 包元数据](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/cli/package.json#L186-L188)
+
+#### Docker 运行时磁盘空间
+
+DSH 的 Docker 运行时默认上限为 2,000 MB，可通过 `SCA_NODE_RUNTIME_MAX_MB` 调整。
+Pi 默认为 270 MB，可通过 `SCA_PI_NODE_RUNTIME_MAX_MB` 调整。上限包含共享的 Node.js，
+安装前 `SCA_DATA_DIR`（默认 `.data`）所在磁盘需要至少「上限加 1,000 MB」的可用空间。
+例如，重启 Portal 时可以将 DSH 上限设为 2,400 MB。
+
+```bash
+bash scripts/portal_demo.sh down
+SCA_NODE_RUNTIME_MAX_MB=2400 bash scripts/portal_demo.sh up --mode docker
+```
+
+项目可保存默认镜像。新建评测或演进时，可在套件的 `suite.yaml` 中设置 `defaults.image`。
+验证使用挂载运行时的 DSH 任务，并确认排队、执行中、待恢复及后续提交的任务均已配置为
+使用其他镜像后，检查 Docker 中使用旧镜像的容器。
+
+```bash
+docker ps -a --filter ancestor=sca-sandbox-dsh:latest
+```
+
+确认查询未列出容器后，运行 `docker image rm sca-sandbox-dsh:latest` 回收磁盘空间。
 
 ## Tests
 

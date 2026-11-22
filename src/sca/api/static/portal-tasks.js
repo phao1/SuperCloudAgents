@@ -7,7 +7,7 @@ const portalTasks = (() => {
     ['design_tokens', 'Design Tokens'], ['figma', 'Figma 设计稿'],
     ['github_issue', 'GitHub 工单'], ['jira', 'Jira 工单'], ['linear', 'Linear 工单'],
   ];
-  let uploadedFiles = new WeakMap(), terminal = null, terminalTask = null, messageRequest = null;
+  let uploadedFiles = new WeakMap(), terminal = null, terminalTask = null, conversation = null;
   let outcomeSignature, attemptsSignature, impactSignature, reportCache, analysisSignature, refreshTools;
 
   function disclosure(title, ...children) {
@@ -120,13 +120,14 @@ const portalTasks = (() => {
       image: optional('image'), push: c('push'), fork_from_snapshot: c('fork_from_snapshot'),
       plan: planMode === 'auto' ? 'auto' : 'none',
       ...(v('max_cost_usd') && {max_cost_usd: Number(v('max_cost_usd'))}),
+      ...(v('max_tokens') && {max_tokens: Number(v('max_tokens'))}),
     };
     const backend = spec.agent_backend || defaultBackend;
     if (backend?.startsWith('opencode')) spec.agent_version = optional('agent_version');
     if (backend === 'opencode') {
       spec.tools = new FormData(form).getAll('tool');
-      if (v('champion')) spec.use_champion = v('champion') === 'yes';
     }
+    if ((backend === 'opencode' || backend === 'dsh') && v('champion')) spec.use_champion = v('champion') === 'yes';
     if (spec.push && c('open_pr')) spec.pull_request = {
       title: optional('pr_title'), body: optional('pr_body'), base: optional('pr_base'),
       draft: c('pr_draft'), open_on: v('open_on'), merge_on_approve: c('merge_on_approve'),
@@ -191,6 +192,8 @@ const portalTasks = (() => {
       field('尝试 OpenCode 版本（可选，逗号分隔）', 'best_versions'),
       field('每次尝试的预算（美元，可选）', 'best_costs', {note: '按尝试顺序填写金额，以逗号分隔。'})
     );
+    const bestModels = el('datalist');
+    bestModels.id = project ? 'project-best-models' : 'best-models';
     const planOptions = fields(
       field('共享路径（每行一个仓库相对路径）', 'shared_paths', {multiline: true}),
       field('子任务配置（JSON）', 'subtasks', {multiline: true, note: '每项填写 name、instruction，可填 depends_on 与 paths。'}),
@@ -204,7 +207,7 @@ const portalTasks = (() => {
           placeholder: primaryRepo?.base_ref || 'main'}),
         field(project ? '线程指令' : '任务指令', 'instruction', {required: true, multiline: true, wide: true}),
         field('准备命令（可选）', 'setup_command'),
-        field('模型（可选）', 'model', {placeholder: defaultModel}),
+        portalModels.field('模型（可选）', 'model', {placeholder: defaultModel}),
         field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
         field('Agent 后端', 'agent_backend', {choices: ui.backendChoices({
           ...portalConfig, default_agent_backend: defaultBackend,
@@ -215,11 +218,12 @@ const portalTasks = (() => {
       disclosure('Best-of-N 与执行设置', fields(
         field('并行尝试数', 'best_n', {choices: [[1, '1 · 单次执行'], ...[2, 3, 4, 5].map(n => [n, String(n)])]}),
         field('任务预算（美元）', 'max_cost_usd', {type: 'number', min: 0, step: 'any'}),
+        field('任务预算（Token）', 'max_tokens', {type: 'number', min: 1}),
         field('任务拆分', 'plan_mode', {choices: [['none', '无'], ['auto', '自动规划'], ['manual', '手动子任务']]}),
-        field('OpenCode 冠军', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
+        field('冠军覆盖', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
         field('沙箱镜像（可选）', 'image'),
         check('复用已准备的工作区快照', 'fork_from_snapshot')
-      ), bestOptions, planOptions),
+      ), bestOptions, bestModels, planOptions),
       disclosure('工具', el('small', '已授权的 MCP 工具可附加到 OpenCode 任务。'), available),
       disclosure('设计意图与工单', ui.actions(addKind, add), list),
       versionsList,
@@ -261,11 +265,15 @@ const portalTasks = (() => {
       control(form, 'repo_url').setAttribute('list', repositories.id);
     }
     control(form, 'agent_version').setAttribute('list', versionsList.id);
-    control(form, 'model').setAttribute('list', 'models');
+    portalModels.multipleAliases(control(form, 'best_models'), bestModels);
+    portalModels.bindBudget(form, () => {
+      const explicit = Number(value(form, 'best_n')) > 1 && ui.items(value(form, 'best_models'));
+      return explicit?.length ? explicit : [value(form, 'model') || project?.default_model || portalConfig?.default_model];
+    });
     const sync = () => {
       const backend = value(form, 'agent_backend') || defaultBackend;
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');
-      control(form, 'champion').disabled = backend !== 'opencode';
+      control(form, 'champion').disabled = backend !== 'opencode' && backend !== 'dsh';
       for (const input of available.querySelectorAll('input')) input.disabled = backend !== 'opencode';
       prOption.hidden = !ui.checked(form, 'push');
       pr.hidden = prOption.hidden || !ui.checked(form, 'open_pr');
@@ -386,48 +394,24 @@ const portalTasks = (() => {
     $('task-terminal-start').onclick = () => void startTerminal(task);
     $('task-terminal-stop').onclick = () => stopTerminal();
     if (terminal && finishedTask(task.state)) stopTerminal('任务已结束。');
-    renderMessageForm(task);
+    renderConversation(task);
   }
 
-  function renderMessageForm(task) {
-    const controls = $('task-message-controls'), form = $('task-message-form');
-    const input = $('task-message-text'), message = $('task-message-status');
-    controls.disabled = !ui.can('member') || finishedTask(task.state) || Boolean(messageRequest);
-    input.onkeydown = event => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
-        event.preventDefault();
-        if (!controls.disabled) form.requestSubmit();
-      }
-    };
-    form.onsubmit = async event => {
-      event.preventDefault();
-      if (controls.disabled || !openTaskIs(task.id) || !input.value.trim()) return;
-      const request = {taskId: task.id};
-      messageRequest = request;
-      controls.disabled = true;
-      ui.setMessage(message, '正在发送…');
-      try {
-        await data(taskPath(task) + '/messages', {
-          text: input.value, mode: $('task-message-interrupt').checked ? 'interrupt' : 'queue',
-        });
-        if (messageRequest !== request || !openTaskIs(request.taskId)) return;
-        input.value = '';
-        ui.setMessage(message, '插话已发送。');
-      } catch (e) {
-        if (messageRequest === request && openTaskIs(request.taskId)) ui.setMessage(message, e.message, true);
-      } finally {
-        if (messageRequest === request) {
-          messageRequest = null;
-          if (openTaskIs(request.taskId) && currentTask?.id === request.taskId) {
-            renderMessageForm(currentTask);
-            if (!controls.disabled) input.focus({preventScroll: true});
-          }
-        }
-      }
-    };
+  function renderConversation(task) {
+    const identity = portalIdentity;
+    if (conversation?.id !== task.id || conversation?.identity !== identity) {
+      conversation?.panel.destroy();
+      const panel = portalConversation.create($('task-conversation'), {
+        path: taskPath(task), type: 'task', canWrite: () => ui.can('member'),
+        active: () => portalIdentity === identity && openTaskIs(task.id),
+        focus: id => taskDag?.focus(id),
+      });
+      conversation = {id: task.id, identity, panel};
+    }
+    conversation.panel.setState(finishedTask(task.state) ? '任务已结束，无法发送插话。' : '');
   }
 
-  async function loadAttempts(task) {
+  async function loadAttempts(task, artifactsRequest) {
     const root = $('task-best-of');
     root.parentElement.hidden = !task.spec.best_of;
     if (!task.spec.best_of) return;
@@ -435,21 +419,26 @@ const portalTasks = (() => {
       .filter(([name]) => name.startsWith('best_of_'))]);
     if (attemptsSignature === key) return;
     const path = taskPath(task) + '/best-of';
-    const record = await data(path);
+    const [record, artifacts] = await Promise.all([data(path), artifactsRequest]);
     if (!openTaskIs(task.id)) return;
     const message = $('task-best-of-status');
     ui.list(root, ['尝试', '模型 / 版本', '验证', '费用', '轮次', '变更统计', '操作'],
       record.attempts.map(attempt => {
         const actions = [];
         if (attempt.patch_artifact) {
-          actions.push(ui.action('查看补丁', async () => {
-            const name = attempt.patch_artifact.split('/').map(enc).join('/');
-            const patch = await (await api(taskPath(task) + '/artifacts/' + name)).text();
-            if (!openTaskIs(task.id)) return;
-            $('task-attempt-patch-title').textContent = '候选 ' + attempt.attempt + ' 的补丁';
-            diff($('task-attempt-patch-text'), patch);
-            $('task-attempt-patch').hidden = false;
-          }, message));
+          const artifact = artifacts.find(item => item.name === attempt.patch_artifact);
+          if (artifact?.missing_reason) {
+            actions.push(el('span', artifact.missing_reason));
+          } else {
+            actions.push(ui.action('查看补丁', async () => {
+              const name = attempt.patch_artifact.split('/').map(enc).join('/');
+              const patch = await (await api(taskPath(task) + '/artifacts/' + name)).text();
+              if (!openTaskIs(task.id)) return;
+              $('task-attempt-patch-title').textContent = '候选 ' + attempt.attempt + ' 的补丁';
+              diff($('task-attempt-patch-text'), patch);
+              $('task-attempt-patch').hidden = false;
+            }, message));
+          }
           if (ui.can('member') && record.select === 'human' && record.awaiting_selection) {
             actions.push(ui.action('选择', async () => {
               await data(path + '/select', {attempt: attempt.attempt});
@@ -502,9 +491,10 @@ const portalTasks = (() => {
     }, message)), message);
   }
 
-  function refreshTask(task) {
+  function refreshTask(task, artifactsRequest) {
+    if (conversation?.id === task.id) void conversation.panel.refresh();
     impact(task);
-    return loadAttempts(task).catch(e => {
+    return loadAttempts(task, artifactsRequest).catch(e => {
       if (openTaskIs(task.id)) ui.setMessage($('task-best-of-status'), e.message, true);
     });
   }
@@ -577,7 +567,8 @@ const portalTasks = (() => {
   async function report(task, artifacts) {
     const artifact = artifacts.find(item => item.name === 'report.md');
     if (!artifact) return null;
-    const key = JSON.stringify([task.id, artifact.created_at, artifact.size_bytes]);
+    const key = JSON.stringify([task.id, artifact.created_at, artifact.size_bytes, artifact.missing_reason]);
+    if (artifact.missing_reason) return {key, missingReason: artifact.missing_reason};
     if (key !== reportCache?.key) {
       const pending = api(taskPath(task) + '/artifacts/report.md').then(response => response.text());
       reportCache = {key, pending};
@@ -622,7 +613,8 @@ const portalTasks = (() => {
       root.dataset.report = '';
       target.replaceChildren(el('p', '分析报告尚未发布。当前状态 · ' + statusText(task.state)));
     } else if (root.dataset.report !== result.key) {
-      target.replaceChildren(portalMarkdown.render(result.text));
+      target.replaceChildren(result.missingReason
+        ? el('p', result.missingReason) : portalMarkdown.render(result.text));
       root.dataset.report = result.key;
     }
   }
@@ -631,17 +623,16 @@ const portalTasks = (() => {
     stopTerminal();
     terminalTask = null;
     outcomeSignature = attemptsSignature = impactSignature = undefined;
-    messageRequest = null;
-    $('task-message-form').reset();
-    $('task-message-controls').disabled = true;
-    ui.setMessage($('task-message-status'), '');
+    conversation?.panel.destroy();
+    conversation = null;
     for (const id of ['task-delivery', 'task-tools-champion', 'task-scope', 'task-best-of', 'task-impact']) {
       $(id).replaceChildren();
       $(id).parentElement.hidden = true;
     }
     for (const id of ['task-extras-status', 'task-best-of-status', 'task-terminal-output', 'task-terminal-status',
-      'task-attempt-patch-text', 'analysis-report', 'analysis-rendered']) $(id).replaceChildren();
-    for (const id of ['task-attempt-patch', 'task-terminal-panel', 'analysis-report-panel']) $(id).hidden = true;
+      'task-attempt-patch-text', 'analysis-report', 'analysis-rendered', 'task-missing-artifacts']) $(id).replaceChildren();
+    for (const id of ['task-attempt-patch', 'task-terminal-panel', 'analysis-report-panel',
+      'task-missing-artifacts-panel']) $(id).hidden = true;
     $('analysis-report-panel').dataset.report = '';
   }
 

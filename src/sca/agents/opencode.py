@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -137,6 +138,7 @@ class OpenCodeBackend:
         self.default_version = validate_version(default_version)
         self.default_model = default_model
         self.host_release = host_release
+        self.binary_name = "opencode.exe" if host_release and sys.platform == "win32" else "opencode"
         if not self.versions_dir.is_dir():
             raise FileNotFoundError("OpenCode versions directory does not exist")
 
@@ -144,8 +146,8 @@ class OpenCodeBackend:
         directory = self.versions_dir / validate_version(version or self.default_version)
         if (
             directory.is_symlink()
-            or (directory / "opencode").is_symlink()
-            or not (directory / "opencode").is_file()
+            or (directory / self.binary_name).is_symlink()
+            or not (directory / self.binary_name).is_file()
         ):
             raise AgentTurnError(f"Unknown OpenCode version: {directory.name}")
         return directory
@@ -160,7 +162,8 @@ class OpenCodeBackend:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as stream:
                 stream.write(ctx.agent_overlay.canonical_json())
-                os.fchmod(stream.fileno(), 0o444)
+                if sys.platform != "win32":
+                    os.fchmod(stream.fileno(), 0o444)
             os.replace(temporary, home / "sca-overlay.json")
         finally:
             Path(temporary).unlink(missing_ok=True)
@@ -196,6 +199,9 @@ class OpenCodeBackend:
         if not (ctx.model_base_url and ctx.model_api_key):
             raise AgentTurnError("OpenCode requires model_base_url and model_api_key")
         model = ctx.model or self.default_model
+        model_config = {}
+        if (context := ctx.model_context_window) is not None:
+            model_config["limit"] = {"context": context, "output": min(4096, max(1, context // 4))}
         config = {
             "providers": {
                 "sca": {
@@ -203,7 +209,7 @@ class OpenCodeBackend:
                     "env": ["SCA_MODEL_KEY"],
                     "package": "@opencode/ai/providers/openai-compatible",
                     "settings": {"baseURL": ctx.model_base_url},
-                    "models": {model: {}},
+                    "models": {model: model_config},
                 }
             },
             # Headless runs cannot answer a permission prompt, and a cancelled one fails the turn.
@@ -234,7 +240,7 @@ class OpenCodeBackend:
                                  "oauth": False}
             config["mcp"] = {"servers": servers}
         argv = [
-            str(directory / "opencode") if self.host_release else "/opt/opencode/opencode",
+            str(directory / self.binary_name) if self.host_release else "/opt/opencode/opencode",
             "run",
             "--standalone",
             "--auto",

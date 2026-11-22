@@ -8,12 +8,16 @@ help() {
 用法: bash scripts/portal_demo.sh {setup|up} [--mode docker|source]
       bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
       bash scripts/portal_demo.sh restart-gateway
+      bash scripts/portal_demo.sh export-history <zip>
+      bash scripts/portal_source.sh {import-history|export-history} <zip>
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
-  up      启动本地 API 和 worker，打印网址和登录令牌
+  up      启动本地 API 和 worker，显示网址及登录信息
   down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
   status  查看运行模式、服务、网关连接和已注册版本
   logs    查看当前模式的服务日志
-  restart-gateway  加载更新后的模型密钥并重启网关
+  restart-gateway  加载模型接入配置并重启网关
+  export-history   使用当前模式的数据库和对象存储导出历史 ZIP
+  import-history   将历史 ZIP 导入本机源码模式
 也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
@@ -21,6 +25,7 @@ Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GN
 HELP
 }
 case "${1:---help}" in -h|--help) help; exit 0;; esac
+CALLER_DIR=$PWD
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 COMMAND=$1
@@ -31,6 +36,14 @@ case "$COMMAND" in
         if [[ $# == 2 && $1 == --mode && ( $2 == docker || $2 == source ) ]]; then
             REQUESTED_MODE=$2
         elif [[ $# != 0 ]]; then help; exit 2; fi;;
+    import-history|export-history)
+        if [[ $# == 3 && $1 == --mode && $2 == source ]]; then
+            REQUESTED_MODE=source
+            shift 2
+        fi
+        [[ $# == 1 && -n $1 && $1 != -* ]] || { help; exit 2; }
+        ARCHIVE=$1
+        if [[ $ARCHIVE != /* ]]; then ARCHIVE="$CALLER_DIR/$ARCHIVE"; fi;;
     status|logs|restart-gateway) [[ $# == 0 ]] || { help; exit 2; };;
     down) [[ $# == 0 || ( $# == 1 && $1 == --all ) ]] || { help; exit 2; };;
     *) help; exit 2;; esac
@@ -103,16 +116,37 @@ WRAPPER
 }
 compose() { run "$SCA_DOCKER_BIN" compose --env-file "$ROOT/.env" -f deploy/docker-compose.yml --profile gateway "$@"; }
 gateway_config() {
-    run "$PY" - <<'PY'
-from sca.gateway.configuration import model_configured
+    run "$PY" - "$ROOT" <<'PY'
+import sys
+from pathlib import Path
 
-print("config.yaml" if model_configured() else "history.yaml")
+from sca.config import get_settings
+from sca.gateway.configuration import deepseek_configured
+from sca.gateway.model_providers import gateway_config, read_registry
+
+root = Path(sys.argv[1])
+data = get_settings().data_dir
+print(gateway_config(root, data, read_registry(data),
+                     deepseek=deepseek_configured(root / ".env"), docker=False))
 PY
 }
 start_docker_gateway() {
-    local config
-    config=$(gateway_config)
-    SCA_LITELLM_CONFIG="$ROOT/deploy/litellm/$config" compose up -d --wait --no-deps "$@" litellm
+    run "$PY" - "$ROOT" "$SCA_DOCKER_BIN" "$@" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from sca.config import get_settings
+from sca.gateway.configuration import deepseek_configured
+from sca.gateway.model_providers import docker_gateway_command, gateway_config, read_registry
+
+root = Path(sys.argv[1])
+data = get_settings().data_dir
+registry = read_registry(data)
+config = gateway_config(root, data, registry, deepseek=deepseek_configured(root / ".env"), docker=True)
+command = docker_gateway_command(root, data, registry, sys.argv[2], sys.argv[3:])
+os.execvpe(command[0], command, {**os.environ, **registry.environment(), "SCA_LITELLM_CONFIG": str(config)})
+PY
 }
 load_env() {
     [[ -f .data/portal.env ]] || fail '请先运行 setup。'
@@ -121,7 +155,12 @@ load_env() {
     # shellcheck disable=SC1091
     source .data/portal.env
     export SCA_RUNTIME_MODE="${SCA_RUNTIME_MODE:-docker}"
-    if [[ "$SCA_RUNTIME_MODE" == source ]]; then load_source_env; fi
+    if [[ "$SCA_RUNTIME_MODE" == source ]]; then
+        load_source_env
+    elif [[ "$SCA_RUNTIME_MODE" == docker && -f .env ]]; then
+        # Older Docker setups predate the local model configuration setting.
+        export SCA_PORTAL_LOCAL_CONFIG="${SCA_PORTAL_LOCAL_CONFIG-$ROOT/.env}"
+    fi
 }
 saved_mode() (
     unset SCA_RUNTIME_MODE
@@ -277,6 +316,11 @@ PY
 }
 up() {
     load_env
+    run "$PY" -m alembic upgrade head
+    if [[ $SCA_RUNTIME_MODE == docker ]]; then
+        run "$PY" -m sca.agents.docker_node ||
+            echo 'DeepSeek Harness 运行时暂未就绪，运行 dsh 任务时将重试。' >&2
+    fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         if [[ ! -f "$STRIPE_SIM_MARKER" ]] && { owned api || owned worker; }; then
             fail '请先运行 down，再以 Stripe 模拟模式启动 Portal。'
@@ -289,13 +333,17 @@ up() {
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
     for ((i=0; i<60; i++)); do
-        owned api && owned worker || fail '进程启动失败，请查看 .data/run/ 日志。'
+        if ! owned api || ! owned worker; then
+            fail '进程启动失败，请查看 .data/run/ 日志。'
+        fi
         if request /healthz >/dev/null 2>&1; then ready=1; break; fi
         run sleep 2
     done
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
-    if [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"; fi
+    if [[ "$SCA_RUNTIME_MODE" == source || -n ${SCA_EVAL_API_TOKEN:-} ]]; then
+        echo '登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。'
+    fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"
     else
@@ -377,7 +425,6 @@ setup_docker() {
     save_mode docker
     load_env
     start_docker_services
-    run .venv/bin/alembic upgrade head
     run "$SCA_DOCKER_BIN" build -t sca-sandbox:latest deploy/sandbox
     run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
     run "$SCA_DOCKER_BIN" build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/dsh
@@ -435,6 +482,22 @@ case "$COMMAND" in
             start_docker_services
         fi
         up;;
+    import-history|export-history)
+        if [[ $COMMAND == import-history || ${REQUESTED_MODE:-$(saved_mode)} == source ]]; then
+            ensure_mode_switch source
+            find_postgres
+            if [[ ! -x "$PY" || ! -f .data/portal.env || ! -f .env ]]; then
+                prepare_app
+            fi
+            if [[ $(saved_mode) != source ]]; then save_mode source; fi
+            load_env
+            start_postgres
+            "$PY" "$SOURCE_HELPER" history "${COMMAND%-history}" "$ARCHIVE" --migrate
+        else
+            load_env
+            [[ -x "$PY" ]] || fail '请先运行 setup。'
+            "$PY" "$SOURCE_HELPER" history export "$ARCHIVE"
+        fi;;
     down)
         mode=$(saved_mode)
         cleanup_failed=0

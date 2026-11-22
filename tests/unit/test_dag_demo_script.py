@@ -1,8 +1,10 @@
 import asyncio
 import json
+import sys
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from temporalio import workflow
 from test_best_of import LocalWorkflow
 
@@ -19,6 +21,9 @@ from sca.sandbox.local import LocalSandboxProvider
 from sca.storage.local import LocalObjectStore, key_for
 from scripts.dag_demo import FILES, GRAPH, run_demo, submission
 from tests.best_of_harness import TASK_ID, FakeStore
+
+# Git Bash, native Git, and the Job Object launcher add subprocess startup time on Windows.
+DEMO_TIMEOUT_S = 90 if sys.platform == "win32" else 20
 
 
 def test_demo_submits_queues_guidance_and_waits_for_second_review():
@@ -120,22 +125,32 @@ class DemoWorkflow(LocalWorkflow):
 async def test_demo_runs_real_planning_scoped_candidates_fix_and_merge(tmp_path, best_of_repo, monkeypatch):
     demo = DemoWorkflow(tmp_path, submission(str(best_of_repo.task_dir))["spec"], monkeypatch)
     ready = demo.store.states[TaskState.AWAITING_REVIEW]
-    execution = asyncio.create_task(demo.run())
-    try:
-        async with asyncio.timeout(18):
-            await ready.wait()
+    execution = asyncio.create_task(demo.run(timeout_s=DEMO_TIMEOUT_S))
+
+    async def wait_for_review():
+        review = asyncio.create_task(ready.wait())
+        try:
+            done, _ = await asyncio.wait((execution, review), return_when=asyncio.FIRST_COMPLETED)
+            if execution in done:
+                pytest.fail(f"Demo ended in {execution.result()} before review")
             ready.clear()
-            assert demo.store.task.result["verification_passed"] is True
-            await demo.interject()
-            await ready.wait()
-            assert demo.store.task.result["verification_passed"] is True
-            await demo.store.append_event(TASK_ID, "review.submitted", {"decision": "approve"})
-            await demo.submit_review(str(TASK_ID), "approve", None)
-            assert await execution == "SUCCEEDED"
+        finally:
+            review.cancel()
+            await asyncio.gather(review, return_exceptions=True)
+
+    try:
+        await wait_for_review()
+        assert demo.store.task.result["verification_passed"] is True
+        await demo.interject()
+        await wait_for_review()
+        assert demo.store.task.result["verification_passed"] is True
+        await demo.store.append_event(TASK_ID, "review.submitted", {"decision": "approve"})
+        await demo.submit_review(str(TASK_ID), "approve", None)
+        assert await execution == "SUCCEEDED"
     finally:
         if not execution.done():
             execution.cancel()
-            await asyncio.gather(execution, return_exceptions=True)
+        await asyncio.gather(execution, return_exceptions=True)
 
     assert {row["name"]: row["status"] for row in demo.store.task.result["subtasks"]} == dict.fromkeys(GRAPH, "merged")
     root = demo.coding._workspace(str(TASK_ID)).workspace
@@ -158,6 +173,9 @@ async def test_demo_runs_real_planning_scoped_candidates_fix_and_merge(tmp_path,
     assert {node.status for node in graph.nodes if node.kind in ("interjection", "finish")} == {"succeeded"}
     assert [node.status for node in graph.nodes if node.kind == "review"] == ["skipped", "succeeded"]
     assert not list(demo.sandboxes.iterdir())
+    children = root.parent / "sub"
+    assert not list(children.glob("plan-*"))
+    assert not list(children.glob("*/sub/best-of-*"))
 
 
 async def test_nested_candidates_cannot_adopt_an_out_of_scope_patch(tmp_path, best_of_repo, monkeypatch):
@@ -166,7 +184,7 @@ async def test_nested_candidates_cannot_adopt_an_out_of_scope_patch(tmp_path, be
         "> dag-demo/fx.txt", "> dag-demo/fx.txt && printf out-of-scope > app.txt",
     )
     demo = DemoWorkflow(tmp_path, {**options, "auto_finish": True}, monkeypatch)
-    assert await demo.run() == "FAILED"
+    assert await demo.run(timeout_s=DEMO_TIMEOUT_S) == "FAILED"
     assert len({p["best_of_attempt"] for p in demo.events("scope.violation")}) == 3
     assert demo.events("best_of.selected") == []
     root = demo.coding._workspace(str(TASK_ID)).workspace

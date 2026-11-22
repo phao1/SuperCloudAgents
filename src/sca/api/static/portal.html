@@ -6,6 +6,7 @@
 <title>SuperCloudAgents · 工作台</title>
 <link rel="stylesheet" href="/portal/assets/portal-operations.css">
 <link rel="stylesheet" href="/portal/assets/task-dag.css">
+<link rel="stylesheet" href="/portal/assets/portal-conversation.css">
 <style>
 :root {
   color-scheme: light;
@@ -469,7 +470,7 @@ body[data-trace-expanded] { overflow: hidden; }
       <a href="#/analysis" data-access="history" hidden>数据分析</a>
       <a href="#/evals" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
-      <a href="#/evolutions" data-access="admin" hidden>自动演进</a>
+      <a href="#/evolutions" data-access="evolution-history" hidden>自动演进</a>
       <a href="#/compare" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
       <a href="#/versions" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
       <a href="#/memories" data-access="tenant" hidden>共享记忆</a>
@@ -492,7 +493,7 @@ body[data-trace-expanded] { overflow: hidden; }
       </div>
     </header>
     <p id="guest-view-banner" class="panel" hidden>只读访客模式 · <a href="#/overview">登录</a></p>
-    <p id="model-not-configured" class="provider-error-banner" role="status" hidden>未配置模型密钥：可浏览历史，无法运行新任务</p>
+    <p id="model-not-configured" class="provider-error-banner" role="status" hidden>尚未接入模型，可浏览历史记录</p>
     <!-- source mode warning -->
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
@@ -525,6 +526,7 @@ body[data-trace-expanded] { overflow: hidden; }
         </div>
         <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
       </div>
+      <div id="model-providers" class="panel" hidden></div>
       <div class="cards" data-access="eval" hidden>
         <article class="feature">
           <h2>系统提示词自演进</h2>
@@ -591,7 +593,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <label>套件<select id="suite" required></select></label>
             <label>后端<select id="backend"><option value="opencode">OpenCode</option><option value="pi">Pi</option><option value="dsh">DeepSeek Harness</option><option value="codex">Codex</option></select></label>
             <label>OpenCode 版本<select id="version"><option value="">默认版本</option></select></label>
-            <label>模型<input id="model" list="models" value="deepseek-flash"></label>
+            <label>模型<input id="model" list="models"></label>
             <datalist id="models"></datalist>
             <label>重复次数<input id="repeat" type="number" value="1" min="1" max="100" required></label>
             <label>并发<input id="concurrency" type="number" value="1" min="1" max="100" required></label>
@@ -650,7 +652,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <a id="task-project-link" href="#/projects">项目</a><span aria-hidden="true"> › </span>
           <span aria-current="page">线程</span>
         </nav>
-        <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span></header>
+        <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span><span id="task-imported" class="badge" hidden>导入</span></header>
         <p id="task-extras-status" class="status-text portal-message" role="status"></p>
         <div class="panel" hidden><h2>拉取请求与工单</h2><div id="task-delivery" class="stack"></div></div>
         <div class="panel" hidden><h2>工具与冠军</h2><div id="task-tools-champion" class="stack"></div></div>
@@ -672,6 +674,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <p id="task-terminal-status" class="status-text" role="status"></p>
           <pre id="task-terminal-output" class="portal-terminal" tabindex="0" aria-label="终端输出"></pre>
         </div>
+        <div class="portal-run-workbench">
         <section id="task-dag" class="panel task-dag" aria-labelledby="task-dag-title">
           <div class="panel-head">
             <h2 id="task-dag-title">执行图 DAG</h2>
@@ -700,6 +703,8 @@ body[data-trace-expanded] { overflow: hidden; }
           </svg>
           <aside class="dag-detail" aria-label="节点详情" aria-live="polite" hidden></aside>
         </section>
+        <section id="task-conversation" aria-label="任务对话"></section>
+        </div>
         <section id="swimlane" aria-labelledby="task-time-title">
           <header class="task-time-toolbar">
             <h3 id="task-time-title">执行泳道</h3>
@@ -793,18 +798,9 @@ body[data-trace-expanded] { overflow: hidden; }
           </div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
-          <form id="task-message-form" class="task-message-form stack" data-access="member" hidden>
-            <fieldset id="task-message-controls" class="stack" disabled>
-              <label for="task-message-text">插话：给正在运行的任务补充要求</label>
-              <textarea id="task-message-text" rows="2" maxlength="4000" required
-                        placeholder="回车发送，Shift + 回车换行"></textarea>
-              <div class="form-actions">
-                <label class="portal-check"><input id="task-message-interrupt" type="checkbox">立即打断当前轮</label>
-                <button type="submit" class="primary">发送</button>
-              </div>
-            </fieldset>
-            <p id="task-message-status" class="status-text portal-message" role="status"></p>
-          </form>
+          <div id="task-missing-artifacts-panel" class="stack" hidden>
+            <h3>缺失的文件</h3><ul id="task-missing-artifacts"></ul>
+          </div>
           <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
         </div>
       </div>
@@ -841,6 +837,25 @@ body[data-trace-expanded] { overflow: hidden; }
     <section id="evolutions-page" class="page" hidden>
       <nav id="evolution-nav" class="portal-tabs" aria-label="自动演进功能"></nav>
       <div id="evolution-content" class="page"></div>
+      <template id="evolution-dag-template">
+        <section id="evolution-dag" class="panel task-dag" aria-labelledby="evolution-dag-title">
+          <div class="panel-head">
+            <h2 id="evolution-dag-title">演进执行图 DAG</h2>
+            <div class="dag-controls">
+              <button class="dag-zoom-out" type="button" aria-label="缩小演进图">−</button>
+              <button class="dag-zoom-in" type="button" aria-label="放大演进图">＋</button>
+              <button class="dag-fit" type="button">查看全图</button>
+            </div>
+          </div>
+          <p class="dag-pan-hint dag-legend" hidden>滚动或拖动查看其余节点</p>
+          <p class="dag-load-status" role="status"></p>
+          <svg class="dag-canvas" tabindex="0" role="group"
+               aria-label="演进执行图。滚动、拖动或按方向键平移，按加减键缩放。选择评测节点展开用例。">
+            <g class="dag-world"></g>
+          </svg>
+          <aside class="dag-detail" aria-label="节点详情" aria-live="polite" hidden></aside>
+        </section>
+      </template>
     </section>
     <section id="tools-page" class="page" hidden><div id="tools-content" class="page"></div></section>
     <section id="integrations-page" class="page" hidden><div id="integrations-content" class="page"></div></section>
@@ -887,7 +902,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <p id="fix-source">在评测详情选择一个用例和它的执行证据。</p>
             <div class="fields two">
               <label>执行后端<select id="fix-backend"><option value="codex">Codex</option><option value="opencode">OpenCode</option></select></label>
-              <label>模型<input id="fix-model" list="models" value="deepseek-flash"></label>
+              <label>模型<input id="fix-model" list="models"></label>
               <label class="wide"><span id="instruction-label">问题诊断</span><textarea id="instruction" maxlength="10000"></textarea></label>
             </div>
             <div class="action-bar">
@@ -919,6 +934,8 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
 <script src="/portal/assets/portal-ui.js"></script>
+<script src="/portal/assets/portal-conversation.js"></script>
+<script src="/portal/assets/portal-models.js"></script>
 <script src="/portal/assets/portal-markdown.js"></script>
 <script src="/portal/assets/portal-tasks.js"></script>
 <script src="/portal/assets/portal-evolution.js"></script>
@@ -939,8 +956,11 @@ const pendingActions=new Set();
 $('token').value=portalToken;
 let canRescore=false;
 function overallPassed(row){return row.acceptance_passed===true&&row.trajectory_passed!==false}
+function evalCaseErrored(row){return row.status==='errored'||Boolean(row.infrastructure_error)}
 function resultLabel(row){
   if(row.infrastructure_error)return '⚠ 基础设施错误 · '+providerAccountLabel(row.infrastructure_error.kind);
+  if(row.reason)return (evalCaseErrored(row)?'⚠ ':'✕ ')+row.reason;
+  if(evalCaseErrored(row))return '⚠ 用例执行错误';
   return row.acceptance_passed===true&&row.trajectory_passed===false?'⚠ 验收通过 · 过程未通过':overallPassed(row)?'✓ 总体通过':row.acceptance_passed===false?'✕ 验收失败':'◷ 待验收';
 }
 function error(e){
@@ -975,12 +995,13 @@ async function api(path,body,method){
   if(!r.ok)throw await apiFailure(r);
   return r
 }
-async function apiFailure(r){
+async function apiFailure(r,showModelDetails=false){
   const body=typeof r.json==='function'?await r.json().catch(()=>({})):{};
   const message=body?.error?.message;
   if(r.status===401||r.status===403){
     const note=r.status===401?'认证失败（401）：请重新输入有效令牌并连接。':'权限不足（403）：当前令牌无法执行此操作。';
-    return Object.assign(Error(body?.error?.code==='tenant_suspended'?message:note),{status:r.status});
+    const detail=body?.error?.code==='tenant_suspended'||(showModelDetails&&r.status===403&&body?.error?.code==='http_error');
+    return Object.assign(Error(detail?message:note),{status:r.status});
   }
   return Object.assign(Error(message||'请求失败：'+r.status),{status:r.status});
 }
@@ -1074,6 +1095,7 @@ async function loadConfig(c){
   c??=await data('/portal/config');
   if(identity!==portalIdentity)return;
   const backendChanged=portalConfig?.default_agent_backend!==c.default_agent_backend;
+  const previousDefault=portalConfig?.default_model;
   portalConfig=c;
   $('model-not-configured').hidden=c.model_configured!==false;
   if(c.guest_view)return c;
@@ -1090,8 +1112,7 @@ async function loadConfig(c){
   $('provider-key-note').textContent=c.can_configure_model
     ?'保存在本机，保存后会重启模型网关。'
     :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
-  if(!$('model').value)$('model').value=c.default_model;
-  options('models',c.models,x=>x,x=>x);
+  portalModels.configure(c,previousDefault);
   options('backend',c.agent_backends,x=>x,portalUI.backendLabel);
   if(currentTask&&pageRoute().current==='tasks'){
     if(backendChanged)portalTasks.render(currentTask,taskEvents);
@@ -1150,9 +1171,9 @@ function syncEvalForm(){
   version.disabled=backend.value!=='opencode'&&backend.value!=='opencode-brain';
   const valid=!isPrompt||(version.value&&portalConfig.prompt_evolution.models.includes(model.value.trim()));
   $('run-form').querySelector('button[type=submit]').disabled=launchingRun||!valid;
-  $('suite-note').textContent=isPrompt
-    ?(valid?'比较系统提示词建议重复至少 2 次。':'请选择已安装版本和 DeepSeek 模型。')
-    :'';
+  $('suite-note').textContent=[isPrompt
+    ?(valid?'比较系统提示词建议重复至少 2 次。':'请选择已安装版本和已接入模型。'):'',
+    portalModels.budgetWarning([model.value.trim()||portalConfig?.default_model])].filter(Boolean).join(' ');
 }
 function applyEvalPreset(preset){
   const name=preset==='prompt'?portalConfig?.prompt_evolution?.suite:preset==='repair'?'opencode-demo':null;
@@ -1162,7 +1183,7 @@ function applyEvalPreset(preset){
   $('backend').value='opencode';
   $('repeat').value=preset==='prompt'?'2':'1';
   if(preset==='prompt'&&!portalConfig.prompt_evolution.models.includes($('model').value)){
-    $('model').value=portalConfig.prompt_evolution.models[0];
+    $('model').value=portalConfig.default_model||'';
   }
 }
 function runBody(){
@@ -1207,7 +1228,8 @@ function renderRunProgress(run,total){
   progress.max=Math.max(1,total);
   progress.value=run.results.length;
   progress.setAttribute('aria-label','已记录用例数');
-  const caption=el('small',run.results.length+' / '+total+' 个用例结果 · '+statusText(run.status));
+  const caption=el('small',run.results.length+' / '+total+' 个用例结果 · '+statusText(run.status)
+    +(run.errored?' · '+run.errored+' 个执行错误':''));
   const links=el('div',undefined,'result-links');
   for(const task of running)links.append(evidenceLink(taskChoice(task)+' ↗','#/tasks/'+enc(task.id)));
   $('run-progress').replaceChildren(caption,progress,links);
@@ -1231,7 +1253,8 @@ async function loadRuns(){
     const batch=await Promise.all(runs.slice(i,i+4).map(r=>{
       const cached=runDetails.get(r.id);
       return cached?.status===r.status&&cached.result_count===r.result_count
-        &&cached.passed===r.passed&&cached.failed===r.failed?cached:data('/evals/runs/'+enc(r.id));
+        &&cached.passed===r.passed&&cached.failed===r.failed&&cached.errored===r.errored
+        &&cached.reason===r.reason?cached:data('/evals/runs/'+enc(r.id));
     }));
     if(!current())return;
     batch.forEach(r=>runDetails.set(r.id,r));
@@ -1276,9 +1299,9 @@ async function matrix(){
   $('matrix').replaceChildren(table(['用例',...Array.from({length:repeat},(_,i)=>'第 '+(i+1)+' 次')],cases.map(id=>[id,...Array.from({length:repeat},(_,i)=>{
     const row=rows.find(r=>r.case_id===id&&r.repeat===i),box=el('div');
     if(!row){box.append(el('small',['queued','running'].includes(run.status)?'等待结果':'无结果'));return box}
-    box.className=row.infrastructure_error?'bad cell':row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
-    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(row.infrastructure_error?'未执行':row.verification_passed?'✓ 通过':'✕ 未通过')));
-    if(allowPrompt)box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
+    box.className=evalCaseErrored(row)?'bad cell':row.acceptance_passed===true&&row.trajectory_passed===false?'process-warning cell':overallPassed(row)?'good cell':row.acceptance_passed===false?'bad cell':'cell';
+    box.append(button(resultLabel(row),()=>selectCase(run,row)),el('small',Number(row.duration_s).toFixed(1)+' 秒 · '+money(row.cost_usd)),el('small','验证 '+(evalCaseErrored(row)?'未执行':row.verification_passed?'✓ 通过':'✕ 未通过')));
+    if(allowPrompt&&!evalCaseErrored(row))box.append(button('用于提示词优化 →',()=>chooseFix(run,row,'system_prompt')));
     else if(portalUI.can('member')&&!overallPassed(row)&&typeof row.acceptance_passed==='boolean')box.append(button('诊断与修复 →',()=>selectCase(run,row,true)));
     return box;
   })])));
@@ -1645,7 +1668,7 @@ function stopTaskStream(){
 function refreshTaskDag(id, fromStream=false){
   if(!location.hash.startsWith('#/tasks'))return;
   const panel=$('task-dag');
-  panel.hidden=!portalUI.can('tenant')||typeof SCATaskDAG==='undefined';
+  panel.hidden=!portalUI.can('history')||typeof SCATaskDAG==='undefined';
   if(panel.hidden)return;
   taskDag??=SCATaskDAG.create(panel,taskId=>data('/tasks/'+enc(taskId)+'/dag'));
   taskDag.refresh(id,fromStream);
@@ -1812,26 +1835,31 @@ async function updateTask(){
     void streamTask(id);
     const [,routeId,section,seq]=location.hash.slice(2).split('/');
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
-    const [artifacts]=await Promise.all([data('/tasks/'+enc(id)+'/artifacts'),portalTasks.refreshTask(t)]);
+    const artifactsRequest=data(path+'/artifacts');
+    const [artifacts]=await Promise.all([artifactsRequest,portalTasks.refreshTask(t,artifactsRequest)]);
     if(selectedTask!==id||portalIdentity!==identity)return;
-    if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
-      const artifact=artifacts.find(a=>a.name==='report.md');
-      const key=id+'|'+artifact.created_at+'|'+artifact.size_bytes;
-      if($('analysis-report-panel').dataset.report!==key){
-        const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
-        if(selectedTask===id&&portalIdentity===identity){
-          $('analysis-report').textContent=report;
-          $('analysis-rendered').replaceChildren(portalMarkdown.render(report));
-          $('analysis-report-panel').dataset.report=key;
-          $('task-analysis-link').href='#/analysis/'+enc(id);
-          $('analysis-report-panel').hidden=false;
-        }
-      }
-    }else {
-      $('analysis-report-panel').hidden=true;
+    const missing=artifacts.filter(a=>a.missing_reason&&a.name!=='changes.patch'
+      &&(t.kind!=='analysis'||a.name!=='report.md'));
+    $('task-missing-artifacts-panel').hidden=!missing.length;
+    $('task-missing-artifacts').replaceChildren(...missing.map(a=>el('li',a.name+' · '+a.missing_reason)));
+
+    const report=t.kind==='analysis'?await portalTasks.report(t,artifacts):null;
+    if(selectedTask!==id||portalIdentity!==identity)return;
+    const panel=$('analysis-report-panel');
+    panel.hidden=!report;
+    if(report&&panel.dataset.report!==report.key){
+      $('analysis-report').textContent=report.text??'';
+      $('analysis-report').parentElement.hidden=Boolean(report.missingReason);
+      $('analysis-rendered').replaceChildren(report.missingReason
+        ?el('p',report.missingReason):portalMarkdown.render(report.text));
+      panel.dataset.report=report.key;
+      $('task-analysis-link').href='#/analysis/'+enc(id);
     }
-    if(artifacts.some(a=>a.name==='changes.patch')){
-      const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
+    const patchArtifact=artifacts.find(a=>a.name==='changes.patch');
+    if(patchArtifact?.missing_reason){
+      $('patch').textContent=patchArtifact.missing_reason;
+    }else if(patchArtifact){
+      const patch=await(await api(path+'/artifacts/changes.patch')).text();
       if(selectedTask===id&&portalIdentity===identity){diff($('patch'),patch);renderTaskDiagnostics(patch)}
     }
   } finally{
@@ -2027,7 +2055,7 @@ async function loadPromptPreview(){
 }
 function statusText(value){
   return ({
-    running:'运行中',completed:'已完成',succeeded:'已成功',failed:'失败',queued:'排队中',
+    running:'运行中',completed:'已完成',succeeded:'已成功',failed:'失败',queued:'排队中',stopped:'已停止',
     budget_exhausted:'预算已用尽',QUEUED:'排队中',PROVISIONING:'环境准备',RUNNING:'执行中',
     VERIFYING:'验证中',AWAITING_REVIEW:'待审核',PAUSED:'已暂停',SUCCEEDED:'已成功',
     FAILED:'失败',CANCELLED:'已取消',
@@ -2047,12 +2075,13 @@ function median(values){return quantile(values,.5)}
 function quantile(values,q){const v=values.filter(Number.isFinite).sort((a,b)=>a-b);if(!v.length)return null;const i=(v.length-1)*q,lo=Math.floor(i);return v[lo]+(v[Math.ceil(i)]-v[lo])*(i-lo)}
 function dimensions(rows){
   const known=rows.filter(r=>typeof r.acceptance_passed==='boolean'),times=rows.map(r=>r.duration_s).filter(x=>x!==null&&x!==undefined).map(Number),mean=times.length?times.reduce((a,b)=>a+b,0)/times.length:0;
+  const verified=rows.filter(r=>typeof r.verification_passed==='boolean');
   const groups=new Map(),cases=new Map();
   known.forEach(r=>{if(!groups.has(r.repeat))groups.set(r.repeat,[]);groups.get(r.repeat).push(overallPassed(r));if(!cases.has(r.case_id))cases.set(r.case_id,[]);cases.get(r.case_id).push(overallPassed(r))});
   const rates=[...groups.values()].map(v=>100*v.filter(Boolean).length/v.length),flaky=[...cases.values()].filter(v=>v.includes(true)&&v.includes(false)).length;
   const repeated=[...cases.values()].some(v=>v.length>1),spread=rates.length>1?(Math.max(...rates)-Math.min(...rates)).toFixed(1)+' pp':'—';
   const totalCost=rows.reduce((n,r)=>n+Number(r.cost_usd||0),0),tokensKnown=rows.some(r=>r.tokens!==undefined&&r.tokens!==null);
-  return {acceptanceRate:known.length?Math.round(100*known.filter(r=>r.acceptance_passed).length/known.length)+'%':'—',rateValue:known.length?100*known.filter(overallPassed).length/known.length:null,rate:known.length?Math.round(100*known.filter(overallPassed).length/known.length)+'%':'—',verification:rows.length?Math.round(100*rows.filter(r=>r.verification_passed===true).length/rows.length)+'%':'—',mean,duration:times.length?mean.toFixed(1)+' 秒':'—',p50:quantile(times,.5),p90:quantile(times,.9),stability:repeated?flaky+' 项波动':'样本不足',spread,flaky,totalCost,cost:money(totalCost),tokens:tokensKnown?rows.reduce((n,r)=>n+Number(r.tokens||0),0).toLocaleString('zh-CN'):'—'};
+  return {acceptanceRate:known.length?Math.round(100*known.filter(r=>r.acceptance_passed).length/known.length)+'%':'—',rateValue:known.length?100*known.filter(overallPassed).length/known.length:null,rate:known.length?Math.round(100*known.filter(overallPassed).length/known.length)+'%':'—',verification:verified.length?Math.round(100*verified.filter(r=>r.verification_passed).length/verified.length)+'%':'—',mean,duration:times.length?mean.toFixed(1)+' 秒':'—',p50:quantile(times,.5),p90:quantile(times,.9),stability:repeated?flaky+' 项波动':'样本不足',spread,flaky,totalCost,cost:money(totalCost),tokens:tokensKnown?rows.reduce((n,r)=>n+Number(r.tokens||0),0).toLocaleString('zh-CN'):'—'};
 }
 function renderDimensions(target,rows){const m=dimensions(rows);target.replaceChildren(metric('准 · 总通过率',m.rate,'仅验收 '+m.acceptanceRate+' · 验证 '+m.verification+' · '+rows.length+' 个已记录结果'),metric('快 · 平均时长',m.duration,rows.length>1?'p50 '+m.p50?.toFixed(1)+' / p90 '+m.p90?.toFixed(1)+' 秒':'分位数需要多个样本'),metric('稳 · 重复一致性',m.stability,'按重复组通过率极差 '+m.spread),metric('省 · 总费用',m.cost,'Token '+m.tokens+' · 缓存见任务证据'))}
 function caseChange(a,b){if(!a.length||!b.length||[...a,...b].some(r=>typeof r.acceptance_passed!=='boolean'))return '数据不足';const rate=v=>v.filter(overallPassed).length/v.length;return rate(b)<rate(a)?'✕ 回归':rate(b)>rate(a)?'✓ 已修复':'持平'}
@@ -2079,8 +2108,8 @@ function verdictFor(a,b){
   const processFailures=b.results.filter(row=>row.acceptance_passed===true&&row.trajectory_passed===false).length;
   const signal=processFailures?'验收通过但过程检查未通过 '+processFailures+' 项，属于过程回归信号。':'';
   const result=(adopt,reason)=>({adopt,fixed,regressions,reason:signal+reason});
-  if([a,b].some(run=>run.results.some(row=>row.infrastructure_error)))
-    return result(false,'评测遇到基础设施错误。'+[a.reason,b.reason].filter(Boolean).join(' · '));
+  if([a,b].some(run=>run.results.some(evalCaseErrored)))
+    return result(false,'评测存在执行错误。'+[a.reason,b.reason].filter(Boolean).join(' · '));
   if(!comparable)return result(false,'套件、模型或运行参数不同，无法直接归因。');
   if(missing||!complete(a)||!complete(b))return result(false,'等待完整的配对评测结果。');
   const promptSuite=a.suite===portalConfig?.prompt_evolution?.suite;
@@ -2227,6 +2256,7 @@ function renderTaskDiagnostics(patch=''){
 }
 function renderTaskState(t){
   $('task-title').textContent=[taskCase(t),t.id,t.state_reason].filter(Boolean).join(' · ');
+  $('task-imported').hidden=t.result?.history_imported!==true;
   const state=$('task-state');
   state.textContent=t.state==='QUEUED'&&t.result?.admission?.position
     ?'排队第 '+t.result.admission.position+' 位':statusText(t.state);
@@ -2248,11 +2278,11 @@ function renderTaskObservability(t){
   );
   renderSwimlane(t);
   for(const run of runDetails.values()){
-    const row=run.results.find(r=>r.task_id===t.id&&!r.infrastructure_error&&!overallPassed(r));
+    const row=run.results.find(r=>r.task_id===t.id&&!evalCaseErrored(r)&&!overallPassed(r));
     if(row&&!fixSelection&&!flow.fixTask){chooseFix(run,row,canOptimize(run)?'system_prompt':'source',false);break}
   }
   const result=[...runDetails.values()].flatMap(r=>r.results).find(r=>r.task_id===t.id);
-  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(result.infrastructure_error?'未执行':result.acceptance_passed?'通过':'未通过')))}
+  if(result){$('task-metrics').firstChild.replaceChildren(el('span','准 · 总体结果'),el('strong',resultLabel(result)),el('span','仅验收 '+(evalCaseErrored(result)?'未执行':result.acceptance_passed?'通过':'未通过')))}
   renderTaskDiagnostics();
 }
 
@@ -2423,7 +2453,7 @@ const pages={
   compare:['compare-page','版本对比','查看通过率、耗时和费用的变化。'],
   tasks:['trace','任务进度','沿架构图查看任务经过的模块和事件。'],
   loop:['loop','自演进闭环','追踪从基线、候选到回归的进度。'],
-  evolutions:['evolutions-page','自动演进','查看开发集与留出集证据，管理晋升、定期计划与灰度。'],
+  evolutions:['evolutions-page','自动演进','查看演进执行图、开发集与留出集证据。'],
   versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
   tools:['tools-page','工具与知识库','查看 MCP 工具和知识库文档。'],
   integrations:['integrations-page','集成','管理代码托管集成并查看设计与工单的凭证配置。'],
@@ -2433,7 +2463,7 @@ const pages={
 const pageAccess={
   projects:'tenant',
   overview:'public',submit:'member',tasks:'history',analysis:'history',versions:'tenant',memories:'tenant',
-  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'admin',integrations:'admin',
+  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'evolution-history',integrations:'admin',
   tools:'tenant',team:'admin',platform:'platform',
 };
 function pageRoute(){
@@ -2480,6 +2510,7 @@ async function showRoute({page,current,parts}){
   if(hash!==location.hash||identity!==portalIdentity)return;
   if(current!=='team')portalSettings.clearSensitive();
   if(current!=='projects')portalProjects.leave();
+  if(current!=='evolutions')portalEvolution.reset();
   syncAccess();
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
@@ -2564,7 +2595,13 @@ async function loadPage(page,parts,polling=false){
   }
   if(page==='overview'&&portalUI.can('history')&&(polling||!identity.guest))return loadConfig();
   if(page==='versions')return loadVersions();
-  if(page==='evolutions')return polling?portalEvolution.poll():portalEvolution.load(parts);
+  if(page==='evolutions'){
+    if(polling)return portalEvolution.poll();
+    const admin=portalUI.can('eval-admin');
+    await Promise.all([!identity.guest&&!portalConfig?loadConfig():null,
+      admin&&!suites.length?loadSuites():null,admin&&!versions.length?loadVersions():null]);
+    if(current())return portalEvolution.load(parts);
+  }
   if(polling)return;
   if(page==='submit')return portalTasks.loadSubmit();
   if(page==='memories')return loadMemories();
@@ -2667,11 +2704,13 @@ $('provider-key-form').onsubmit=async event=>{
       body:JSON.stringify({key:input.value.trim()}),
       signal:AbortSignal.timeout(130000),
     });
-    if(!response.ok)throw Error(response.status===403?'请使用本机 eval 管理员令牌。':'保存失败，请检查密钥和服务状态。');
+    if(response.status===403||response.status===409)throw await apiFailure(response,true);
+    if(!response.ok)throw Error('保存失败，请检查密钥和服务状态。');
     const result=await response.json();
     input.value='';
     label.textContent=result.gateway_restarted?'密钥已保存，模型网关已重启。':'密钥已保存，网关重启失败。请查看服务状态。';
     await loadConfig();
+    await portalModels.refresh();
   }catch(e){label.textContent=e.message}
   finally{savingKey=false;control.disabled=false;input.disabled=false}
 };
@@ -2822,6 +2861,7 @@ function resetPortalSession(){
   portalEvolution.reset();
   portalSettings.reset();
   portalProjects.reset();
+  portalModels.reset();
   portalIdentity=portalConfig=null;
   guestChecked=false;
   canRescore=false;

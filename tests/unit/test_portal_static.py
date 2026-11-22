@@ -78,15 +78,25 @@ const assert = require('node:assert/strict');
 const flowModel = require(process.argv[2]);
 const {buildRecords, activeTiming} = require(process.argv[3]);
 class Element {
- constructor(){this.children=[];this.dataset={};this.textContent='';this.className='';this.value='';
+ constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.textContent='';this.className='';this.value='';
  this.parentElement={};this.classList={add: name=>{this.className+=' '+name},toggle:()=>{}}}
  append(...items){this.children.push(...items)}
  replaceChildren(...items){this.children=items}
+ get elements(){return {namedItem:name=>this.querySelector('[name="'+name+'"]')}}
+ querySelector(selector){
+   for(const node of this.children){
+     if(node.tag===selector||'[name="'+node.name+'"]'===selector)return node;
+     const child=node.querySelector?.(selector);
+     if(child)return child;
+   }
+   return null;
+ }
  querySelectorAll(){return []}
+ setAttribute(){}
  focus(){}
 }
 const nodes=new Map();
-const document={getElementById:id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id)},createElement:()=>new Element()};
+const document={getElementById:id=>{if(!nodes.has(id))nodes.set(id,new Element());return nodes.get(id)},createElement:tag=>new Element(tag)};
 const localStorage={getItem:()=>''};
 '''
     checks = r'''
@@ -105,6 +115,12 @@ assert(nodes.get('overview-provider-error').hidden&&nodes.get('task-provider-err
 const infra={infrastructure_error:{kind:'billing'},acceptance_passed:null};
 assert.equal(resultLabel(infra),'⚠ 基础设施错误 · 模型服务账户余额不足');
 assert.equal(dimensions([infra]).rate,'—');
+const errored={status:'errored',acceptance_passed:null,verification_passed:null};
+assert.equal(resultLabel(errored),'⚠ 用例执行错误');
+assert.equal(resultLabel({...errored,reason:'预算配置错误'}),'⚠ 预算配置错误');
+assert.equal(resultLabel({status:'failed',acceptance_passed:false,reason:'预算耗尽'}),'✕ 预算耗尽');
+assert.equal(dimensions([errored]).rate,'—');
+assert.equal(dimensions([errored,{acceptance_passed:true,verification_passed:true}]).verification,'100%');
 assert.equal(terminalLines('clone\r\nprogress 1%\rprogress 100%\r\nend'), 'clone\nprogress 100%\nend');
 assert.equal(terminalLines('long progress\rdone\r'), 'done');
 assert.equal(uniqueDiagnostics([{title:'rule',note:'case · 第 1 次'},{title:'rule',note:'case · 第 1 次 · evidence'},{title:'rule',note:'case · 第 2 次'},{title:'other',note:'case · 第 1 次'}]).length,3);
@@ -323,10 +339,11 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  currentTask={id:selectedTask,spec:{},result:{},state:'RUNNING'};
  portalIdentity={tenant_id:'team',role:'viewer'};
  portalTasks.render(currentTask,[]);
- const controls=$('task-message-controls'),input=$('task-message-text'),form=$('task-message-form');
- assert(controls.disabled);
+ const conversation=$('task-conversation');
+ assert(conversation.querySelector('form').hidden);
  portalIdentity={tenant_id:'team',role:'member'};
  portalTasks.render(currentTask,[]);
+ const form=conversation.querySelector('form'),controls=form.querySelector('fieldset'),input=form.querySelector('textarea');
  assert(!controls.disabled);
  let submitted;
  form.requestSubmit=()=>{submitted=form.onsubmit({preventDefault(){}})};
@@ -334,8 +351,9 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  input.value='添加测试';
  input.onkeydown({...enter,isComposing:true});assert(!submitted);
  input.onkeydown({...enter,shiftKey:true});assert(!submitted);
- $('task-message-interrupt').checked=true;
+ form.querySelector('select').value='interrupt';
  data=async(path,body)=>{
+   if(path==='/tasks/task-id/conversation?limit=100')return {items:[],cursor:'0',has_more:false};
    assert.equal(path,'/tasks/task-id/messages');
    assert.deepEqual(body,{text:'添加测试',mode:'interrupt'});
    assert(controls.disabled);
@@ -390,7 +408,9 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
 '''
     path = tmp_path / 'portal.cjs'
     static = Path('src/sca/api/static')
-    task_assets = '\n'.join((static / name).read_text() for name in ('portal-ui.js', 'portal-tasks.js'))
+    task_assets = '\n'.join((static / name).read_text() for name in (
+        'portal-ui.js', 'portal-conversation.js', 'portal-tasks.js',
+    ))
     path.write_text(harness + script + task_assets + checks)
     flow_model = Path('src/sca/api/static/task-flow.js').resolve()
     timeline = Path('src/sca/api/static/task-timeline.js').resolve()
@@ -415,10 +435,8 @@ def test_portal_routes_evidence_and_themes():
     assert 'keydown' in source and 'Escape' in source
 
 
-def test_interjection_composer_is_below_the_event_log():
+def test_interjection_composer_is_next_to_the_dag():
     source = Path('src/sca/api/static/portal.html').read_text()
-    composer = source.split('id="task-message-form"', 1)[1].split('</form>', 1)[0]
-    assert source.index('id="timeline"') < source.index('id="task-message-form"')
-    assert '插话：给正在运行的任务补充要求' in composer
-    assert '立即打断当前轮' in composer and 'maxlength="4000"' in composer
-    assert 'id="task-message-controls" class="stack" disabled' in composer
+    composer = Path('src/sca/api/static/portal-conversation.js').read_text()
+    assert source.index('id="task-dag"') < source.index('id="task-conversation"') < source.index('id="timeline"')
+    assert "['interrupt', '打断']" in composer and 'maxLength: 4000' in composer

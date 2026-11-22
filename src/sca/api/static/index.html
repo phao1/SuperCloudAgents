@@ -5,7 +5,7 @@
 :root{color-scheme:light dark;font:16px system-ui}body{max-width:1050px;margin:24px auto;padding:0 16px;overflow-wrap:anywhere}input,textarea,button,select{font:inherit;padding:8px;max-width:100%;box-sizing:border-box}input:not([type=checkbox]),textarea{width:100%}label{display:block;margin:10px 0}button{cursor:pointer;margin:4px}section{border:1px solid #8886;padding:16px;margin:16px 0;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere}#timeline{max-height:420px;overflow:auto}#error{color:light-dark(#a00,#ffabab)}.grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}@media(max-width:650px){.grid{grid-template-columns:1fr}}
 </style>
 <h1>SuperCloudAgents</h1><label>API token<input id="token" type="password" autocomplete="off"></label><p id="error" role="alert"></p>
-<div class="grid"><section><h2>Submit a task</h2><label>Kind<select id="kind"></select></label><form id="submit"><div id="fields"></div><button>Submit task</button></form></section>
+<div class="grid"><section><h2>Submit a task</h2><label>Kind<select id="kind"></select></label><form id="submit"><div id="fields"></div><datalist id="models"></datalist><p id="model-budget-note" role="status" hidden>USD budgets do not limit unpriced models.</p><button>Submit task</button></form></section>
 <section><h2>Tasks</h2><button id="refresh">Refresh</button><div id="tasks"></div></section></div>
 <section id="detail" hidden><h2 id="heading"></h2><pre id="summary"></pre><label>Review feedback<textarea id="feedback"></textarea></label>
 <fieldset id="memory-proposals"><legend>Proposed memories (select to accept with approval)</legend><div id="proposal-options"></div></fieldset>
@@ -15,11 +15,16 @@
 <script>
 const $=id=>document.getElementById(id);let selected=null,controller=null;
 $('token').value=localStorage.getItem('sca-token')||'dev-token';
-$('token').onchange=()=>{localStorage.setItem('sca-token',$('token').value);loadTasks().catch(showError)};
+$('token').onchange=()=>{localStorage.setItem('sca-token',$('token').value);loadTasks().catch(showError);loadModels()};
 function showError(e){$('error').textContent=e.message}
 async function api(path,options={}){const r=await fetch('/v1'+path,{...options,headers:{Authorization:'Bearer '+$('token').value,'Content-Type':'application/json',...options.headers}});if(!r.ok){let body=await r.json();throw Error(body.error?.message||r.statusText)}return r}
 async function loadTasks(){const tasks=await(await api('/tasks')).json();$('tasks').replaceChildren();for(const task of tasks){const b=document.createElement('button');b.textContent=task.id.slice(0,8)+' · '+task.state;b.onclick=()=>openTask(task.id).catch(showError);$('tasks').append(b)}}
-async function updateTask(id){const t=await(await api('/tasks/'+id)).json();if(selected!==id)return;await memoryProposals(t);if(selected!==id)return;$('heading').textContent=t.id+' · '+t.state;$('summary').textContent=JSON.stringify({spec:t.spec,result:t.result,usage:t.usage,reason:t.state_reason},null,2);document.querySelectorAll('[data-decision]').forEach(b=>b.disabled=t.state!=='AWAITING_REVIEW');$('pause').disabled=['SUCCEEDED','FAILED','CANCELLED','PAUSED'].includes(t.state);$('resume').disabled=t.state!=='PAUSED';$('cancel').disabled=['SUCCEEDED','FAILED','CANCELLED'].includes(t.state);const artifacts=await(await api('/tasks/'+id+'/artifacts')).json();if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){const report=await(await api('/tasks/'+id+'/artifacts/report.md')).text();if(selected===id)$('report').textContent=report}if(artifacts.some(a=>a.name==='changes.patch')){const patch=await(await api('/tasks/'+id+'/artifacts/changes.patch')).text();if(selected===id)$('patch').textContent=patch}}
+async function updateTask(id){const t=await(await api('/tasks/'+id)).json();if(selected!==id)return;await memoryProposals(t);if(selected!==id)return;$('heading').textContent=t.id+' · '+t.state;$('summary').textContent=JSON.stringify({spec:t.spec,result:t.result,usage:t.usage,reason:t.state_reason},null,2);document.querySelectorAll('[data-decision]').forEach(b=>b.disabled=t.state!=='AWAITING_REVIEW');$('pause').disabled=['SUCCEEDED','FAILED','CANCELLED','PAUSED'].includes(t.state);$('resume').disabled=t.state!=='PAUSED';$('cancel').disabled=['SUCCEEDED','FAILED','CANCELLED'].includes(t.state);const artifacts=await(await api('/tasks/'+id+'/artifacts')).json();await previewArtifact(id,artifacts.find(a=>t.kind==='analysis'&&a.name==='report.md'),'report');await previewArtifact(id,artifacts.find(a=>a.name==='changes.patch'),'patch')}
+async function previewArtifact(id,artifact,target){
+  if(!artifact||selected!==id)return;
+  const text=artifact.missing_reason??await(await api('/tasks/'+id+'/artifacts/'+artifact.name)).text();
+  if(selected===id)$(target).textContent=text;
+}
 async function openTask(id){controller?.abort();controller=new AbortController();const signal=controller.signal;selected=id;$('detail').hidden=false;$('timeline').replaceChildren();$('patch').textContent='';$('report').textContent='';$('proposal-options').replaceChildren();await updateTask(id);watch(id,signal).catch(e=>{if(e.name!=='AbortError')showError(e)})}
 async function watch(id,signal){const r=await api('/tasks/'+id+'/events/stream',{signal});const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='';while(true){const {value,done}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});let end;while((end=buffer.indexOf('\n\n'))>=0){const block=buffer.slice(0,end);buffer=buffer.slice(end+2);const data=block.split('\n').find(l=>l.startsWith('data: '));if(data&&selected===id){const event=JSON.parse(data.slice(6)),line=document.createElement('pre');line.textContent=event.seq+' '+event.type+' '+JSON.stringify(event.payload);$('timeline').append(line);if(event.type==='task.state_changed'||event.type==='artifact.published')await updateTask(id)}}if(done)break}if(selected===id){await updateTask(id);await loadTasks()}}
 async function memoryProposals(task){const rows=await(await api('/memories?status=proposed')).json();if(selected!==task.id)return;const checked=new Set([...$('proposal-options').querySelectorAll('input:checked')].map(i=>i.value));$('proposal-options').replaceChildren();for(const row of rows.filter(m=>(task.result.memory_proposals||[]).includes(m.id))){const label=document.createElement('label'),input=document.createElement('input');input.type='checkbox';input.value=row.id;input.checked=checked.has(row.id);input.disabled=task.state!=='AWAITING_REVIEW';label.append(input,document.createTextNode(' '+row.category+': '+row.text));$('proposal-options').append(label)}}
@@ -29,9 +34,29 @@ $('memory-add').onclick=async()=>{try{await api('/memories',{method:'POST',body:
 let kinds=[];
 function renderForm(){const schema=kinds.find(k=>k.name===$('kind').value)?.schema;if(!schema)return;$('fields').replaceChildren();for(const [key,raw] of Object.entries(schema.properties)){const shape=raw.anyOf?.find(x=>x.type!=='null')||raw;const label=document.createElement('label');label.textContent=raw.title||key;const input=document.createElement(shape.type==='boolean'?'input':shape.enum?'select':['array','object'].includes(shape.type)?'textarea':'input');input.name=key;input.dataset.type=shape.type||'object';if(shape.enum)for(const value of shape.enum){const option=document.createElement('option');option.value=value;option.textContent=value;input.append(option)}if(shape.type==='boolean'){input.type='checkbox';input.checked=raw.default||false}else{input.type=['integer','number'].includes(shape.type)?'number':'text';if(raw.minimum!==undefined)input.min=raw.minimum;if(raw.maximum!==undefined)input.max=raw.maximum;if(raw.default!=null)input.value=typeof raw.default==='object'?JSON.stringify(raw.default):raw.default;input.required=schema.required?.includes(key)||false;if(['array','object'].includes(shape.type))input.placeholder='JSON '+shape.type}label.append(input);$('fields').append(label)}}
 async function loadKinds(){kinds=await(await api('/kinds')).json();$('kind').replaceChildren();for(const kind of kinds){const option=document.createElement('option');option.value=kind.name;option.textContent=kind.name;$('kind').append(option)}renderForm()}
-$('kind').onchange=renderForm;
+let catalog={data:[]};
+function syncModels(){
+  const input=$('fields').querySelector('input[name="model"]');
+  input?.setAttribute('list','models');
+  if(input)input.placeholder=catalog.default_model||'';
+  $('model-budget-note').hidden=!input||!catalog.data.some(row=>row.unpriced&&row.id===(input.value||catalog.default_model));
+}
+async function loadModels(){
+  const token=$('token').value;
+  catalog={data:[]};
+  $('models').replaceChildren();
+  syncModels();
+  const result=await api('/models').then(response=>response.json()).catch(()=>null);
+  if(!result||token!==$('token').value)return;
+  catalog=result;
+  for(const row of catalog.data){const option=document.createElement('option');option.value=row.id;$('models').append(option)}
+  syncModels();
+}
+$('kind').onchange=()=>{renderForm();syncModels()};
+$('fields').addEventListener('input',syncModels);
 $('submit').onsubmit=async e=>{e.preventDefault();$('error').textContent='';try{const spec={};for(const input of $('fields').querySelectorAll('[name]')){const type=input.dataset.type;if(type==='boolean')spec[input.name]=input.checked;else if(input.value!=='')spec[input.name]=['integer','number'].includes(type)?Number(input.value):['array','object'].includes(type)?JSON.parse(input.value):input.value}const task=await(await api('/tasks',{method:'POST',body:JSON.stringify({kind:$('kind').value,spec})})).json();await loadTasks();await openTask(task.id)}catch(e){showError(e)}};
-loadKinds().catch(showError);
+loadKinds().then(syncModels).catch(showError);
+loadModels();
 document.querySelectorAll('[data-decision]').forEach(b=>b.onclick=async()=>{try{await api('/tasks/'+selected+'/review',{method:'POST',body:JSON.stringify({decision:b.dataset.decision,feedback:$('feedback').value||null,accept_memories:b.dataset.decision==='approve'?[...$('proposal-options').querySelectorAll('input:checked')].map(i=>i.value):[]})});await updateTask(selected)}catch(e){showError(e)}});
 $('cancel').onclick=async()=>{try{await api('/tasks/'+selected+'/cancel',{method:'POST'});await updateTask(selected)}catch(e){showError(e)}};
 for(const action of ['pause','resume'])$(action).onclick=async()=>{try{await api('/tasks/'+selected+'/'+action,{method:'POST'});await updateTask(selected)}catch(e){showError(e)}};

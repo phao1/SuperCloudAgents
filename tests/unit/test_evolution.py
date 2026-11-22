@@ -3,7 +3,7 @@
 import pytest
 from pydantic import ValidationError
 
-from sca.evolve.checks import gate, metrics, overlay_hash, select_best, static_check
+from sca.evolve.checks import dev_basis, gate, metrics, overlay_hash, select_best, static_check
 from sca.evolve.models import EvolutionConfig, Proposal
 
 
@@ -75,14 +75,51 @@ def test_gate():
 
 
 def test_dev_basis_quality_and_efficiency():
-    from sca.evolve.checks import dev_basis
-
     baseline = run((True, True))
     assert dev_basis(run(), baseline) == 'quality'
     assert dev_basis(baseline, run((True, True), .85)) == 'efficiency'
     assert dev_basis(baseline, run((True, True), .86)) is None
     assert dev_basis(baseline, run((True, False), .1)) is None
     assert gate(baseline, run((True, True), .5), dev=True)
+
+
+@pytest.mark.parametrize("before,after", [(0, 0), (1, 0), (0, .5), (1, float("nan"))])
+def test_efficiency_requires_measured_cost_on_both_splits(before, after):
+    baseline, candidate = run((True, True), before), run((True, True), after)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate, 0)
+
+
+def test_errored_or_zero_cost_runs_cannot_win_quality_gate():
+    baseline, candidate = run(cost=0), run((True, True), cost=0)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate)
+    assert dev_basis(baseline, candidate, legacy=True) == "quality"
+    baseline, candidate = run(), run((True, True), cost=.5)
+    baseline["results"][0].update(acceptance_passed=None, verification_passed=None)
+    assert dev_basis(baseline, candidate) is None
+    assert not gate(baseline, candidate)
+
+
+def test_unpriced_evolution_gates_on_measured_total_tokens():
+    def local(tokens, passes=(True, True)):
+        evaluated = run(passes, cost=0)
+        evaluated['variant'] = {'model_unpriced': True}
+        for result in evaluated['results']:
+            result['tokens'] = tokens
+        return evaluated
+
+    baseline, efficient, slower, missing = local(100), local(85), local(101), local(0)
+    assert metrics(baseline)['tokens'] == 200
+    assert select_best([slower, missing, efficient]) == efficient
+    assert dev_basis(baseline, efficient) == 'efficiency'
+    assert dev_basis(baseline, missing) is None
+    assert dev_basis(local(100, (True, False)), baseline) == 'quality'
+    assert gate(baseline, efficient, 0) and not gate(baseline, slower, 0)
+    assert gate(baseline, slower, .25) and not gate(baseline, missing)
+    assert not gate(baseline, run((True, True), cost=.1))
+    efficient['results'][0]['acceptance_passed'] = None
+    assert not gate(baseline, efficient)
 
 
 def test_policy_cannot_be_removed_and_hash_matches_agent():
@@ -112,6 +149,31 @@ def test_migration_emits_tenant_policies_and_partial_unique_index():
     assert sql.count("WITH CHECK (tenant_id = current_setting('app.tenant_id', true))") == 3
     assert 'UNIQUE INDEX ix_champions_active' in sql
     assert 'WHERE active' in sql
+
+
+def test_0025_migration_keys_and_rollback_include_backend():
+    from importlib import import_module
+    from io import StringIO
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    revision = import_module("sca.db.migrations.versions.0025_evolution_backend")
+    assert (revision.revision, revision.down_revision) == ("0025", "0024")
+    output = StringIO()
+    context = MigrationContext.configure(dialect_name="postgresql", opts={
+        "as_sql": True, "output_buffer": output,
+    })
+    with Operations.context(context):
+        revision.upgrade()
+    sql = output.getvalue()
+    assert sql.count("agent_backend text NOT NULL DEFAULT 'opencode'") == 3
+    target = "(tenant_id, agent_backend, agent_version, model)"
+    assert f"ON champions {target} WHERE active" in sql
+    assert f"ADD PRIMARY KEY {target}" in sql
+    assert "AND parent.agent_backend = child.agent_backend" in sql
+    assert "AND rollout.agent_backend = child.agent_backend" in sql
+    assert "current_setting('app.tenant_id', true) IS DISTINCT FROM 'eval'" in sql
 
 
 def test_punctuation_runs_are_not_benchmark_overlap():

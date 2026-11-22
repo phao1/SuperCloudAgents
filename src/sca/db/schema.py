@@ -226,9 +226,6 @@ champions = Table(
     timestamp('created_at'),
     Column('active', Boolean, nullable=False, server_default='false'),
 )
-Index('ix_champions_active', champions.c.tenant_id, champions.c.agent_version, champions.c.model,
-      unique=True, postgresql_where=champions.c.active)
-
 # Evolution productization
 champion_rollouts = Table(
     "champion_rollouts", metadata,
@@ -532,3 +529,16 @@ for project_record in (tasks, kb_documents, memories):
         name=f"fk_{project_record.name}_project",
     ))
     Index(f"ix_{project_record.name}_project_id", project_record.c.project_id)
+
+
+# DeepSeek Harness evolution
+for evolution_table in (champions, champion_rollouts, evolution_schedules):
+    evolution_table.append_column(Column(
+        "agent_backend", Text, nullable=False, server_default="opencode",
+        primary_key=evolution_table is champion_rollouts,
+    ))
+    evolution_table.append_constraint(CheckConstraint(
+        "agent_backend IN ('opencode', 'dsh')", name=f"{evolution_table.name}_agent_backend_check",
+    ))
+Index("ix_champions_active", champions.c.tenant_id, champions.c.agent_backend,
+      champions.c.agent_version, champions.c.model, unique=True, postgresql_where=champions.c.active)

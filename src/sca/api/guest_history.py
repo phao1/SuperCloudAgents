@@ -94,7 +94,7 @@ def guest_downloadable(artifact: Artifact) -> bool:
 def history_artifacts(user: Principal, artifacts: list[Artifact]) -> list[Artifact]:
     if not isinstance(user, GuestPrincipal):
         return artifacts
-    return [artifact.model_copy(update={
+    return [artifact if artifact.missing_reason else artifact.model_copy(update={
         "uri": f"/v1/tasks/{artifact.task_id}/artifacts/{quote(artifact.name)}",
     }) for artifact in artifacts if guest_downloadable(artifact)]
 

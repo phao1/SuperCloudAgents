@@ -68,9 +68,10 @@ def test_analysis_upload_submission_and_report_reuse_task_view():
     assert 'inputs.push((await response.json()).id)' in source
     assert "kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}" in source
     assert 'await openTask(task.id)' in source
-    assert "artifacts.some(a=>a.name==='report.md')" in source
-    assert "api('/tasks/'+enc(id)+'/artifacts/report.md')" in source
-    assert "$('analysis-report-panel').hidden=true" in source
+    assert 'await portalTasks.report(t,artifacts)' in source
+    tasks = PORTAL.with_name('portal-tasks.js').read_text()
+    assert "api(taskPath(task) + '/artifacts/report.md')" in tasks
+    assert 'panel.hidden=!report' in source
 
 
 def test_setup_builds_analysis_image():

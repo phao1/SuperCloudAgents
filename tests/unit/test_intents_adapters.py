@@ -17,8 +17,10 @@ HOSTILE = "'\"\n$(touch /tmp/pwned)`id`"
 
 
 @pytest.mark.parametrize("tool", ["ruff", "eslint", "semgrep"])
-def test_rules(tmp_path, tool):
-    (tmp_path / "rules").write_text(HOSTILE)
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"], ids=["lf", "crlf"])
+def test_rules(tmp_path, tool, newline):
+    rules = HOSTILE.encode().replace(b"\n", newline)
+    (tmp_path / "rules").write_bytes(rules)
     source = IntentSource(
         type="rules", name="lint", path="rules", params={"tool": tool, "description": HOSTILE}
     )
@@ -30,7 +32,7 @@ def test_rules(tmp_path, tool):
     assert command[0] == tool
     assert command[-1] == "."
     assert len(command) == (4 if tool == "eslint" else 5)
-    assert list(bundle.context_files.values()) == [HOSTILE.encode(), HOSTILE.encode()]
+    assert list(bundle.context_files.values()) == [rules, HOSTILE.encode()]
     assert len(bundle.setup) == 1
     assert tool in shlex.split(bundle.setup[0])
 
