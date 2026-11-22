@@ -8,6 +8,7 @@ from uuid import UUID
 
 from temporalio import activity
 
+from sca.agents.dsh import DSH_HEADLESS_PROMPT, DSH_VERSION
 from sca.agents.opencode_prompt import read_source_prompt, version_commit
 from sca.config import Settings
 from sca.core.interfaces import ModelGateway
@@ -34,6 +35,20 @@ DEFAULT_TOOL_GUIDANCE = (
     "every occurrence."
 )
 CODING_TOOLS = ("shell", "read", "edit", "write", "patch", "grep", "glob", "todo")
+DSH_CODING_TOOLS = ("bash", "pwsh", "read", "edit", "write", "grep", "glob")
+OPENCODE_PROPOSAL = (
+    'The effective text of each surface is the current overlay value, else the baseline. '
+    'Make small, targeted edits to that effective text and return the full replacement only for '
+    'surfaces you change; omitted surfaces keep their current value. tool_descriptions replaces '
+    'the description of the named tools. Preserve ${OPENCODE_TOOL_GUIDANCE} in system_prompt. '
+)
+DSH_PROPOSAL = (
+    'DeepSeek Harness keeps its built-in system prompt and tool schemas. '
+    'Edit only the appended guidance in the current overlay. The baseline is reference only; '
+    'do not copy it into the overlay. system_prompt adds general guidance, tool_guidance adds '
+    'tool-use guidance, and tool_descriptions adds guidance by tool name. Return the full '
+    'appended text for each changed surface. Omitted surfaces keep their current values. '
+)
 
 
 def parse_json(raw: str) -> Any:
@@ -77,8 +92,11 @@ class EvolutionActivities:
     async def initialize(self, request: dict) -> dict:
         await self.suite(request)
         store = self.scoped(request)
-        champions = await store.list_champions(request['config']['agent_version'], request['config']['model'])
-        champion = next((r for r in champions if r['active']), None)
+        cfg = request['config']
+        backend = cfg.get('agent_backend', 'opencode')
+        champion = await store.get_active_champion(
+            self.agent_version(cfg), cfg['model'], agent_backend=backend,
+        )
         await store.update_evolution(request['id'], {'status': 'running'})
         return json_safe(champion) if champion else {'id': None, 'candidate_id': None, 'overlay': {}}
 
@@ -89,7 +107,8 @@ class EvolutionActivities:
         # Preserve the pinned hash so runs within an existing evolution can still be paired.
         suite_hash = request['suite_hash']
         payload = {'id': request['run_id'], 'suite': cfg['suite'], 'split': request['split'], 'suite_hash': suite_hash,
-                   'variant': {'agent_backend': 'opencode', 'agent_version': cfg['agent_version'],
+                   'variant': {'agent_backend': cfg.get('agent_backend', 'opencode'),
+                               'agent_version': self.agent_version(cfg),
                                'model': cfg['model'], 'agent_overlay': request['overlay'],
                                'use_champion': False},
                    'repeat': cfg['repeat'], 'concurrency': cfg['concurrency'],
@@ -109,8 +128,16 @@ class EvolutionActivities:
     async def read_run(self, request: dict) -> dict:
         return json_safe(await self.scoped(request).get_eval_run(request['run_id']))
 
-    async def baseline(self, version: str) -> dict:
-        """Built-in texts the proposer edits when the overlay does not replace them yet."""
+    def agent_version(self, config: dict) -> str:
+        if config.get('agent_backend') == 'dsh':
+            return config.get('agent_version') or self.settings.dsh_version
+        return config['agent_version']
+
+    async def baseline(self, version: str, backend: str = 'opencode') -> dict:
+        """Built-in text available to the proposer."""
+        if backend == 'dsh':
+            return {'system_prompt': DSH_HEADLESS_PROMPT if version == DSH_VERSION else None,
+                    'tool_guidance': None, 'tool_names': list(DSH_CODING_TOOLS)}
         try:
             prompt = await read_source_prompt(self.settings, version_commit(self.settings, version))
         except (ValueError, OSError):
@@ -161,17 +188,16 @@ class EvolutionActivities:
         journal = (await store.get_evolution(request['id']))['journal']
         # Do not send holdout metrics or reasons (which may contain holdout evidence) to the model.
         safe_journal = [{k: r[k] for k in ('hypothesis', 'decision', 'dev_metrics')} for r in journal if r.get('type') != 'evaluation']
-        baseline = await self.baseline(request['config']['agent_version'])
+        cfg = request['config']
+        backend = cfg.get('agent_backend', 'opencode')
+        baseline = await self.baseline(self.agent_version(cfg), backend)
+        proposal_instructions = DSH_PROPOSAL if backend == 'dsh' else OPENCODE_PROPOSAL
         context = {'baseline': baseline, 'overlay': request['overlay'], 'diagnosis': diagnosis,
-                   'journal': safe_journal[-100:], 'surfaces': request['config']['surfaces']}
+                   'journal': safe_journal[-100:], 'surfaces': cfg['surfaces']}
         messages = [
-            {'role': 'system', 'content': system + f' Return a JSON array of {request["config"]["candidates"]} '
+            {'role': 'system', 'content': system + f' Return a JSON array of {cfg["candidates"]} '
              'objects with hypothesis and overlay (system_prompt, tool_guidance, tool_descriptions). '
-             'The effective text of each surface is the current overlay value, else the baseline. '
-             'Make small, targeted edits to that effective text and return the full replacement only for '
-             'surfaces you change; omitted surfaces keep their current value. tool_descriptions replaces '
-             'the description of the named tools. Preserve ${OPENCODE_TOOL_GUIDANCE} in system_prompt. '
-             'Do not repeat failed hypotheses.'},
+             + proposal_instructions + 'Do not repeat failed hypotheses.'},
             {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}]
         # Each candidate may carry a full system prompt; the default 1024 tokens truncates the JSON.
         raw = await self._complete(messages, max_tokens=8192)
@@ -200,14 +226,14 @@ class EvolutionActivities:
             # Include hidden acceptance scripts in contamination checks, never in model context.
             for path in Path(case['path']).rglob('*'):
                 if path.is_file() and not path.is_symlink() and path.stat().st_size <= 200000:
-                    texts.append(path.read_text(errors='replace'))
+                    texts.append(path.read_text(encoding='utf-8', errors='replace'))
         result = []
-        for value in values[:request['config']['candidates']]:
+        for value in values[:cfg['candidates']]:
             try:
                 proposal = Proposal.model_validate(value)
                 # Omitted surfaces inherit the parent's value, so a candidate is an edit, not a reset.
                 overlay = {**request['overlay'], **proposal.overlay.model_dump(exclude_none=True)}
-                check = static_check(overlay, texts, request['config']['surfaces'], request['overlay'])
+                check = static_check(overlay, texts, cfg['surfaces'], request['overlay'], agent_backend=backend)
                 result.append({'hypothesis': proposal.hypothesis, 'overlay': overlay,
                                'overlay_sha256': overlay_hash(overlay), 'diagnosis': diagnosis,
                                'static_check': check})
@@ -246,7 +272,8 @@ class EvolutionActivities:
         store = self.scoped(request)
         percent = request.get('auto_rollout_percent')
         row = await store.activate_champion(request['champion_id'], {
-            'agent_version': cfg['agent_version'], 'model': cfg['model'],
+            'agent_backend': cfg.get('agent_backend', 'opencode'),
+            'agent_version': self.agent_version(cfg), 'model': cfg['model'],
             'overlay': c['overlay'], 'overlay_sha256': c['overlay_sha256'],
             'candidate_id': UUID(c['id']), 'metrics': {'dev': c['dev_metrics'], 'holdout': c['holdout_metrics']},
             'parent_champion_id': UUID(request['parent_champion_id']) if request['parent_champion_id'] else None},

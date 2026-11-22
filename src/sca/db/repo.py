@@ -1135,8 +1135,10 @@ class Store:
                 index_elements=['id'], set_={k: v for k, v in values.items() if k != 'id'},
                 where=evolution_candidates.c.tenant_id == self.tenant_id))
 
+    # DeepSeek Harness evolution
+
     async def list_champions(self, agent_version: str | None = None,
-                             model: str | None = None) -> list[dict]:
+                             model: str | None = None, *, agent_backend: str | None = None) -> list[dict]:
         from sca.db.schema import champions
 
         query = select(champions).where(champions.c.tenant_id == self.tenant_id)
@@ -1144,6 +1146,8 @@ class Store:
             query = query.where(champions.c.agent_version == agent_version)
         if model is not None:
             query = query.where(champions.c.model == model)
+        if agent_backend is not None:
+            query = query.where(champions.c.agent_backend == agent_backend)
         async with self._transaction() as session:
             return [dict(r) for r in (await session.execute(query.order_by(
                 champions.c.created_at.desc()))).mappings()]
@@ -1160,7 +1164,8 @@ class Store:
                     champions.c.id == task_uuid(champion_id),
                     champions.c.tenant_id == self.tenant_id))).mappings().one())
             else:
-                target = {**values, 'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
+                target = {'agent_backend': 'opencode', **values,
+                          'id': task_uuid(champion_id), 'tenant_id': self.tenant_id}
             await self._lock_champion(session, self.tenant_id, target)
             if values is not None:
                 inserted = await session.scalar(pg_insert(champions).values(
@@ -1176,8 +1181,10 @@ class Store:
                 await self._write_champion_rollout(session, row, percent, actor)
             return row
 
-    async def get_active_champion(self, agent_version: str, model: str) -> dict | None:
-        rows = await self.list_champions(agent_version, model)
+    async def get_active_champion(
+        self, agent_version: str, model: str, *, agent_backend: str = "opencode",
+    ) -> dict | None:
+        rows = await self.list_champions(agent_version, model, agent_backend=agent_backend)
         return next((row for row in rows if row['active']), None)
 
     async def evolution_evidence(self, task_id: str) -> list[dict]:
@@ -1223,8 +1230,8 @@ class Store:
 
     @staticmethod
     async def _lock_champion(session: AsyncSession, tenant_id: str | None, target: dict) -> None:
-        # Serialize changes by version and model, including the first promotion.
-        key = f"{tenant_id}:{target['agent_version']}:{target['model']}"
+        # Serialize changes by backend, version and model, including the first promotion.
+        key = f"{tenant_id}:{target['agent_backend']}:{target['agent_version']}:{target['model']}"
         await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
                               {"key": key})
 
@@ -1233,6 +1240,7 @@ class Store:
 
         await session.execute(update(champions).where(
             champions.c.tenant_id == self.tenant_id, champions.c.active,
+            champions.c.agent_backend == target["agent_backend"],
             champions.c.agent_version == target["agent_version"], champions.c.model == target["model"],
             champions.c.id != target["id"]).values(active=False))
         return dict((await session.execute(update(champions).where(
@@ -1245,24 +1253,27 @@ class Store:
         c = champion_rollouts.c
         async with self._transaction() as session:
             return [dict(row) for row in (await session.execute(select(champion_rollouts).where(
-                c.tenant_id == self.tenant_id).order_by(c.agent_version, c.model))).mappings()]
+                c.tenant_id == self.tenant_id).order_by(c.agent_backend, c.agent_version, c.model))).mappings()]
 
-    async def get_champion_rollout(self, agent_version: str, model: str) -> dict | None:
+    async def get_champion_rollout(
+        self, agent_version: str, model: str, *, agent_backend: str = "opencode",
+    ) -> dict | None:
         from sca.db.schema import champion_rollouts
 
         c = champion_rollouts.c
         async with self._transaction() as session:
             row = (await session.execute(select(champion_rollouts).where(
-                c.tenant_id == self.tenant_id, c.agent_version == agent_version,
+                c.tenant_id == self.tenant_id, c.agent_backend == agent_backend, c.agent_version == agent_version,
                 c.model == model))).mappings().first()
             return dict(row) if row is not None else None
 
     async def put_champion_rollout(
-        self, agent_version: str, model: str, champion_id: UUID, percent: int, actor: str,
+        self, agent_version: str, model: str, champion_id: UUID, percent: int, actor: str, *,
+        agent_backend: str = "opencode",
     ) -> dict:
         champion = await self.for_tenant("eval").get_champion(champion_id)
-        if champion is None or (champion["agent_version"], champion["model"]) != (agent_version, model):
-            raise NotFoundError("该版本和模型的冠军不存在")
+        if champion is None or self._champion_target(champion) != (agent_backend, agent_version, model):
+            raise NotFoundError("该后端、版本和模型的冠军不存在")
         async with self._transaction() as session:
             await self._lock_champion(session, "eval", champion)
             return await self._write_champion_rollout(session, champion, percent, actor)
@@ -1273,11 +1284,12 @@ class Store:
         from sca.db.schema import champion_rollouts, evolution_events
 
         c = champion_rollouts.c
-        key = {"tenant_id": self.tenant_id, "agent_version": champion["agent_version"],
+        key = {"tenant_id": self.tenant_id, "agent_backend": champion["agent_backend"],
+               "agent_version": champion["agent_version"],
                "model": champion["model"]}
         values = {"champion_id": champion["id"], "percent": percent, "updated_by": actor}
         statement = pg_insert(champion_rollouts).values(**key, **values).on_conflict_do_update(
-            index_elements=[c.tenant_id, c.agent_version, c.model],
+            index_elements=[c.tenant_id, c.agent_backend, c.agent_version, c.model],
             set_={**values, "updated_at": func.now()},
             where=(c.champion_id != champion["id"]) | (c.percent != percent))
         row = (await session.execute(statement.returning(champion_rollouts))).mappings().first()
@@ -1285,7 +1297,7 @@ class Store:
             return dict((await session.execute(select(champion_rollouts).filter_by(**key))).mappings().one())
         await session.execute(insert(evolution_events).values(
             tenant_id=self.tenant_id, type="rollout.updated", actor=actor, payload={
-                "agent_version": key["agent_version"], "model": key["model"],
+                "agent_backend": key["agent_backend"], "agent_version": key["agent_version"], "model": key["model"],
                 "champion_id": str(champion["id"]), "percent": percent,
             }))
         return dict(row)
@@ -1300,9 +1312,7 @@ class Store:
             raise NotFoundError("冠军记录不存在")
         parent_id = child["parent_champion_id"]
         parent = await self.get_champion(parent_id) if parent_id is not None else None
-        if parent is None or (parent["agent_version"], parent["model"]) != (
-            child["agent_version"], child["model"]
-        ):
+        if parent is None or self._champion_target(parent) != self._champion_target(child):
             raise ConflictError("该冠军没有可回滚的父冠军")
         async with self._transaction() as session:
             await self._lock_champion(session, self.tenant_id, child)
@@ -1316,6 +1326,12 @@ class Store:
                     "rollouts_updated": count,
                 }))
             return row
+
+    # DeepSeek Harness evolution
+
+    @staticmethod
+    def _champion_target(champion: dict) -> tuple[str, str, str]:
+        return champion["agent_backend"], champion["agent_version"], champion["model"]
 
     @staticmethod
     def _schedule_due(now: datetime) -> Any:

@@ -8,7 +8,7 @@ from collections import Counter
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import NoResultFound
 from temporalio.service import RPCError
@@ -484,6 +484,8 @@ async def _champion(request: Request, user: Principal, champion_id: UUID) -> dic
 @champions_router.get("/{champion_id}")
 async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> dict:
     champion = await _champion(request, user, champion_id)
+    if champion.get("agent_backend") == "dsh":
+        return {**champion, "solidify_builds": []}
     builds = [build for build in await builds_list(user)
               if build.get("labels", {}).get("kind") == SOLIDIFY_KIND
               and build["labels"].get("champion_id") == str(champion_id)]
@@ -492,13 +494,17 @@ async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> d
 
 @champions_router.post("/{champion_id}/solidify", status_code=202)
 async def solidify(
-    champion_id: UUID, request: Request, user: Admin, body: SolidifyRequest | None = None,
+    champion_id: UUID, request: Request, response: Response, user: Admin, body: SolidifyRequest | None = None,
 ) -> dict:
     require_eval(user)
+    champion = await _champion(request, user, champion_id)
+    if champion.get("agent_backend") == "dsh":
+        response.status_code = 200
+        return {"status": "succeeded", "champion_id": str(champion_id),
+                "message": "DeepSeek Harness 冠军在任务运行时应用，无需固化构建。"}
     require_model()
     settings = get_settings()
     _require_docker_build(settings)
-    champion = await _champion(request, user, champion_id)
     if not champion.get("candidate_id"):
         raise HTTPException(409, "冠军缺少原始评测记录")
     source_version = champion["agent_version"]

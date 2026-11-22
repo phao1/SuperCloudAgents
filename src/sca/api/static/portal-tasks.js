@@ -125,8 +125,8 @@ const portalTasks = (() => {
     if (backend?.startsWith('opencode')) spec.agent_version = optional('agent_version');
     if (backend === 'opencode') {
       spec.tools = new FormData(form).getAll('tool');
-      if (v('champion')) spec.use_champion = v('champion') === 'yes';
     }
+    if ((backend === 'opencode' || backend === 'dsh') && v('champion')) spec.use_champion = v('champion') === 'yes';
     if (spec.push && c('open_pr')) spec.pull_request = {
       title: optional('pr_title'), body: optional('pr_body'), base: optional('pr_base'),
       draft: c('pr_draft'), open_on: v('open_on'), merge_on_approve: c('merge_on_approve'),
@@ -216,7 +216,7 @@ const portalTasks = (() => {
         field('并行尝试数', 'best_n', {choices: [[1, '1 · 单次执行'], ...[2, 3, 4, 5].map(n => [n, String(n)])]}),
         field('任务预算（美元）', 'max_cost_usd', {type: 'number', min: 0, step: 'any'}),
         field('任务拆分', 'plan_mode', {choices: [['none', '无'], ['auto', '自动规划'], ['manual', '手动子任务']]}),
-        field('OpenCode 冠军', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
+        field('冠军覆盖', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
         field('沙箱镜像（可选）', 'image'),
         check('复用已准备的工作区快照', 'fork_from_snapshot')
       ), bestOptions, planOptions),
@@ -265,7 +265,7 @@ const portalTasks = (() => {
     const sync = () => {
       const backend = value(form, 'agent_backend') || defaultBackend;
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');
-      control(form, 'champion').disabled = backend !== 'opencode';
+      control(form, 'champion').disabled = backend !== 'opencode' && backend !== 'dsh';
       for (const input of available.querySelectorAll('input')) input.disabled = backend !== 'opencode';
       prOption.hidden = !ui.checked(form, 'push');
       pr.hidden = prOption.hidden || !ui.checked(form, 'open_pr');

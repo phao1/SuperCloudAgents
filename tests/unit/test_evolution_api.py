@@ -20,7 +20,7 @@ async def harness(tmp_path, monkeypatch):
 
     suite = tmp_path / 'suite'
     suite.mkdir()
-    settings = SimpleNamespace(eval_suites_dir=tmp_path, task_queue='q')
+    settings = SimpleNamespace(eval_suites_dir=tmp_path, task_queue='q', dsh_version='0.2.2-rc.5')
     monkeypatch.setattr(evolutions, 'get_settings', lambda: settings)
 
     async def inline(function, *args):
@@ -66,6 +66,7 @@ async def test_start_creates_row_before_workflow(harness):
         assert payload['suite_hash'] == 'h'
         assert UUID(payload['id'])
         assert payload['config']['suite'].endswith('/suite')
+        assert payload['config']['agent_backend'] == 'opencode'
 
     temporal.start_workflow.side_effect = start
     response = await http.post('/v1/evolutions', json={'suite': 'suite', 'agent_version': 'v'})
@@ -73,6 +74,33 @@ async def test_start_creates_row_before_workflow(harness):
     assert response.json()['status'] == 'queued'
     assert (await http.get('/v1/evolutions')).status_code == 200
     assert (await http.get('/v1/champions')).status_code == 200
+
+
+@pytest.mark.parametrize('version', [None, '0.2.2-rc.5'])
+async def test_dsh_start_pins_installed_npm_version(harness, version):
+    http, store, temporal, _, _, _ = harness
+    body = {'suite': 'suite', 'agent_backend': 'dsh'}
+    if version is not None:
+        body['agent_version'] = version
+    assert (await http.post('/v1/evolutions', json=body)).status_code == 201
+    config = store.create_evolution.call_args.args[0]['config']
+    assert config['agent_backend'] == 'dsh' and config['agent_version'] == '0.2.2-rc.5'
+    assert temporal.start_workflow.call_args.args[1]['config'] == config
+    assert (await http.get('/v1/champions', params={'agent_backend': 'dsh'})).status_code == 200
+    store.list_champions.assert_awaited_once_with(None, None, agent_backend='dsh')
+
+
+@pytest.mark.parametrize('target', [
+    {'agent_backend': 'fake', 'agent_version': 'v'},
+    {'agent_backend': 'dsh', 'agent_version': '0.1.0'},
+    {'agent_backend': 'dsh', 'agent_version': ''},
+    {'agent_backend': 'opencode'},
+])
+async def test_invalid_evolution_target_never_queues(harness, target):
+    http, store, temporal, _, _, _ = harness
+    assert (await http.post('/v1/evolutions', json={'suite': 'suite', **target})).status_code == 422
+    store.create_evolution.assert_not_awaited()
+    temporal.start_workflow.assert_not_awaited()
 
 
 @pytest.mark.parametrize('role,tenant,scopes', [

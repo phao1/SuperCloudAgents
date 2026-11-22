@@ -81,14 +81,14 @@ async def test_backend_file_and_env(tmp_path, overlay):
     assert events[-1].type == "turn_completed"
 
 
-@pytest.mark.parametrize("backend", ["codex", "fake", "pi", "opencode-brain", "opencode"])
+@pytest.mark.parametrize("backend", ["codex", "fake", "pi", "opencode-brain", "opencode", "dsh"])
 def test_context_rejects_unsupported_backend(tmp_path, backend):
     acts = object.__new__(KernelActivities)
     acts.settings = Settings(_env_file=None, data_dir=tmp_path)
     acts.agent = SimpleNamespace(name=backend)
     acts.backends = {backend: acts.agent}
     spec = CodingSpec(repo_url="r", instruction="i", agent_overlay={"system_prompt": "custom"})
-    if backend == "opencode":
+    if backend in {"opencode", "dsh"}:
         assert acts._agent_ctx("id", spec).agent_overlay == spec.agent_overlay
     else:
         with pytest.raises(ApplicationError, match="only supported by opencode") as error:

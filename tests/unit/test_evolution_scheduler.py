@@ -88,8 +88,9 @@ async def test_keyless_demo_does_not_claim_scheduled_evaluations(tmp_path, monke
 
 
 @pytest.mark.parametrize("status,search", [("completed", True), ("budget_exhausted", False)])
+@pytest.mark.parametrize("backend", ["opencode", "dsh"])
 async def test_scheduler_evaluates_current_champion_and_records_outcome(
-    tmp_path, monkeypatch, status, search,
+    tmp_path, monkeypatch, status, search, backend,
 ):
     suite = tmp_path / "suite"
     for split in ("dev", "holdout"):
@@ -104,6 +105,8 @@ async def test_scheduler_evaluates_current_champion_and_records_outcome(
     claimed = {"suite": "suite", "config": {"budget_usd": 1, "repeat": 1}, "agent_version": "v",
                "model": "m", "last_eval_run_id": None, "threshold": 1.0, "always": False,
                "auto_rollout_percent": 12}
+    if backend == "dsh":
+        claimed.update(agent_backend="dsh", agent_version=settings.dsh_version)
     store = SimpleNamespace(
         claim_evolution_schedule=AsyncMock(return_value=claimed),
         get_active_champion=AsyncMock(return_value={"id": champion_id, "overlay": overlay}),
@@ -133,6 +136,9 @@ async def test_scheduler_evaluates_current_champion_and_records_outcome(
     assert name == "EvalRunWorkflow"
     assert payload["split"] == "dev"
     assert payload["champion_id"] == str(champion_id)
+    assert payload["variant"]["agent_backend"] == backend
+    assert payload["variant"]["agent_version"] == claimed["agent_version"]
+    store.get_active_champion.assert_awaited_once_with(claimed["agent_version"], "m", agent_backend=backend)
     assert payload["variant"]["agent_overlay"] == overlay
     assert payload["variant"]["use_champion"] is False
     assert store.create_eval_run.call_args.args[0]["variant"] == payload
@@ -143,6 +149,7 @@ async def test_scheduler_evaluates_current_champion_and_records_outcome(
         name, request = start.call_args.args
         assert name == "EvolutionWorkflow"
         assert request["id"] == str(queued["id"])
+        assert request["config"]["agent_backend"] == backend
         assert request["auto_rollout_percent"] == 12
         assert start.call_args.kwargs["parent_close_policy"] == workflow.ParentClosePolicy.ABANDON
     else:
@@ -156,8 +163,21 @@ async def test_scheduled_promotion_can_set_zero_percent():
     evolution = EvolutionActivities(Settings(_env_file=None), SimpleNamespace(for_tenant=lambda _: store), None)
     request = {"id": str(uuid4()), "tenant_id": "eval", "created_by": "schedule:test",
                "champion_id": str(uuid4()), "parent_champion_id": None,
-               "config": {"agent_version": "v", "model": "m"}, "auto_rollout_percent": 0,
+               "config": {"agent_backend": "dsh", "agent_version": evolution.settings.dsh_version, "model": "m"},
+               "auto_rollout_percent": 0,
                "candidate": {"id": str(uuid4()), "overlay": {}, "overlay_sha256": "hash",
                              "dev_metrics": {}, "holdout_metrics": {}}}
     await evolution.promote(request)
     assert store.activate_champion.call_args.kwargs["rollout"] == (0, "schedule:test")
+    assert store.activate_champion.call_args.args[1]["agent_backend"] == "dsh"
+
+
+async def test_schedule_previous_run_must_match_the_backend():
+    variant = {"agent_version": "v", "model": "m"}
+    previous = {"variant": {"suite": "/suite", "variant": variant}}
+    store = SimpleNamespace(get_eval_run=AsyncMock(return_value=previous))
+    activities = EvolutionSchedulerActivities(Settings(_env_file=None), SimpleNamespace(for_tenant=lambda _: store))
+    request = {"previous_run_id": str(uuid4()), "config": {"suite": "/suite", **variant, "agent_backend": "dsh"}}
+    assert await activities.previous_run(request) is None
+    variant["agent_backend"] = "dsh"
+    assert await activities.previous_run(request) == previous

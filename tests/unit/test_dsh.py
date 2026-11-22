@@ -1,15 +1,18 @@
+import asyncio
 import json
 import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from sca.agents.dsh import KEY_ENV, LAUNCH, DshBackend
+from sca.agents.dsh import KEY_ENV, LAUNCH, OVERLAY_FILENAME, OVERLAY_MODULE, DshBackend
 from sca.config import Settings
 from sca.core.errors import AgentTurnError, SandboxError
-from sca.core.models import AgentContext, AgentEvent, ExecEvent, ExecExit, ExecOutput
+from sca.core.models import AgentContext, AgentEvent, AgentOverlay, ExecEvent, ExecExit, ExecOutput
 from sca.kinds.coding.spec import CodingSpec
 from sca.orchestration.worker import make_agent_backend
 
@@ -95,18 +98,19 @@ async def test_command_env_and_session_continuity(ctx, protocol):
     assert events[1].data == {"final_message": ""}
     (call,) = first.calls
     patch_file = "/agent_home/sca-dsh.patch.yml"
-    argv = ["python3", "-c", LAUNCH, patch_file, "dsh", "--profile", "headless", "--patch", patch_file,
+    argv = ["python3", "-c", LAUNCH, patch_file, OVERLAY_FILENAME, "", "--", "dsh",
+            "--profile", "headless", "--patch", patch_file,
             "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"]
     assert call["argv"] == [*argv, "-"]
-    assert call["stdin"] == "修改测试".encode() and call["timeout_s"] == 30
+    patch, prompt = call["stdin"].split(b"\n", 1)
+    assert prompt == "修改测试".encode() and call["timeout_s"] == 30
     assert call["workdir"] == "/workspace" and call["sandbox_id"] == "s"
     env = call["env"].copy()
-    patch = env.pop("SCA_DSH_PATCH")
     assert env == {
         "HOME": "/agent_home", "DSH_HOME": "/agent_home/dsh", "DSH_PERMISSION_MODE": "workspace-write",
         "DSH_TELEMETRY_MODE": "DISABLED", "DEEPSEEK_BASE_URL": "http://gateway/v1", KEY_ENV: KEY,
     }
-    assert KEY not in patch and KEY not in str(call["argv"])
+    assert KEY.encode() not in patch and KEY not in str(call["argv"])
     rows = {row["id"]: row for row in json.loads(patch)}
     for plugin in ("tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http"):
         assert rows[plugin]["disabled"] is True
@@ -129,7 +133,7 @@ async def test_command_env_and_session_continuity(ctx, protocol):
     assert [e.type for e in resumed] == ["turn_completed"]
     assert second.calls[0]["argv"] == [*argv, "--session-id", SESSION, "-"]
     assert second.calls[0]["env"][KEY_ENV] == next_context.model_api_key
-    assert second.calls[0]["env"]["SCA_DSH_PATCH"] == patch
+    assert second.calls[0]["stdin"] == call["stdin"]
 
 
 async def test_parses_headless_events_and_redacts_nested_payloads(ctx):
@@ -274,9 +278,59 @@ def test_launcher_preserves_stdin_and_writes_only_patch(tmp_path):
     binary.write_text('#!/bin/sh\ntest -n "$DEEPSEEK_API_KEY" && test -z "${SCA_DSH_PATCH+x}" && cat\n')
     binary.chmod(0o700)
     result = subprocess.run(
-        [sys.executable, "-c", LAUNCH, str(patch), "dsh", "--profile", "headless", "--patch", str(patch), "-"],
-        input=b"prompt\n", capture_output=True, check=True, timeout=5,
-        env={"PATH": str(tmp_path) + os.pathsep + os.defpath, "SCA_DSH_PATCH": "[]", KEY_ENV: KEY},
+        [sys.executable, "-c", LAUNCH, str(patch), OVERLAY_FILENAME, "", "--", "dsh",
+         "--profile", "headless", "--patch", str(patch), "-"],
+        input=b"[]\nprompt\n", capture_output=True, check=True, timeout=5,
+        env={"PATH": str(tmp_path) + os.pathsep + os.defpath, KEY_ENV: KEY},
     )
     assert result.stdout == b"prompt\n" and result.stderr == b""
     assert patch.read_text() == "[]"
+
+
+async def test_overlay_launcher_writes_literal_guidance_outside_workspace(tmp_path, ctx):
+    home, workdir = tmp_path / "agent home", tmp_path / "user repo"
+    home.mkdir()
+    workdir.mkdir()
+    prompt = "Keep {{literal_template}} verbatim.\n" + "字" * 24_000
+    context = ctx.model_copy(update={"agent_overlay": AgentOverlay(
+        system_prompt=prompt, tool_guidance="Verify edits", tool_descriptions={"read": "Read context first"},
+    )})
+    sandbox = Sandbox(opening(), final(), ExecExit(exit_code=0))
+    await collect(DshBackend("deepseek-flash"), sandbox, context)
+    call, = sandbox.calls
+    assert len(call["stdin"]) > 128_000
+    assert prompt not in str(call["argv"]) + str(call["env"])
+    assert KEY.encode() not in call["stdin"]
+    assert call["argv"][call["argv"].index("--permission-mode") + 1] == "workspace-write"
+
+    read_patch = (
+        "import json, os, sys; from pathlib import Path; "
+        "path = Path(sys.argv[sys.argv.index('--patch') + 1]); "
+        "print(json.dumps([str(path), os.environ['DSH_HOME'], sys.stdin.read()]))"
+    )
+    path = str(home / "sca-dsh.patch.yml")
+    argv = [sys.executable, "-c", LAUNCH, path, OVERLAY_FILENAME, OVERLAY_MODULE, "--",
+            sys.executable, "-c", read_patch, "--profile", "headless", "--patch", path, "-"]
+    result = await asyncio.to_thread(
+        subprocess.run, argv, cwd=workdir, env={**call["env"], "TMPDIR": str(tmp_path), "PYTHONUTF8": "1"},
+        input=call["stdin"], capture_output=True, check=True, timeout=5,
+    )
+    filename, dsh_home, task = json.loads(result.stdout)
+    patch = Path(filename)
+    rows = json.loads(patch.read_text(encoding="utf-8"))
+    plugin, = rows[-1]["insert"]
+    assert plugin["name"] == f"./{OVERLAY_FILENAME}"
+    assert plugin["config"]["guidance"] == prompt + "\n\nVerify edits\n\nAdditional tool guidance:\n- read: Read context first"
+    assert (patch.parent / OVERLAY_FILENAME).read_text(encoding="utf-8") == OVERLAY_MODULE
+    assert dsh_home == str(home / "dsh") and task == "修改测试"
+    assert patch.parent.parent == tmp_path and list(workdir.iterdir()) == []
+
+
+def test_task_spec_accepts_dsh_npm_versions_only_for_dsh():
+    spec = {"repo_url": "/repo", "instruction": "test", "agent_version": "0.2.2-rc.5"}
+    assert CodingSpec.model_validate({**spec, "agent_backend": "dsh"}).agent_version == spec["agent_version"]
+    for backend in ("opencode", None):
+        with pytest.raises(ValidationError, match="agent_version"):
+            CodingSpec.model_validate({**spec, "agent_backend": backend})
+    with pytest.raises(ValidationError, match="agent_version"):
+        CodingSpec.model_validate({**spec, "agent_backend": "dsh", "agent_version": "../anything"})

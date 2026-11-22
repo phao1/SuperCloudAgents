@@ -114,6 +114,31 @@ def test_migration_emits_tenant_policies_and_partial_unique_index():
     assert 'WHERE active' in sql
 
 
+def test_0025_migration_keys_and_rollback_include_backend():
+    from importlib import import_module
+    from io import StringIO
+
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+
+    revision = import_module("sca.db.migrations.versions.0025_evolution_backend")
+    assert (revision.revision, revision.down_revision) == ("0025", "0024")
+    output = StringIO()
+    context = MigrationContext.configure(dialect_name="postgresql", opts={
+        "as_sql": True, "output_buffer": output,
+    })
+    with Operations.context(context):
+        revision.upgrade()
+    sql = output.getvalue()
+    assert sql.count("agent_backend text NOT NULL DEFAULT 'opencode'") == 3
+    target = "(tenant_id, agent_backend, agent_version, model)"
+    assert f"ON champions {target} WHERE active" in sql
+    assert f"ADD PRIMARY KEY {target}" in sql
+    assert "AND parent.agent_backend = child.agent_backend" in sql
+    assert "AND rollout.agent_backend = child.agent_backend" in sql
+    assert "current_setting('app.tenant_id', true) IS DISTINCT FROM 'eval'" in sql
+
+
 def test_punctuation_runs_are_not_benchmark_overlap():
     overlay = {'tool_guidance': 'Use glob patterns such as **/*.py before editing files.'}
     check = static_check(overlay, ['paths: ["src/**/*.py"]\n", "'], ['tool_guidance'])

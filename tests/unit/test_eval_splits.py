@@ -210,6 +210,32 @@ async def test_submit_passes_overlay_unchanged(split_suite, tmp_path, monkeypatc
     assert 'split' not in posted[0]['spec'] and 'category' not in posted[0]['spec']
 
 
+async def test_dsh_eval_variant_reaches_task_spec(split_suite, tmp_path, monkeypatch):
+    settings = Settings(_env_file=None, data_dir=tmp_path / 'data')
+    acts = EvalActivities(settings, None)
+    monkeypatch.setattr(acts, 'git', AsyncMock())
+    task_id = str(uuid4())
+    overlay = {'system_prompt': 'Check the verification output.'}
+
+    def handle(request):
+        if request.url.path == '/v1/files':
+            return httpx.Response(201, json={'tenant_id': 'eval', 'id': str(uuid4())})
+        spec = CodingSpec.model_validate(json.loads(request.content)['spec'])
+        assert spec.agent_backend == 'dsh' and spec.agent_version == settings.dsh_version
+        assert spec.agent_overlay.system_prompt == overlay['system_prompt']
+        return httpx.Response(201, json={'tenant_id': 'eval', 'id': task_id})
+
+    monkeypatch.setattr(acts, 'http', lambda: httpx.AsyncClient(
+        transport=httpx.MockTransport(handle), base_url='http://test',
+    ))
+    suite = load_suite(split_suite)
+    case = {**suite['cases'][0], 'kind': 'coding', 'suite_hash': suite['hash']}
+    assert await acts.submit({
+        'id': str(uuid4()), 'suite': str(split_suite), 'case': case, 'case_budget': .05, 'iteration': 0,
+        'variant': {'agent_backend': 'dsh', 'agent_version': settings.dsh_version, 'agent_overlay': overlay},
+    }) == task_id
+
+
 @pytest.mark.parametrize('status_code,expected_error', [
     (422, ApplicationError), (429, httpx.HTTPStatusError), (503, httpx.HTTPStatusError),
 ])

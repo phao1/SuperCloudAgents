@@ -14,7 +14,10 @@ def overlay_hash(overlay: dict) -> str:
     return hashlib.sha256(json.dumps(overlay, sort_keys=True, ensure_ascii=True, separators=(',', ':')).encode()).hexdigest()
 
 
-def static_check(overlay: dict, texts: list[str], surfaces: list[str], parent: dict | None = None) -> dict:
+def static_check(
+    overlay: dict, texts: list[str], surfaces: list[str], parent: dict | None = None, *,
+    agent_backend: str = 'opencode',
+) -> dict:
     reasons = []
     try:
         Overlay.model_validate(overlay)
@@ -24,7 +27,7 @@ def static_check(overlay: dict, texts: list[str], surfaces: list[str], parent: d
     if any(overlay.get(key) != parent.get(key) for key in overlay.keys() | parent.keys() if key not in surfaces):
         reasons.append('surface is not permitted')
     prompt = overlay.get('system_prompt')
-    if prompt is not None and '${OPENCODE_TOOL_GUIDANCE}' not in prompt:
+    if agent_backend == 'opencode' and prompt is not None and '${OPENCODE_TOOL_GUIDANCE}' not in prompt:
         reasons.append('missing tool guidance placeholder')
     descriptions = overlay.get('tool_descriptions') or {}
     if len(descriptions) > 64 or any(len(k) > 100 or len(v) > 4000 for k, v in descriptions.items()):

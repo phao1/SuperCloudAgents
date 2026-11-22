@@ -71,7 +71,7 @@ class TaskStore:
         assert tenant_id in (self.tenant_id, "eval")
         return self
 
-    async def get_champion_rollout(self, agent_version, model):
+    async def get_champion_rollout(self, agent_version, model, *, agent_backend="opencode"):
         return None
 
     async def task_submitter(self, task_id):
