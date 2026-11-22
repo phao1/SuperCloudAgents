@@ -5,6 +5,8 @@
 
 在 Windows 查看每条任务的完整执行时间线，请打开 [task-history.html](task-history.html)，在 GitHub 文件页选「Download raw file」，再用 Edge 或 Chrome 打开下载的文件。
 
+[复制给 Windows 上 Codex 的启动提示词](windows-start-prompt.md)
+
 公开归档采用匿名任务编号和任务内相对时间。保留状态、耗时、验证结果和事件顺序。
 
 | 任务 | 日期 | 类型 | 状态 | 耗时 | 事件 |
