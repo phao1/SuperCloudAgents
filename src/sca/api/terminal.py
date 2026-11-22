@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from collections.abc import AsyncIterator
 from contextlib import suppress
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from sca.api.authz import authorize
@@ -32,6 +33,8 @@ async def terminal(
 ) -> StreamingResponse:
     store = request.app.state.store.for_tenant(user.tenant_id)
     await store.get_task(task_id, user.tenant_id)
+    if sys.platform == "win32":
+        raise HTTPException(409, "实时终端需要 OpenCode 脑手分离模式")
     path = terminal_socket(get_settings().data_dir, str(task_id))
 
     async def generate() -> AsyncIterator[str]:

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import os
 import shutil
@@ -13,6 +12,8 @@ from typing import Protocol
 from temporalio import activity, workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ApplicationError
+
+from sca.host import lock_file
 
 with workflow.unsafe.imports_passed_through():
     from sca.agents.opencode import validate_version
@@ -68,7 +69,7 @@ async def run_command(argv: list[str], log: Path, timeout_s: float = 900) -> str
 
     if process.returncode:
         raise RuntimeError(f"Build command failed ({process.returncode}); see build log")
-    return output.decode(errors="replace").strip()
+    return output.decode("utf-8", errors="replace").strip()
 
 
 def build_command(
@@ -135,7 +136,7 @@ def records_dir(settings: Settings) -> Path:
 
 def write_record(path: Path, record: dict) -> None:
     temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2))
+    temporary.write_text(json.dumps(record, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
 
 
@@ -167,9 +168,9 @@ def reserve_build(settings: Settings, build_id: str, tenant_id: str, **fields) -
 async def perform_build(settings: Settings, record: dict, runner: Runner | None = None) -> dict:
     reject_source_build(settings, record)
     lock_path = records_dir(settings) / "build.lock"
-    with lock_path.open("a") as lock:
+    with lock_path.open("a+b") as lock:
         try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            lock_file(lock, blocking=False)
         except BlockingIOError as exc:
             record = {**record, "status": "failed", "error": "已有构建正在运行，请稍后重试"}
             write_record(records_dir(settings) / f"{record['id']}.json", record)
@@ -188,9 +189,9 @@ async def _perform_build(settings: Settings, record: dict, runner: Runner) -> di
     path = records_dir(settings) / f"{build_id}.json"
     meta_path = settings.opencode_versions_dir / version / "meta.json"
     if meta_path.exists():
-        previous = json.loads(path.read_text())
+        previous = json.loads(path.read_text(encoding="utf-8"))
         previous["status"] = "succeeded"
-        previous["commit"] = json.loads(meta_path.read_text())["commit"]
+        previous["commit"] = json.loads(meta_path.read_text(encoding="utf-8"))["commit"]
         write_record(path, previous)
         await asyncio.to_thread(shutil.rmtree, root)
         return previous

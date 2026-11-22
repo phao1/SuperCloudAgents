@@ -51,15 +51,19 @@ print(sys.stdin.read(), file=sys.stderr)
     ]
     assert ExecOutput(stream="stderr", text="input") in result
     shell = [event async for event in sandbox.exec(
-        "task-1", ["bash", "-lc", 'printf "%s\n" "$HOME"']
+        "task-1", ["bash", "-lc", 'command -v python3 >/dev/null && printf "%s\n" "$1"',
+                   "sca-test", "/agent_home"],
     )]
-    assert shell[0] == ExecOutput(stream="stdout", text=str(sandbox_dir / "agent_home"))
+    expected = sandbox_dir / "agent_home" if sys.platform == "win32" else Path("/agent_home")
+    assert shell[-1] == ExecExit(exit_code=0)
+    assert Path(shell[0].text) == expected
 
 
 async def test_timeout_kills_the_process_group(sandbox):
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(12):
         result = [event async for event in sandbox.exec(
-            "task-1", ["bash", "-lc", "sleep 30 & echo ready; wait"], timeout_s=0.3,
+            "task-1", ["bash", "-lc", "sleep 30 & echo ready; wait"],
+            timeout_s=3 if sys.platform == "win32" else 0.3,
         )]
     assert result == [
         ExecOutput(stream="stdout", text="ready"), ExecExit(exit_code=124, timed_out=True),
@@ -101,9 +105,6 @@ async def test_durable_names_and_file_transfer(sandbox, tmp_path):
 
     outside = tmp_path / "outside"
     outside.write_text("outside")
-    (sandbox.root / "task-1" / "workspace" / "link").symlink_to(outside)
-    with pytest.raises(SandboxError, match="escapes"):
-        _ = [chunk async for chunk in sandbox.download("task-1", "/workspace/link")]
     with pytest.raises(SandboxError, match="Invalid local sandbox name"):
         await sandbox.destroy("../outside")
     invalid = io.BytesIO()
@@ -115,9 +116,37 @@ async def test_durable_names_and_file_transfer(sandbox, tmp_path):
     assert outside.read_text() == "outside"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Creating this symlink requires Developer Mode")
+async def test_download_cannot_follow_symlink_outside_the_sandbox(sandbox, tmp_path):
+    outside = tmp_path / "outside"
+    outside.touch()
+    (sandbox.root / "task-1" / "workspace" / "link").symlink_to(outside)
+    with pytest.raises(SandboxError, match="escapes"):
+        _ = [chunk async for chunk in sandbox.download("task-1", "/workspace/link")]
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Exercises a Windows Job Object")
+async def test_windows_job_reaps_background_child_after_success(sandbox):
+    from scripts.portal_source import process_identity
+
+    program = """
+import subprocess, sys
+child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+print(child.pid, flush=True)
+"""
+    async with asyncio.timeout(15):
+        results = [event async for event in sandbox.exec(
+            "task-1", [sys.executable, "-c", program], timeout_s=10,
+        )]
+    assert results[-1] == ExecExit(exit_code=0)
+    assert process_identity(int(results[0].text)) is None
+
+
 async def test_local_workspace_checkpoint_uses_git_bundle(sandbox, best_of_repo, tmp_path):
     workspace = GitWorkspace(tmp_path / "task-state", "sca/checkpoint")
     before = await workspace.prepare(str(best_of_repo.task_dir), "main")
+    assert (await workspace._git("-C", str(workspace.workspace), "config", "--local",
+                                 "core.autocrlf")).strip() == "false"
     transport = SyncTransport(sandbox)
     await transport.push("task-1", workspace.task_dir)
     result = [event async for event in sandbox.exec(

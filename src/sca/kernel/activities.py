@@ -910,6 +910,7 @@ class KernelActivities:
             await self.restore_sandbox(StepInput(task_id, turn - 1))
         spec = await self._spec(task_id)
         agent = self._backend(spec)
+        gateway = None if self.settings.sandbox_driver == "local" and agent.name == "fake" else self.gateway
         sandbox_id = await self._sandbox_id(task_id)
         await self._before_agent_turn(task_id, sandbox_id)
         # A session first created by the interrupted turn is absent from the snapshot.
@@ -920,7 +921,7 @@ class KernelActivities:
         )
 
         turn_budget = self.settings.model_gateway_turn_budget_usd
-        if self.gateway and spec.max_cost_usd is not None:
+        if gateway and spec.max_cost_usd is not None:
             task = await self.store.get_task(task_id)
             remaining = spec.max_cost_usd - task.usage.get("cost_micro_usd", 0) / 1e6
             if remaining <= 0:
@@ -945,10 +946,10 @@ class KernelActivities:
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
         if hasattr(self, "name"):
             key_alias += f"-{getattr(self, 'scope', self.name)}"
-        if self.gateway:
+        if gateway:
             # The credential lives exactly as long as the turn and never enters the
             # workflow history.
-            ctx.model_base_url = self.gateway.sandbox_url
+            ctx.model_base_url = gateway.sandbox_url
             if getattr(spec, "tools", []):
                 from sca.tools.sandbox import ToolSandboxProvider
 
@@ -966,9 +967,9 @@ class KernelActivities:
         n = 0
         issued = False
         try:
-            if self.gateway:
+            if gateway:
                 # Wait for an in-progress issuance before revoking the alias on cancellation.
-                issue = asyncio.create_task(self.gateway.issue_key(
+                issue = asyncio.create_task(gateway.issue_key(
                     key_alias,
                     models=[ctx.model or self.settings.default_model],
                     ttl_s=spec.turn_timeout_s + 120,
@@ -1059,13 +1060,13 @@ class KernelActivities:
             if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
                 await self.store.append_event(task_id, "sandbox.transition",
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
-            if self.gateway and issued:
-                finalize = getattr(self.gateway, "finalize_key", None)
+            if gateway and issued:
+                finalize = getattr(gateway, "finalize_key", None)
                 try:
                     if finalize is not None:
                         spend, cost_final = await asyncio.shield(finalize(key_alias))
                     else:
-                        spend = await asyncio.shield(self.gateway.revoke_key(key_alias))
+                        spend = await asyncio.shield(gateway.revoke_key(key_alias))
                 except GatewayError:
                     if provider_error is None or not provider_error.is_account_error:
                         raise

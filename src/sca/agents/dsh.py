@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError, SandboxError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
 
 DSH_VERSION = "0.2.2-rc.5"
@@ -23,6 +23,9 @@ with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), mode="w", encoding="
                                  delete=False) as patch:
     patch.write(os.environ.pop("SCA_DSH_PATCH"))
 os.replace(patch.name, path)
+if os.name == "nt":
+    import subprocess
+    sys.exit(subprocess.call(argv))
 os.execvp(argv[0], argv)
 '''
 
@@ -156,7 +159,7 @@ class _RunEvents:
         name, inputs = call
         data.update(name=name, input=inputs)
         args = _object(inputs)
-        if name == "bash" and isinstance(command := args.get("command"), str):
+        if name in ("bash", "pwsh") and isinstance(command := args.get("command"), str):
             # The projected result carries a tool status, with no numeric shell exit code.
             return AgentEvent(type="command", data={**data, "command": command, "exit_code": None})
         if name in ("edit", "write") and status == "completed" and isinstance(path := args.get("file_path"), str):
@@ -194,11 +197,17 @@ class DshBackend:
     state_transport = "mount"
 
     def __init__(self, default_model: str, version: str = DSH_VERSION,
-                 sandbox_image: str = "sca-sandbox-dsh:latest", *, protocol: GatewayProtocol = "messages") -> None:
+                 sandbox_image: str = "sca-sandbox-dsh:latest", *,
+                 protocol: GatewayProtocol = "messages", executable: str | None = None,
+                 node_executable: str | None = None) -> None:
         self.default_model = default_model
         self.version = version
-        self.sandbox_image = sandbox_image
+        self.sandbox_image = sandbox_image if executable is None else None
         self.protocol = protocol
+        self.executable = executable
+        self.node_executable = node_executable
+        if executable is not None:
+            self.state_transport = "sync"
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         env = {"HOME": ctx.agent_home, "DSH_HOME": f"{ctx.agent_home}/dsh"}
@@ -216,14 +225,18 @@ class DshBackend:
         if not ctx.model_base_url or not key:
             raise AgentTurnError("DSH requires model_base_url and model_api_key")
         if ctx.agent_version and ctx.agent_version != self.version:
-            raise AgentTurnError("DSH version is not installed in the sandbox image")
+            scope = "on the host" if self.executable else "in the sandbox image"
+            raise AgentTurnError(f"DSH version is not installed {scope}")
         if session_id is not None and (not _valid_session(session_id) or key in session_id):
             raise AgentTurnError("Invalid DSH session ID")
         base_url = ctx.model_base_url.rstrip("/")
         if not base_url.endswith("/v1"):
             base_url += "/v1"
         patch = f"{ctx.agent_home}/sca-dsh.patch.yml"
-        argv = ["python3", "-c", LAUNCH, patch, "dsh", "--profile", "headless", "--patch", patch,
+        command = [self.executable or "dsh"]
+        if self.node_executable is not None:
+            command.insert(0, self.node_executable)
+        argv = ["python3", "-c", LAUNCH, patch, *command, "--profile", "headless", "--patch", patch,
                 "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"]
         if session_id is not None:
             argv.extend(["--session-id", session_id])
@@ -237,20 +250,22 @@ class DshBackend:
         result = None
         stderr = ""
         try:
-            async for output in sandbox.exec(sandbox_id, argv, workdir=ctx.workdir, env=env,
-                                             stdin=prompt.encode(), timeout_s=timeout_s):
-                if isinstance(output, ExecExit):
-                    result = output
-                    continue
-                if output.stream == "stderr":
-                    stderr = tail(f"{stderr}\n{_redact(output.text, key)}".lstrip("\n"))
-                    continue
-                try:
-                    raw = _redact(_object(json.loads(output.text)), key)
-                except (ValueError, RecursionError):
-                    continue
-                if event := run.consume(raw):
-                    yield event
+            stream = sandbox.exec(sandbox_id, argv, workdir=ctx.workdir, env=env,
+                                  stdin=prompt.encode(), timeout_s=timeout_s)
+            async with closing_stream(stream):
+                async for output in stream:
+                    if isinstance(output, ExecExit):
+                        result = output
+                        continue
+                    if output.stream == "stderr":
+                        stderr = tail(f"{stderr}\n{_redact(output.text, key)}".lstrip("\n"))
+                        continue
+                    try:
+                        raw = _redact(_object(json.loads(output.text)), key)
+                    except (ValueError, RecursionError):
+                        continue
+                    if event := run.consume(raw):
+                        yield event
         except SandboxError as exc:
             result = None
             stderr = tail(f"{stderr}\n{_redact(str(exc), key)}".lstrip("\n"))

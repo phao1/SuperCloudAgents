@@ -242,7 +242,7 @@ def prompt_build_ready(task: Task) -> bool:
 @router.get("/versions")
 async def versions(user: Annotated[Principal, Depends(authorize("read"))]) -> list[dict]:
     root = get_settings().opencode_versions_dir
-    rows = [json.loads(p.read_text()) for p in root.glob("*/meta.json")]
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in root.glob("*/meta.json")]
     return sorted(rows, key=lambda r: r.get("built_at", ""), reverse=True)
 
 
@@ -436,7 +436,7 @@ async def retest(
 
 @router.get("/builds")
 async def builds_list(user: Annotated[Principal, Depends(authorize("read"))]) -> list[dict]:
-    rows = [json.loads(p.read_text()) for p in records_dir(get_settings()).glob("*.json")]
+    rows = [json.loads(p.read_text(encoding="utf-8")) for p in records_dir(get_settings()).glob("*.json")]
     rows = sorted(rows, key=lambda r: r.get("created_at", ""), reverse=True)
     return [await builds_get(UUID(r["id"]), user) for r in rows if r["tenant_id"] == user.tenant_id]
 
@@ -449,7 +449,7 @@ async def builds_get(
     path = root / f"{build_id}.json"
     if not path.exists():
         raise NotFoundError("构建不存在")
-    record = json.loads(path.read_text())
+    record = json.loads(path.read_text(encoding="utf-8"))
     if record["tenant_id"] != user.tenant_id:
         raise NotFoundError("构建不存在")
     log = root / f"{build_id}.log"

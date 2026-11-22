@@ -107,7 +107,6 @@ async def prepare_ca(directory: Path) -> None:
 
 def _prepare_ca(directory: Path) -> None:
     import datetime
-    import fcntl
     import os
     import ssl
 
@@ -116,10 +115,12 @@ def _prepare_ca(directory: Path) -> None:
     from cryptography.hazmat.primitives.asymmetric import rsa
     from cryptography.x509.oid import NameOID
 
+    from sca.host import lock_file
+
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.chmod(0o700)
-    with (directory / "ca.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with (directory / "ca.lock").open("a+b") as lock:
+        lock_file(lock)
         key_path, cert_path = directory / "ca.key", directory / "ca.crt"
         if not key_path.exists() and not cert_path.exists():
             key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

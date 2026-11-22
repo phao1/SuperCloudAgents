@@ -22,6 +22,7 @@ from sca.eval.suites import (
     select_cases,
 )
 from sca.eval.trajectory import evaluate
+from sca.host import remove_tree
 from sca.orchestration.provider_errors import account_failure
 
 
@@ -39,7 +40,9 @@ def check_response(response: httpx.Response) -> None:
 
 
 class EvalSettings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="SCA_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="SCA_", env_file=".env", env_file_encoding="utf-8", extra="ignore",
+    )
     eval_api_token: str = ""
 
 
@@ -85,7 +88,8 @@ class EvalActivities:
 
     async def git(self, directory: Path, *args: str) -> None:
         proc = await asyncio.create_subprocess_exec(
-            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", *args,
+            "git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+            "-c", "core.autocrlf=false", *args,
             cwd=directory, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL)
         if await proc.wait():
             raise invalid_eval_input(f"Could not prepare the evaluation fixture (git {args[0]} failed)")
@@ -136,20 +140,23 @@ class EvalActivities:
                 async with locks._lock(root / "locks" / "fixture"):
                     if not (root / "ready").exists():
                         if repo.exists():
-                            shutil.rmtree(repo)
+                            remove_tree(repo)
                         if (source / "repo.bundle").exists():
-                            await self.git(root, "clone", "--bare", str(source / "repo.bundle"), str(repo))
+                            await self.git(root, "clone", "--bare", "-c", "core.autocrlf=false",
+                                           str(source / "repo.bundle"), str(repo))
                         else:
                             if not (source / "repo").is_dir():
                                 raise invalid_eval_input("Evaluation fixture repository is missing")
                             if seed.exists():
-                                shutil.rmtree(seed)
+                                remove_tree(seed)
                             shutil.copytree(source / "repo", seed)
                             await self.git(seed, "init", "-b", "main")
+                            await self.git(seed, "config", "core.autocrlf", "false")
                             await self.git(seed, "add", ".")
                             await self.git(seed, "-c", "user.name=Eval", "-c", "user.email=eval@invalid",
                                            "-c", "commit.gpgsign=false", "commit", "-m", "fixture")
-                            await self.git(root, "clone", "--bare", str(seed), str(repo))
+                            await self.git(root, "clone", "--bare", "-c", "core.autocrlf=false",
+                                           str(seed), str(repo))
                         (root / "ready").touch()
                 spec["repo_url"] = str(repo)
             else:

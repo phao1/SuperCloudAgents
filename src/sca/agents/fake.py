@@ -43,7 +43,7 @@ class FakeBackend:
         queue_path.parent.mkdir(parents=True, exist_ok=True)
         # The script being run stays in "current" until the turn completes, so a retried turn
         # (worker crash, activity retry) runs the same script again instead of the next one.
-        state = json.loads(queue_path.read_text()) if queue_path.exists() else {}
+        state = json.loads(queue_path.read_text(encoding="utf-8")) if queue_path.exists() else {}
         if isinstance(state, list):
             state = {"queue": state}
         queue = state.get("queue", [])
@@ -59,7 +59,8 @@ class FakeBackend:
                 )
             )
             script = queue.pop(0) if queue else None
-        queue_path.write_text(json.dumps({"queue": queue, "current": script, "prompt": digest}))
+        queue_path.write_text(json.dumps({"queue": queue, "current": script, "prompt": digest}),
+                              encoding="utf-8")
         if session_id is None:
             yield AgentEvent(type="session_started", data={"session_id": f"fake-{ctx.task_id}"})
         if script is not None:
@@ -80,7 +81,7 @@ class FakeBackend:
                 type="command",
                 data={"command": script, "exit_code": result.exit_code, "output_tail": output},
             )
-        queue_path.write_text(json.dumps({"queue": queue, "current": None}))
+        queue_path.write_text(json.dumps({"queue": queue, "current": None}), encoding="utf-8")
         yield AgentEvent(
             type="usage", data={"input_tokens": 1, "cached_input_tokens": 0, "output_tokens": 1}
         )

@@ -9,9 +9,10 @@ import pytest
 from sca.agents.dsh import KEY_ENV, LAUNCH, DshBackend
 from sca.config import Settings
 from sca.core.errors import AgentTurnError, SandboxError
-from sca.core.models import AgentContext, AgentEvent, ExecEvent, ExecExit, ExecOutput
+from sca.core.models import AgentContext, AgentEvent, ExecEvent, ExecExit, ExecOutput, SandboxSpec
 from sca.kinds.coding.spec import CodingSpec
 from sca.orchestration.worker import make_agent_backend
+from sca.sandbox.local import LocalSandboxProvider
 
 SESSION = "session-8b20b100-007a-4a19-927a-c1e1d1db1e00"
 KEY = "fixture-virtual-key"
@@ -132,10 +133,11 @@ async def test_command_env_and_session_continuity(ctx, protocol):
     assert second.calls[0]["env"]["SCA_DSH_PATCH"] == patch
 
 
-async def test_parses_headless_events_and_redacts_nested_payloads(ctx):
+@pytest.mark.parametrize("shell", ["bash", "pwsh"])
+async def test_parses_headless_events_and_redacts_nested_payloads(ctx, shell):
     # Synthetic projection from @deepseek-ai/dsh-headless src/json-stream.ts.
     encoded_key = r"\u0066ixture-virtual-key"
-    call = stdout(type="tool_call", callId="cmd1", tool="bash", input={
+    call = stdout(type="tool_call", callId="cmd1", tool=shell, input={
         "command": "echo " + KEY, "meta": [{KEY: KEY}],
     })
     call.text = call.text.replace(KEY, encoded_key)
@@ -270,13 +272,52 @@ async def test_invalid_context_and_mismatched_resume_are_refused(ctx):
 
 def test_launcher_preserves_stdin_and_writes_only_patch(tmp_path):
     patch = tmp_path / "sca-dsh.patch.yml"
-    binary = tmp_path / "dsh"
-    binary.write_text('#!/bin/sh\ntest -n "$DEEPSEEK_API_KEY" && test -z "${SCA_DSH_PATCH+x}" && cat\n')
-    binary.chmod(0o700)
+    stub = ("import os, sys; assert os.environ['DEEPSEEK_API_KEY'];"
+            " assert 'SCA_DSH_PATCH' not in os.environ;"
+            " sys.stdout.buffer.write(sys.stdin.buffer.read())")
     result = subprocess.run(
-        [sys.executable, "-c", LAUNCH, str(patch), "dsh", "--profile", "headless", "--patch", str(patch), "-"],
+        [sys.executable, "-c", LAUNCH, str(patch), sys.executable, "-c", stub],
         input=b"prompt\n", capture_output=True, check=True, timeout=5,
-        env={"PATH": str(tmp_path) + os.pathsep + os.defpath, "SCA_DSH_PATCH": "[]", KEY_ENV: KEY},
+        env={**os.environ, "SCA_DSH_PATCH": "[]", KEY_ENV: KEY},
     )
     assert result.stdout == b"prompt\n" and result.stderr == b""
-    assert patch.read_text() == "[]"
+    assert patch.read_text(encoding="utf-8") == "[]"
+
+
+async def test_source_launcher_uses_task_home_and_same_gateway_env(tmp_path, ctx):
+    from sca.host import host_executable
+
+    node = host_executable("node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    binary = tmp_path / "dsh cli.mjs"
+    binary.write_text("""
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const env = process.env;
+assert.equal(env.DEEPSEEK_BASE_URL, 'http://gateway/v1');
+assert.ok(env.DEEPSEEK_API_KEY);
+assert.equal(env.DSH_HOME, resolve(env.HOME, 'dsh'));
+assert.equal(env.DSH_TELEMETRY_MODE, 'DISABLED');
+assert.equal(env.DSH_PERMISSION_MODE, 'workspace-write');
+assert.equal(env.SCA_DSH_PATCH, undefined);
+const patch = process.argv[process.argv.indexOf('--patch') + 1];
+assert.ok(JSON.parse(readFileSync(patch, 'utf8')).length > 0);
+assert.equal(readFileSync(0, 'utf8'), '修改测试');
+const sessionId = 'session-8b20b100-007a-4a19-927a-c1e1d1db1e00';
+console.log(JSON.stringify({type: 'session', sessionId}));
+console.log(JSON.stringify({type: 'final', sessionId, reason: {kind: 'completed'}, text: '完成'}));
+""", encoding="utf-8")
+    sandbox = LocalSandboxProvider(tmp_path / "sandboxes")
+    backend = DshBackend("deepseek-flash", executable=str(binary), node_executable=str(node))
+    additions = backend.sandbox_additions(ctx)
+    assert not additions.mounts
+    await sandbox.create("s", SandboxSpec(image="unused", env=additions.env))
+    try:
+        events = await collect(backend, sandbox, ctx)
+        assert [event.type for event in events] == ["session_started", "turn_completed"]
+        assert events[-1].data["final_message"] == "完成"
+        assert (sandbox.root / "s/agent_home/sca-dsh.patch.yml").is_file()
+    finally:
+        await sandbox.destroy("s")

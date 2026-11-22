@@ -39,7 +39,12 @@ async def test_fake_coding_task_with_local_sandbox(
     settings = Settings(
         _env_file=None, data_dir=tmp_path / "data", sandbox_driver="local", agent_backend="fake",
         task_queue=f"source-test-{uuid4()}", maintenance_schedule=False,
+        model_gateway_url="http://127.0.0.1:1",
+        api_tokens="fixture-token:eval:admin", api_token="fixture-token",
     )
+    demo_config = tmp_path / "demo-config"
+    demo_config.write_text("DEEPSEEK_API_KEY=REPLACE_ME\n", encoding="utf-8")
+    monkeypatch.setenv("SCA_PORTAL_LOCAL_CONFIG", str(demo_config))
     monkeypatch.setattr(api_app, "get_settings", lambda: settings)
     monkeypatch.setattr("sca.config.get_settings", lambda: settings)
     orchestrator = TemporalOrchestrator(local_temporal.client, settings.task_queue)
@@ -54,8 +59,10 @@ async def test_fake_coding_task_with_local_sandbox(
     ):
         response = await client.post("/v1/tasks", json={"kind": "coding", "spec": {
             "repo_url": str(best_of_repo.task_dir),
+            "agent_backend": "fake",
             "instruction": "Create the result.\n\n```sca-fake\nprintf 'ready\\n' > result.txt\n```",
             "image": "no-such-container-image",
+            "memory_enabled": False,
             "setup_command": "command -v git && command -v python3",
             "verify_command": "grep -qx ready result.txt",
         }})

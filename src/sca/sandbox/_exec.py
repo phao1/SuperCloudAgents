@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import aclosing
 from uuid import uuid4
@@ -104,9 +105,11 @@ async def stream_process(
                 pending += chunk
                 while b"\n" in pending:
                     line, pending = pending.split(b"\n", 1)
-                    await queue.put(ExecOutput(stream=name, text=line.decode(errors="replace")))
+                    if sys.platform == "win32":
+                        line = line.removesuffix(b"\r")
+                    await queue.put(ExecOutput(stream=name, text=line.decode("utf-8", errors="replace")))
             if pending:
-                await queue.put(ExecOutput(stream=name, text=pending.decode(errors="replace")))
+                await queue.put(ExecOutput(stream=name, text=pending.decode("utf-8", errors="replace")))
         finally:
             await queue.put(None)
 

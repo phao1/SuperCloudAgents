@@ -33,7 +33,7 @@ def matches_suite_hash(suite: dict, expected: str) -> bool:
 
 def _read_mapping(path: Path) -> dict:
     try:
-        value = yaml.safe_load(path.read_text())
+        value = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError:
         raise ValueError(f"invalid YAML in {path.name}") from None
     if isinstance(value, dict):

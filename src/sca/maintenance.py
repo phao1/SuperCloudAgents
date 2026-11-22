@@ -3,7 +3,7 @@
 import asyncio
 import hashlib
 import logging
-import shutil
+import sys
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -20,7 +20,7 @@ with workflow.unsafe.imports_passed_through():
     from sca.core.interfaces import ModelGateway, ObjectStore, SandboxProvider
     from sca.core.models import TERMINAL_STATES, SandboxSpec
     from sca.db.repo import Store
-    from sca.sandbox.k8s import K8sSandboxProvider
+    from sca.host import remove_tree
     from sca.workspace.cache import RepoCache
     from sca.workspace.state import TaskStateStore
 
@@ -74,6 +74,10 @@ class MaintenanceActivities:
 
     @activity.defn
     async def replenish_sandbox_pool(self) -> None:
+        if sys.platform == "win32":
+            return
+        from sca.sandbox.k8s import K8sSandboxProvider
+
         if isinstance(self.sandbox, K8sSandboxProvider):
             settings = self.settings
             self.sandbox.pool_size = settings.k8s_pool_size
@@ -141,7 +145,11 @@ class MaintenanceActivities:
     @activity.defn
     async def reap_sandboxes(self) -> None:
         for sandbox_id in await self.sandbox.list({"sca.task_id": ""}):
-            if sandbox_id.startswith("sca-pool-") and isinstance(self.sandbox, K8sSandboxProvider):
+            if sandbox_id.startswith("sca-pool-") and sys.platform != "win32":
+                from sca.sandbox.k8s import K8sSandboxProvider
+
+                if not isinstance(self.sandbox, K8sSandboxProvider):
+                    continue
                 suffix = await self.sandbox.task_id(sandbox_id) or ""
             elif sandbox_id.startswith("sca-task-"):
                 suffix = sandbox_id.removeprefix("sca-task-")
@@ -219,7 +227,7 @@ class MaintenanceActivities:
             if workspace.is_symlink():
                 workspace.unlink()
             else:
-                await asyncio.to_thread(shutil.rmtree, workspace)
+                await asyncio.to_thread(remove_tree, workspace)
             (directory / "workspace.ready").unlink(missing_ok=True)
 
     async def _expire_task_directory(self, directory: Path, task_id: UUID) -> None:
@@ -279,7 +287,7 @@ print(size.decode())
 
 
 def _ordinary_directory(path: Path) -> bool:
-    return not path.is_symlink() and path.is_dir()
+    return not (path.is_symlink() or path.is_junction()) and path.is_dir()
 
 
 def _cache_locations(directory: Path) -> Iterator[Path]:
@@ -304,7 +312,7 @@ async def _remove_tree(settings: Settings, directory: Path, relative: Path) -> i
             if not _ordinary_directory(target):
                 return None
         measured = await disk_bytes(target)
-        await asyncio.to_thread(shutil.rmtree, target)
+        await asyncio.to_thread(remove_tree, target)
         return measured
     except FileNotFoundError:
         return None

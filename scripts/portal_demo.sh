@@ -9,7 +9,7 @@ help() {
       bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
       bash scripts/portal_demo.sh restart-gateway
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
-  up      启动本地 API 和 worker，打印网址和登录令牌
+  up      启动本地 API 和 worker，显示网址及登录信息
   down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
   status  查看运行模式、服务、网关连接和已注册版本
   logs    查看当前模式的服务日志
@@ -295,7 +295,11 @@ up() {
     done
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
-    if [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"; fi
+    if [[ "$SCA_RUNTIME_MODE" == source ]]; then
+        echo '登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。'
+    elif [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then
+        printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"
+    fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"
     else
