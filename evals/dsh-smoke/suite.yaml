@@ -1,0 +1,7 @@
+name: dsh-smoke
+kind: coding
+description: DeepSeek Harness 自演进试跑，含两个开发用例和一个留出用例。
+defaults:
+  max_fix_attempts: 0
+  turn_timeout_s: 240
+  memory_enabled: false

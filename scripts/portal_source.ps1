@@ -1,9 +1,10 @@
 ﻿param(
     [Parameter(Position = 0)]
-    [ValidateSet('up', 'down', 'status', 'logs', 'restart-gateway')]
+    [ValidateSet('up', 'down', 'status', 'logs', 'restart-gateway', 'import-history', 'export-history')]
     [string]$Command = 'status',
     [Parameter(Position = 1)]
-    [string]$Service
+    [Alias('Service')]
+    [string]$Argument
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,8 +31,8 @@ if ($LASTEXITCODE -ne 0 -or $Version -notmatch '^Python 3\.12\.') {
     Write-Error '需要 Python 3.12，请运行 winget install -e --id Python.Python.3.12。'
 }
 $Arguments = @('-X', 'utf8', $Script, $Command)
-if ($Service) {
-    $Arguments += $Service
+if ($Argument) {
+    $Arguments += $Argument
 }
 & $Python @PythonArgs @Arguments
 exit $LASTEXITCODE

@@ -5,6 +5,10 @@ if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     demo="$(dirname -- "$0")/portal_demo.sh"
     case "${1:---help}" in
         up|setup) exec bash "$demo" "$1" --mode source;;
+        import-history|export-history)
+            command=$1
+            shift
+            exec bash "$demo" "$command" --mode source "$@";;
         *) exec bash "$demo" "$@";;
     esac
 fi

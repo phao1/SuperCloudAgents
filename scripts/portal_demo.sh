@@ -8,12 +8,16 @@ help() {
 用法: bash scripts/portal_demo.sh {setup|up} [--mode docker|source]
       bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
       bash scripts/portal_demo.sh restart-gateway
+      bash scripts/portal_demo.sh export-history <zip>
+      bash scripts/portal_source.sh {import-history|export-history} <zip>
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
   up      启动本地 API 和 worker，显示网址及登录信息
   down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
   status  查看运行模式、服务、网关连接和已注册版本
   logs    查看当前模式的服务日志
   restart-gateway  加载更新后的模型密钥并重启网关
+  export-history   使用当前模式的数据库和对象存储导出历史 ZIP
+  import-history   将历史 ZIP 导入本机源码模式
 也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
@@ -21,6 +25,7 @@ Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GN
 HELP
 }
 case "${1:---help}" in -h|--help) help; exit 0;; esac
+CALLER_DIR=$PWD
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$ROOT"
 COMMAND=$1
@@ -31,6 +36,14 @@ case "$COMMAND" in
         if [[ $# == 2 && $1 == --mode && ( $2 == docker || $2 == source ) ]]; then
             REQUESTED_MODE=$2
         elif [[ $# != 0 ]]; then help; exit 2; fi;;
+    import-history|export-history)
+        if [[ $# == 3 && $1 == --mode && $2 == source ]]; then
+            REQUESTED_MODE=source
+            shift 2
+        fi
+        [[ $# == 1 && -n $1 && $1 != -* ]] || { help; exit 2; }
+        ARCHIVE=$1
+        if [[ $ARCHIVE != /* ]]; then ARCHIVE="$CALLER_DIR/$ARCHIVE"; fi;;
     status|logs|restart-gateway) [[ $# == 0 ]] || { help; exit 2; };;
     down) [[ $# == 0 || ( $# == 1 && $1 == --all ) ]] || { help; exit 2; };;
     *) help; exit 2;; esac
@@ -445,6 +458,22 @@ case "$COMMAND" in
             start_docker_services
         fi
         up;;
+    import-history|export-history)
+        if [[ $COMMAND == import-history || ${REQUESTED_MODE:-$(saved_mode)} == source ]]; then
+            ensure_mode_switch source
+            find_postgres
+            if [[ ! -x "$PY" || ! -f .data/portal.env || ! -f .env ]]; then
+                prepare_app
+            fi
+            if [[ $(saved_mode) != source ]]; then save_mode source; fi
+            load_env
+            start_postgres
+            "$PY" "$SOURCE_HELPER" history "${COMMAND%-history}" "$ARCHIVE" --migrate
+        else
+            load_env
+            [[ -x "$PY" ]] || fail '请先运行 setup。'
+            "$PY" "$SOURCE_HELPER" history export "$ARCHIVE"
+        fi;;
     down)
         mode=$(saved_mode)
         cleanup_failed=0
