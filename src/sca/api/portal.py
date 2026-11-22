@@ -8,6 +8,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
+from uuid import UUID, uuid4
 
 import httpx
 from dotenv import set_key
@@ -30,14 +31,17 @@ from sca.gateway.health import ProviderHealth
 from sca.gateway.model_providers import read_registry
 
 router = APIRouter()
-model_config_lock = asyncio.Lock()
 
 
 async def model_admin(request: Request,
                       user: Annotated[Principal, Depends(authorize('quota'))]) -> list[str]:
+    if user.tenant_id != 'eval':
+        raise HTTPException(403, '模型接入需要 eval 租户的管理员令牌。')
+    if not _local_client(request):
+        raise HTTPException(403, '模型接入仅允许从 Portal 所在的本机访问。')
     command = _restart_gateway_command(os.environ.get('SCA_PORTAL_LOCAL_CONFIG'))
-    if user.tenant_id != 'eval' or not command or not _local_client(request):
-        raise HTTPException(403, '请使用本机 eval 管理员令牌配置模型')
+    if not command:
+        raise HTTPException(403, '缺少本机模型接入配置，请通过 Portal 启动脚本运行 up。')
     return command
 
 
@@ -46,7 +50,9 @@ class ProviderKey(BaseModel):
 
 
 @router.post('/v1/portal/provider-key')
-async def set_provider_key(body: ProviderKey, command: Annotated[list[str], Depends(model_admin)]) -> dict:
+async def set_provider_key(
+    body: ProviderKey, request: Request, command: Annotated[list[str], Depends(model_admin)],
+) -> dict:
     """Configure the local demo gateway; this capability is opt-in and administrator-only."""
     config = os.environ.get('SCA_PORTAL_LOCAL_CONFIG')
     if not config or not command:
@@ -55,10 +61,12 @@ async def set_provider_key(body: ProviderKey, command: Annotated[list[str], Depe
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,256}', key):
         raise HTTPException(status_code=422, detail='密钥格式无效')
     path = Path(config)
-    async with model_config_lock:
-        set_key(str(path), 'DEEPSEEK_API_KEY', key)
-        path.chmod(0o600)
-        return {'saved': True, 'gateway_restarted': await restart_gateway(command)}
+    restarts = gateway_restarts(request)
+    restarts.require_idle()
+    set_key(str(path), 'DEEPSEEK_API_KEY', key)
+    path.chmod(0o600)
+    _, restart = restarts.start(command)
+    return {'saved': True, 'gateway_restarted': await asyncio.shield(restart)}
 
 
 async def restart_gateway(command: list[str]) -> bool:
@@ -289,3 +297,28 @@ def _restart_gateway_command(config: str | None) -> list[str]:
 
 def _local_client(request: Request) -> bool:
     return bool(request.client and request.client.host in ("127.0.0.1", "::1"))
+
+
+# Provider gateway restarts
+class GatewayRestarts:
+    def __init__(self) -> None:
+        self.jobs: dict[UUID, asyncio.Task[bool]] = {}
+
+    def require_idle(self) -> None:
+        if self.jobs and not self.jobs[next(reversed(self.jobs))].done():
+            raise HTTPException(409, "模型网关正在重启，请等待重启完成后重试。")
+
+    def start(self, command: list[str]) -> tuple[UUID, asyncio.Task[bool]]:
+        restart_id = uuid4()
+        job = asyncio.create_task(restart_gateway(command))
+        self.jobs[restart_id] = job
+        if len(self.jobs) > 32:
+            del self.jobs[next(iter(self.jobs))]
+        return restart_id, job
+
+
+def gateway_restarts(request: Request) -> GatewayRestarts:
+    state = request.app.state
+    if not hasattr(state, "gateway_restarts"):
+        state.gateway_restarts = GatewayRestarts()
+    return state.gateway_restarts

@@ -4,11 +4,15 @@
 
 通过 Portal 启动脚本启动平台，用本机 `eval` 管理员令牌登录。打开「概览 → 模型接入」，填写供应商名称、类型和基础 URL。需要认证的服务可填写 API Key。免密的本地服务可留空。
 
-每个供应商至少添加一个模型。「平台模型名」是任务、项目和评测中选择的名称。「上游模型 ID」填写服务实际提供的 ID，比如 `org/coder` 或 `qwen2.5-coder:7b`。可为每个模型填写上下文窗口和输入、输出价格。保存后平台重启 LiteLLM，Docker 模式也会按原流程重启正在运行的 Worker。使用「测试连接」选择一个已保存的模型，Portal 会经网关发出一次短补全并显示耗时或错误。若保存成功但网关重启失败，检查网关状态后执行下方的重启命令。
+每个供应商至少添加一个模型。「平台模型名」是任务、项目和评测中选择的名称。「上游模型 ID」填写服务实际提供的 ID，比如 `org/coder` 或 `qwen2.5-coder:7b`。可为每个模型填写上下文窗口和输入、输出价格。保存或删除后，Portal 显示网关重启进度。Docker 模式同时重启正在运行的 Worker。重启成功后，使用「测试连接」让网关发出一次短补全并显示耗时或错误。若重启失败，已保存的配置仍可查看。检查网关状态后执行下方的重启命令。
 
 在「提交任务」「评测中心」「自动演进」或「项目 → 设置」选择平台模型名。「自动演进」还可为反思和候选生成选择独立的 `evolve_model`。省略时优先使用 `SCA_EVOLVE_MODEL`，本机仅配置其他模型时会选择可用模型。任务可使用项目默认模型或平台默认模型。
 
 内置 DeepSeek 使用上方的 DeepSeek API Key 表单。已有 `.env` 中的 `DEEPSEEK_API_KEY` 会继续启用 `deepseek-flash` 和 `deepseek-v4-pro`。自定义供应商可选择 `deepseek`、`openai-compatible` 或 `anthropic-compatible`。内置模型名由平台保留。
+
+### Docker 升级后启用模型接入
+
+在已安装的仓库运行 `bash scripts/portal_demo.sh up --mode docker`，启动脚本会从仓库路径补齐旧配置缺失的 `SCA_PORTAL_LOCAL_CONFIG`。升级前 API 与 Worker 已在运行时，先执行 `bash scripts/portal_demo.sh down` 再启动。登录令牌仍保存在 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。供应商接口的 `403` 会区分租户、客户端地址和本机配置，按提示切换到 `eval` 管理员令牌、在 Portal 所在机器访问或通过启动脚本重新启动。
 
 ## 基础 URL 与运行模式
 
@@ -54,14 +58,25 @@ curl -fsS "$SCA_API_URL/v1/portal/providers" \
   "models": [{"name": "local-coder", "upstream_model": "qwen2.5-coder:7b", "context_window": 8192}]
 }
 JSON
+```
 
+`POST`、`PUT` 和 `DELETE` 保存配置后立即返回 HTTP `202`，响应包含 `restart.id` 和 `restart.status`，初始状态为 `restarting`。`POST` 和 `PUT` 还返回 `provider`。将 `RESTART_ID` 设置为 `restart.id`，轮询以下接口直至状态变为 `succeeded` 或 `failed`。当前 API 进程保留最近 32 条重启记录，重启 API 后可检查网关状态并按需手动重启网关。重启进行中新增、编辑、删除或测试连接会收到 HTTP `409`，待完成后再试。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/portal/providers/restarts/$RESTART_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+状态为 `succeeded` 后，测试连接并检查模型列表。
+
+```bash
 curl -fsS "$SCA_API_URL/v1/portal/providers/test" \
   -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"model":"local-coder"}'
 
 curl -fsS "$SCA_API_URL/v1/models" -H "Authorization: Bearer $SCA_API_TOKEN"
 ```
 
-`GET /v1/portal/providers` 列出已保存供应商和启用的内置 DeepSeek 模型。使用创建结果的 `provider.id` 调用 `PUT /v1/portal/providers/{id}`，提交完整的供应商配置。省略 `api_key` 保留现有密钥，传 `null` 清除，传字符串替换。修改基础 URL 或接口类型时，已有密钥需重新填写或清除。使用 `DELETE /v1/portal/providers/{id}` 删除供应商。写操作通过 `gateway_restarted` 报告网关是否完成重启。
+`GET /v1/portal/providers` 列出已保存供应商和启用的内置 DeepSeek 模型。使用创建结果的 `provider.id` 调用 `PUT /v1/portal/providers/{id}`，提交完整的供应商配置。省略 `api_key` 保留现有密钥，传 `null` 清除，传字符串替换。修改基础 URL 或接口类型时，已有密钥需重新填写或清除。使用 `DELETE /v1/portal/providers/{id}` 删除供应商。内置 DeepSeek 密钥通过 `POST /v1/portal/provider-key` 保存，仍在响应中用 `gateway_restarted` 报告是否重启成功。
 
 ```bash
 curl -fsS "$SCA_API_URL/v1/evolutions" \

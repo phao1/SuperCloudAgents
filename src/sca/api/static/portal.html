@@ -993,12 +993,13 @@ async function api(path,body,method){
   if(!r.ok)throw await apiFailure(r);
   return r
 }
-async function apiFailure(r){
+async function apiFailure(r,showModelDetails=false){
   const body=typeof r.json==='function'?await r.json().catch(()=>({})):{};
   const message=body?.error?.message;
   if(r.status===401||r.status===403){
     const note=r.status===401?'认证失败（401）：请重新输入有效令牌并连接。':'权限不足（403）：当前令牌无法执行此操作。';
-    return Object.assign(Error(body?.error?.code==='tenant_suspended'?message:note),{status:r.status});
+    const detail=body?.error?.code==='tenant_suspended'||(showModelDetails&&r.status===403&&body?.error?.code==='http_error');
+    return Object.assign(Error(detail?message:note),{status:r.status});
   }
   return Object.assign(Error(message||'请求失败：'+r.status),{status:r.status});
 }
@@ -2682,7 +2683,8 @@ $('provider-key-form').onsubmit=async event=>{
       body:JSON.stringify({key:input.value.trim()}),
       signal:AbortSignal.timeout(130000),
     });
-    if(!response.ok)throw Error(response.status===403?'请使用本机 eval 管理员令牌。':'保存失败，请检查密钥和服务状态。');
+    if(response.status===403||response.status===409)throw await apiFailure(response,true);
+    if(!response.ok)throw Error('保存失败，请检查密钥和服务状态。');
     const result=await response.json();
     input.value='';
     label.textContent=result.gateway_restarted?'密钥已保存，模型网关已重启。':'密钥已保存，网关重启失败。请查看服务状态。';

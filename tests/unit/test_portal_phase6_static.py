@@ -450,6 +450,59 @@ def serve_portal(route, path):
     return False
 
 
+def test_portal_browser_tracks_provider_restart_after_writes():
+    providers_path = '/v1/portal/providers'
+    provider = {'id': 'fixture-provider', 'name': 'Local', 'type': 'openai-compatible',
+                'base_url': 'http://127.0.0.1:8081/v1', 'models': [{'name': 'local-coder'}]}
+    providers = []
+    statuses = {'save': 'restarting', 'delete': 'restarting'}
+
+    def handle(route):
+        path = urlsplit(route.request.url).path
+        if serve_portal(route, path):
+            return
+        if path == providers_path and route.request.method == 'POST':
+            providers.append(provider)
+            route.fulfill(status=202, json={'provider': provider,
+                                           'restart': {'id': 'save', 'status': 'restarting'}})
+        elif path == f'{providers_path}/{provider["id"]}' and route.request.method == 'DELETE':
+            providers.clear()
+            route.fulfill(status=202, json={'restart': {'id': 'delete', 'status': 'restarting'}})
+        elif path.startswith(providers_path + '/restarts/'):
+            restart_id = path.rsplit('/', 1)[1]
+            route.fulfill(json={'id': restart_id, 'status': statuses[restart_id]})
+        else:
+            fixtures = {
+                '/v1/portal/whoami': {'role': 'admin', 'tenant_id': 'eval'},
+                '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'can_configure_model': True},
+                providers_path: {'providers': providers, 'deepseek_models': []},
+            }
+            route.fulfill(json=fixtures.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page()
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
+        page.route('**/*', handle)
+        page.goto('http://portal.test/portal#/overview')
+        panel = page.locator('#model-providers')
+        panel.get_by_label('名称', exact=True).fill(provider['name'])
+        panel.get_by_label('基础 URL').fill(provider['base_url'])
+        panel.get_by_label('平台模型名').fill('local-coder')
+        panel.get_by_label('上游模型 ID').fill('coder')
+        with page.expect_response(f'**{providers_path}/restarts/save'):
+            panel.get_by_role('button', name='保存并重启网关').click()
+        panel.get_by_text('配置已保存，正在重启模型网关…', exact=True).wait_for()
+        statuses['save'] = 'succeeded'
+        panel.get_by_text('配置已保存，模型网关已重启。', exact=True).wait_for()
+        page.once('dialog', lambda dialog: dialog.accept())
+        with page.expect_response(f'**{providers_path}/restarts/delete'):
+            panel.get_by_role('button', name='删除', exact=True).click()
+        panel.get_by_text('配置已保存，正在重启模型网关…', exact=True).wait_for()
+        statuses['delete'] = 'failed'
+        panel.get_by_text('配置已保存，网关重启失败。', exact=False).wait_for()
+        panel.get_by_text('尚未添加自定义供应商。', exact=True).wait_for()
+
+
 def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
     evolution_id, eval_id, task_id, champion_id = "evolution-fixture", "eval-fixture", "task-fixture", "champion-fixture"
     evolution_path = f"/v1/evolutions/{evolution_id}"
