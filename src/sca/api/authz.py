@@ -19,6 +19,7 @@ ACTION_ROLES = {
     "upload": "member",
     "review": "member",
     "task-message": "member",
+    "evolution-message": "member",
     "cancel": "member",
     "pause": "member",
     "resume": "member",

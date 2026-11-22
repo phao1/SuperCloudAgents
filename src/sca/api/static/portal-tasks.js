@@ -7,7 +7,7 @@ const portalTasks = (() => {
     ['design_tokens', 'Design Tokens'], ['figma', 'Figma 设计稿'],
     ['github_issue', 'GitHub 工单'], ['jira', 'Jira 工单'], ['linear', 'Linear 工单'],
   ];
-  let uploadedFiles = new WeakMap(), terminal = null, terminalTask = null, messageRequest = null;
+  let uploadedFiles = new WeakMap(), terminal = null, terminalTask = null, conversation = null;
   let outcomeSignature, attemptsSignature, impactSignature, reportCache, analysisSignature, refreshTools;
 
   function disclosure(title, ...children) {
@@ -386,45 +386,21 @@ const portalTasks = (() => {
     $('task-terminal-start').onclick = () => void startTerminal(task);
     $('task-terminal-stop').onclick = () => stopTerminal();
     if (terminal && finishedTask(task.state)) stopTerminal('任务已结束。');
-    renderMessageForm(task);
+    renderConversation(task);
   }
 
-  function renderMessageForm(task) {
-    const controls = $('task-message-controls'), form = $('task-message-form');
-    const input = $('task-message-text'), message = $('task-message-status');
-    controls.disabled = !ui.can('member') || finishedTask(task.state) || Boolean(messageRequest);
-    input.onkeydown = event => {
-      if (event.key === 'Enter' && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
-        event.preventDefault();
-        if (!controls.disabled) form.requestSubmit();
-      }
-    };
-    form.onsubmit = async event => {
-      event.preventDefault();
-      if (controls.disabled || !openTaskIs(task.id) || !input.value.trim()) return;
-      const request = {taskId: task.id};
-      messageRequest = request;
-      controls.disabled = true;
-      ui.setMessage(message, '正在发送…');
-      try {
-        await data(taskPath(task) + '/messages', {
-          text: input.value, mode: $('task-message-interrupt').checked ? 'interrupt' : 'queue',
-        });
-        if (messageRequest !== request || !openTaskIs(request.taskId)) return;
-        input.value = '';
-        ui.setMessage(message, '插话已发送。');
-      } catch (e) {
-        if (messageRequest === request && openTaskIs(request.taskId)) ui.setMessage(message, e.message, true);
-      } finally {
-        if (messageRequest === request) {
-          messageRequest = null;
-          if (openTaskIs(request.taskId) && currentTask?.id === request.taskId) {
-            renderMessageForm(currentTask);
-            if (!controls.disabled) input.focus({preventScroll: true});
-          }
-        }
-      }
-    };
+  function renderConversation(task) {
+    const identity = portalIdentity;
+    if (conversation?.id !== task.id || conversation?.identity !== identity) {
+      conversation?.panel.destroy();
+      const panel = portalConversation.create($('task-conversation'), {
+        path: taskPath(task), type: 'task', canWrite: () => ui.can('member'),
+        active: () => portalIdentity === identity && openTaskIs(task.id),
+        focus: id => taskDag?.focus(id),
+      });
+      conversation = {id: task.id, identity, panel};
+    }
+    conversation.panel.setState(finishedTask(task.state) ? '任务已结束，无法发送插话。' : '');
   }
 
   async function loadAttempts(task, artifactsRequest) {
@@ -508,6 +484,7 @@ const portalTasks = (() => {
   }
 
   function refreshTask(task, artifactsRequest) {
+    if (conversation?.id === task.id) void conversation.panel.refresh();
     impact(task);
     return loadAttempts(task, artifactsRequest).catch(e => {
       if (openTaskIs(task.id)) ui.setMessage($('task-best-of-status'), e.message, true);
@@ -638,10 +615,8 @@ const portalTasks = (() => {
     stopTerminal();
     terminalTask = null;
     outcomeSignature = attemptsSignature = impactSignature = undefined;
-    messageRequest = null;
-    $('task-message-form').reset();
-    $('task-message-controls').disabled = true;
-    ui.setMessage($('task-message-status'), '');
+    conversation?.panel.destroy();
+    conversation = null;
     for (const id of ['task-delivery', 'task-tools-champion', 'task-scope', 'task-best-of', 'task-impact']) {
       $(id).replaceChildren();
       $(id).parentElement.hidden = true;

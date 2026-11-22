@@ -8,7 +8,9 @@ const portalEvolution = (() => {
   const runHref = id => '#/runs/' + enc(id);
   const pageHref = (tab, id) => '#/evolutions/' + tab + (id ? '/' + enc(id) : '');
   const short = value => String(value || '').slice(0, 8);
-  const activeStates = ['queued', 'running', 'awaiting_approval'];
+  const activeStates = ['queued', 'running', 'paused', 'awaiting_approval'];
+  const launchDefaults = {generations: 1, candidates: 2, repeat: 1, budget_usd: 1};
+  const launchFields = new Set(['generations', 'candidates', 'budget_usd']);
   const surfaces = [['system_prompt', '系统提示词'], ['tool_guidance', '工具指引'], ['tool_descriptions', '工具描述']];
   const optionFields = [
     ['generations', '最多代数', 3, 1, 100], ['candidates', '每代候选数', 3, 1, 10],
@@ -20,7 +22,7 @@ const portalEvolution = (() => {
     ['min_cost_saving', '最低节省成本（比例）', .15, 0, 1, 'any'],
   ];
   const stateNames = {
-    awaiting_approval: '待审批', stopped: '已停止', patience_exhausted: '达到停滞上限',
+    awaiting_approval: '待审批', paused: '已暂停', stopped: '已停止', patience_exhausted: '达到停滞上限',
     pending: '待定', promoted: '已晋升', invalid: '静态检查未通过', rejected: '已拒绝',
     approved: '已批准',
   };
@@ -58,17 +60,24 @@ const portalEvolution = (() => {
     return name?.split(/[/\\]/).at(-1) || '—';
   }
 
-  function configFields(config = {}) {
-    const nodes = optionFields.map(([name, label, fallback, min, max, step]) => ui.field(label, name, {
-      type: 'number', value: config[name] ?? fallback, min, ...(max !== null && {max}),
-      step: step || 1, required: true,
-    }));
+  function configFields(config = {}, launch = false) {
+    const basic = [], advanced = [];
+    for (const [name, label, fallback, min, max, step] of optionFields) {
+      const fields = launch && launchFields.has(name) ? basic : advanced;
+      fields.push(ui.field(label, name, {
+        type: 'number', value: config[name] ?? fallback, min, ...(max !== null && {max}),
+        step: step || 1, required: true,
+      }));
+    }
     const toggles = surfaces.map(([name, label]) => ui.check(label, 'surface_' + name,
       !config.surfaces || config.surfaces.includes(name)));
     const details = el('details', undefined, 'portal-disclosure');
-    details.append(el('summary', '候选、预算与晋升条件'), ui.fields(...nodes),
+    details.append(el('summary', launch ? '高级选项与晋升条件' : '候选、预算与晋升条件'), ui.fields(...advanced),
       ui.actions(...toggles), ui.check('晋升前需要人工审批', 'require_approval', config.require_approval === true));
-    return details;
+    if (!launch) return details;
+    const section = el('div', undefined, 'stack');
+    section.append(ui.fields(...basic), details);
+    return section;
   }
 
   function configBody(form) {
@@ -92,24 +101,39 @@ const portalEvolution = (() => {
   }
 
   function targetFields(row = {}) {
-    const qualified = suites.filter(suite => {
-      const splits = new Set(Object.values(suite.case_metadata || {}).map(meta => meta.split));
-      return splits.has('dev') && splits.has('holdout');
-    });
-    const names = new Set(['opencode-evolve', ...qualified.map(suite => suite.name)]);
-    if (row.suite) names.add(row.suite);
-    let selected = row.agent_backend || 'opencode';
+    const installed = new Map();
+    for (const suite of suites) {
+      const counts = {dev: 0, holdout: 0};
+      for (const {split} of Object.values(suite.case_metadata || {})) {
+        if (Object.hasOwn(counts, split)) counts[split]++;
+      }
+      if (counts.dev && counts.holdout) installed.set(suite.name,
+        `${suite.name} · 开发集 ${counts.dev} · 留出集 ${counts.holdout}`);
+    }
+    if (row.suite && !installed.has(row.suite)) installed.set(row.suite, row.suite);
+    let selected = row.agent_backend || (portalConfig?.default_agent_backend === 'dsh' ? 'dsh' : 'opencode');
+    const recommended = backend => {
+      const preference = backend === 'dsh' ? 'dsh-smoke' : 'opencode-evolve';
+      return installed.has(preference) ? preference : installed.keys().next().value || '';
+    };
+    const choices = [...installed];
+    if (!choices.length) choices.push(['', '暂无含开发集和留出集的套件']);
     const pins = {opencode: versions[0]?.version || '', dsh: ''};
     if (row.agent_version) pins[selected] = row.agent_version;
+    const model = portalConfig?.default_model || 'deepseek-flash';
+    const suiteField = ui.field('评测套件', 'suite', {
+      required: true, value: row.suite || recommended(selected), choices,
+    });
     const result = ui.fields(
-      ui.field('评测套件', 'suite', {required: true, value: row.suite || 'opencode-evolve',
-        choices: [...names].map(name => [name, name])}),
-      backendField(selected),
+      backendField(selected), suiteField,
       ui.field('基线版本', 'agent_version', {value: pins[selected]}),
-      ui.field('评测模型', 'model', {required: true, value: row.model || 'deepseek-flash'})
+      ui.field('评测模型', 'model', {required: true, value: row.model || model})
     );
     const backend = result.querySelector('[name="agent_backend"]');
     const version = result.querySelector('[name="agent_version"]');
+    const suite = suiteField.querySelector('select');
+    let suitePicked = Boolean(row.suite);
+    suite.onchange = () => {suitePicked = true;};
     function syncVersion() {
       version.required = selected === 'opencode';
       version.placeholder = selected === 'dsh' ? '留空使用已配置的 npm 版本' : '支持运行时覆盖的版本';
@@ -118,6 +142,7 @@ const portalEvolution = (() => {
       pins[selected] = version.value;
       selected = backend.value;
       version.value = pins[selected];
+      if (!suitePicked) suite.value = recommended(selected);
       syncVersion();
     };
     syncVersion();
@@ -130,13 +155,26 @@ const portalEvolution = (() => {
       agent_version: ui.value(form, 'agent_version') || null, model: ui.value(form, 'model')};
   }
 
+  function loadTargets(state, ready) {
+    void Promise.allSettled([loadSuites(), loadVersions(), portalConfig ? null : loadConfig()]).then(results => {
+      if (active(state)) ready(results.find(result => result.status === 'rejected')?.reason);
+    });
+  }
+
   function mountRuns(state) {
     const list = ui.scroll('演进记录');
-    const form = ui.form([targetFields(), configFields()], '开始演进', async form => {
-      const result = await data(runsPath, {...targetBody(form), ...configBody(form)});
-      if (active(state)) location.hash = pageHref('runs', result.id);
-    });
-    if (ui.can('eval-admin')) state.root.append(ui.panel('启动自动演进', form));
+    if (ui.can('eval-admin')) {
+      const launch = el('div', undefined, 'stack'), message = notice();
+      ui.setMessage(message, '正在读取评测套件和后端配置…');
+      state.root.append(ui.panel('启动自动演进', launch, message));
+      loadTargets(state, problem => {
+        launch.append(ui.form([targetFields(), configFields(launchDefaults, true)], '开始演进', async form => {
+          const result = await data(runsPath, {...targetBody(form), ...configBody(form)});
+          if (active(state)) location.hash = pageHref('runs', result.id);
+        }));
+        ui.setMessage(message, problem?.message || '', Boolean(problem));
+      });
+    }
     state.root.append(ui.panel('演进记录', list));
     let signature;
     return async () => {
@@ -286,6 +324,7 @@ const portalEvolution = (() => {
   function mountRun(state) {
     const id = state.id, path = runsPath + '/' + enc(id);
     const canManage = ui.can('eval-admin');
+    const canReadChampions = canManage || state.identity.guest;
     const header = el('div', undefined, 'stack');
     const actions = ui.actions(evidenceLink('返回演进记录', pageHref('runs')));
     const message = notice(), plots = el('div', undefined, 'portal-charts'), baselineList = ui.scroll('各代冠军');
@@ -297,17 +336,29 @@ const portalEvolution = (() => {
     state.dag = SCATaskDAG.create(panel, runId => data(runsPath + '/' + enc(runId) + '/dag'), {
       project: SCATaskDAG.projectEvolution,
     });
-    state.root.append(ui.panel('演进详情', header, actions, message), panel,
+    const workbench = el('div', undefined, 'portal-run-workbench');
+    const conversation = el('section');
+    conversation.id = 'evolution-conversation';
+    conversation.setAttribute('aria-label', '演进对话');
+    workbench.append(panel, conversation);
+    state.conversation = portalConversation.create(conversation, {
+      path, type: 'evolution', active: () => active(state),
+      canWrite: () => ui.can('member'), focus: node => state.dag.focus(node),
+    });
+    state.root.append(ui.panel('演进详情', header, actions, message), workbench,
       ui.panel('每代开发集成绩', legend, plots, baselineList), ui.panel('候选与晋升决定', candidates));
     let signature, initial, parents;
     return async () => {
       const row = await data(path);
       if (!active(state)) return;
       state.dag.refresh(id, true);
+      state.polling = activeStates.includes(row.status);
+      state.conversation.setState(state.polling ? '' : '演进已结束，无法发送消息。', row.status === 'paused');
+      void state.conversation.refresh();
       const nextSignature = JSON.stringify([row.status, row.reason, row.spent_usd, row.best_champion_id,
+        row.config.budget_usd,
         row.candidates.map(c => [c.id, c.decision, c.reason, c.dev_run_id, c.holdout_run_id]),
         row.journal.filter(entry => entry.type === 'evaluation').map(entry => [entry.id, entry.status])]);
-      state.polling = activeStates.includes(row.status);
       if (signature === nextSignature) return;
       const baseline = row.journal.find(entry => entry.type === 'evaluation' && entry.split === 'dev');
       if (!initial && baseline?.status === 'completed' && row.candidates.length) {
@@ -316,7 +367,7 @@ const portalEvolution = (() => {
         if (scored) initial = {pass_rate: run.passed / scored, cost_usd: run.cost_usd};
       }
       const byId = new Map(row.candidates.map(candidate => [candidate.id, candidate.overlay]));
-      if (!parents && row.candidates.some(candidate => candidate.parent_id && !byId.has(candidate.parent_id))) {
+      if (canReadChampions && !parents && row.candidates.some(candidate => candidate.parent_id && !byId.has(candidate.parent_id))) {
         parents = new Map((await data(championsPath)).map(champion => [champion.candidate_id, champion.overlay]));
       }
       if (!active(state)) return;
@@ -327,13 +378,9 @@ const portalEvolution = (() => {
         el('small', id + ' · ' + ui.date(row.created_at)));
       if (row.reason) header.append(el('p', row.reason, 'bad portal-reason'));
       actions.replaceChildren(evidenceLink('返回演进记录', pageHref('runs')));
-      if (canManage && state.polling) actions.append(ui.action('停止演进', async () => {
-        if (!confirm('确认停止这次演进？')) return;
-        await data(path + '/stop', {});
-        ui.setMessage(message, '已发送停止请求。');
-        await refresh(state);
-      }, message));
-      if (row.best_champion_id) actions.append(detailLink('champions', row.best_champion_id, '查看晋升后的冠军'));
+      if (row.best_champion_id && canReadChampions) {
+        actions.append(detailLink('champions', row.best_champion_id, '查看晋升后的冠军'));
+      }
       const groups = generations(row.candidates, initial, baseline?.id);
       plots.replaceChildren(...(groups.length ? [
         chart(groups, 'pass_rate', '开发集通过率', ui.percent),
@@ -409,7 +456,10 @@ const portalEvolution = (() => {
       if (row) form.append(ui.actions(ui.action('取消编辑', () => editor())));
       edit.replaceChildren(form);
     }
-    editor();
+    loadTargets(state, problem => {
+      if (!edit.hasChildNodes()) editor();
+      if (problem) ui.setMessage(message, problem.message, true);
+    });
     return async () => {
       const rows = await data(path);
       ui.list(list, ['套件 / 后端 / 基线 / 模型', '设置', '最近结果', '操作'], rows.map(row => {
@@ -636,7 +686,7 @@ const portalEvolution = (() => {
   function load(parts) {
     const evalAdmin = ui.can('eval-admin');
     const visible = evalAdmin ? ['runs', 'schedules', 'champions', 'rollouts', 'harvest']
-      : portalIdentity.guest ? ['runs', 'champions'] : ['rollouts', 'harvest'];
+      : portalIdentity.guest ? ['runs', 'champions'] : ui.can('eval') ? ['runs'] : ['rollouts', 'harvest'];
     const tab = visible.includes(parts[0]) ? parts[0] : visible[0];
     const id = parts[0] === tab && parts[1] ? decodeURIComponent(parts[1]) : '';
     const root = $('evolution-content');
@@ -649,6 +699,7 @@ const portalEvolution = (() => {
     }));
     if (view?.tab !== tab || view?.id !== id || view?.identity !== portalIdentity) {
       view?.dag?.destroy();
+      view?.conversation?.destroy();
       const state = {root, tab, id, identity: portalIdentity, polling: tab === 'runs'};
       view = state;
       root.replaceChildren();
@@ -668,6 +719,7 @@ const portalEvolution = (() => {
   function reset() {
     if (!view) return;
     view.dag?.destroy();
+    view.conversation?.destroy();
     view.root.replaceChildren();
     view = null;
   }

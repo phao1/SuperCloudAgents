@@ -281,7 +281,7 @@ class _TaskTrace:
             self.root.tail = lane.tail
             self.plan_gate = lane.tail
 
-    def _turn_event(self, lane: _Lane, event: Event) -> None:
+    def _turn_event(self, lane: _Lane, event: Event) -> DAGNode:
         p, at, type_ = event.payload, event.created_at, event.type
         number = p.get("turn")
         if type(number) is not int:
@@ -319,6 +319,7 @@ class _TaskTrace:
         elif type_ in {"agent.error", "model.provider_error"}:
             turn.meta.update(_fields(p, "message", "kind", "http_status"))
             self._close_turn(lane, turn, "failed", at)
+        return turn
 
     def _tool(self, lane: _Lane, turn: DAGNode, event: Event) -> None:
         group = lane.tools.get(turn.id)
@@ -350,7 +351,7 @@ class _TaskTrace:
             group.meta["failed_count"] = failed
             group.close("failed" if failed else status, at)
 
-    def _check(self, lane: _Lane, event: Event) -> None:
+    def _check(self, lane: _Lane, event: Event) -> DAGNode:
         p, at, type_ = event.payload, event.created_at, event.type
         number = p.get("turn")
         if type(number) is not int:
@@ -377,7 +378,7 @@ class _TaskTrace:
             node.started_at = node.started_at or at
             node.meta["stages"][stage] = {**info, "status": "running"}
             node.close("running", None)
-            return
+            return node
         if stage == "intents" and "passed" not in info:
             checks = _rows(info.get("checks"))
             info["passed"] = all(check.get("passed") is True for check in checks)
@@ -388,6 +389,7 @@ class _TaskTrace:
         if "running" not in statuses:
             status = "failed" if lane.needs_fix else ("succeeded" if "succeeded" in statuses else "skipped")
             node.close(status, at)
+        return node
 
     def _best_of(self, lane: _Lane, type_: str, p: dict, at: datetime | None) -> None:
         if type_ == "best_of.started":
@@ -448,7 +450,7 @@ class _TaskTrace:
         self.merge.meta["counts"] = dict(counts)
         self.merge.close("failed" if counts.keys() - {"merged", "unchanged"} else "succeeded", at)
 
-    def _message(self, event: Event) -> None:
+    def _message(self, event: Event) -> DAGNode:
         p, at = event.payload, event.created_at
         name = p.get("message_id") or str(event.seq)
         node = self.messages.get(name)
@@ -464,6 +466,7 @@ class _TaskTrace:
             node.start(at)
         elif event.type == "user.message.applied":
             node.close("succeeded", at)
+        return node
 
     def _request_review(self, at: datetime | None, p: dict) -> None:
         is_plan = "plan" in p
@@ -511,14 +514,17 @@ class _TaskTrace:
         if p.get("number"):
             self.pr.label = f"拉取请求 #{p['number']}"
 
-    def _read_event(self, event: Event) -> None:
+    def _read_event(self, event: Event) -> DAGNode | None:
         p, at, type_ = event.payload, event.created_at, event.type
         if type_ in {"plan.started", "plan.completed", "plan.rejected"}:
             self._plan_event(event)
+            return self.plans[p.get("attempt") or 1].node
         elif type_ == "task.state_changed":
             self._state_event(event)
+            return self.finish if p.get("to") in TERMINAL_STATES else self.root.node
         elif type_ == "review.requested":
             self._request_review(at, p)
+            return self.review
         elif type_ == "review.submitted":
             if self.review is None or self.review.status != "running":
                 self._request_review(None, p)
@@ -528,7 +534,7 @@ class _TaskTrace:
             if self.merge is None:
                 self._merge(p.get("subtasks"), at)
         elif type_.startswith("user.message"):
-            self._message(event)
+            return self._message(event)
         elif type_ == "pr.opened":
             self._pr(p, at)
         elif type_ == "scm.failed" and self.task.spec.get("pull_request") and p.get("phase") != "terminal":
@@ -536,20 +542,25 @@ class _TaskTrace:
         else:
             lane = self._lane(event)
             if type_ in TURN_EVENTS:
-                self._turn_event(lane, event)
+                return self._turn_event(lane, event)
             elif type_ in {"verification.started", "verification.completed", "intents.checked",
                            "acceptance.completed", "scope.violation", "ci.requested", "ci.completed"}:
-                self._check(lane, event)
+                return self._check(lane, event)
             elif type_ in {"best_of.started", "best_of.attempt_completed", "best_of.selected"}:
                 self._best_of(lane, type_, p, at)
+                if type_ == "best_of.selected":
+                    return lane.select
+                attempt = lane.attempts.get(p.get("attempt"))
+                return attempt.node if attempt else lane.node
             elif type_ == "sandbox.destroyed" and lane.node.kind == "subtask" and not lane.attempts:
                 if lane.tail.kind == "verification":
                     status = "succeeded" if lane.tail.status == "skipped" else lane.tail.status
                     lane.node.close(status, at)
                 elif lane.tail.status == "failed":
                     lane.node.close("failed", at)
+        return None
 
-    def read(self) -> None:
+    def read(self, focus: dict[int, DAGNode] | None = None) -> None:
         self._declare_subtasks(self.task.spec.get("subtasks"))
         self._declare_attempts(self.root, self.task.spec.get("best_of"))
         for row in _rows(self.task.result.get("best_of_plan")):
@@ -569,7 +580,9 @@ class _TaskTrace:
             plan.close("succeeded", self.task.created_at)
             self.plan_gate = self.graph.advance(self.root, plan)
         for event in self.events:
-            self._read_event(event)
+            node = self._read_event(event)
+            if focus is not None and node is not None:
+                focus[event.seq] = node
         if self._plan_attempt is not None:
             lane = self.plans[self._plan_attempt]
             if self.root.tail is lane.node:
@@ -749,3 +762,25 @@ def build_task_dag(task: Task, events: Iterable[Event], children: Iterable[Task]
                 if step is actual or step is child.finish or step.meta.get("parent") == actual.id:
                     step.meta["parent"] = branch.id
     return TaskDAG(nodes=list(graph.nodes.values()), edges=list(graph.edges.values()))
+
+
+# Task conversation
+TASK_MILESTONES = frozenset({
+    "task.created", "task.state_changed", "plan.started", "plan.completed", "plan.rejected",
+    "agent.turn_started", "agent.turn_completed", "agent.turn_interrupted",
+    "verification.completed", "acceptance.completed", "ci.completed", "review.requested",
+    "best_of.started", "best_of.attempt_completed", "best_of.selected",
+    "user.message", "user.message.delivered", "user.message.applied",
+})
+TASK_MILESTONE_CONTEXT = TASK_MILESTONES | TURN_EVENTS | {
+    "subtask.started", "subtasks.merged", "review.submitted", "verification.started",
+    "intents.checked", "scope.violation", "ci.requested", "sandbox.destroyed", "pr.opened", "scm.failed",
+}
+
+
+def task_conversation_nodes(task: Task, events: list[Event]) -> tuple[dict[int, DAGNode], dict[str, DAGNode]]:
+    """Replay the graph's node IDs and tool summaries without building child task graphs."""
+    trace = _TaskTrace(_Graph(), task, events)
+    focus: dict[int, DAGNode] = {}
+    trace.read(focus)
+    return focus, trace.graph.nodes

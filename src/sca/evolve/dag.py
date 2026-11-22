@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import datetime
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -12,11 +12,11 @@ from sca.core.models import TERMINAL_STATES, TaskState
 from sca.core.task_dag import DAGEdge, EdgeKind
 from sca.eval.trajectory import is_errored, overall_passed
 
-Status = Literal["queued", "running", "succeeded", "failed", "stopped"]
-Kind = Literal["evolution", "generation", "candidate", "eval_run", "case_task", "promotion", "champion"]
-ACTIVE = {"queued", "running"}
+Status = Literal["queued", "running", "paused", "succeeded", "failed", "stopped"]
+Kind = Literal["evolution", "generation", "candidate", "eval_run", "case_task", "promotion", "champion", "finish"]
+ACTIVE = {"queued", "running", "paused"}
 RUN_STATUS: dict[str, Status] = {
-    "queued": "queued", "running": "running", "awaiting_approval": "running",
+    "queued": "queued", "running": "running", "paused": "paused", "awaiting_approval": "running",
     "completed": "succeeded", "succeeded": "succeeded", "failed": "failed", "stopped": "stopped",
     "budget_exhausted": "stopped", "patience_exhausted": "stopped", "cancelled": "stopped",
 }
@@ -34,6 +34,7 @@ class EvolutionHistory(TypedDict):
     results: list[dict]
     tasks: list[dict]
     champions: list[dict]
+    generations: NotRequired[list[dict]]
 
 
 class EvolutionNode(BaseModel):
@@ -81,6 +82,14 @@ def _associate_runs(
             if run_id in runs and run_id not in claimed:
                 owned[candidate["id"]][split] = runs[run_id]
                 claimed.add(run_id)
+    candidates_by_id = {str(c['id']): c['id'] for c in candidates}
+    for run in runs.values():
+        step = run['variant'].get('evolution_step') or {}
+        candidate_id = candidates_by_id.get(step.get('candidate_id'))
+        split = run['variant'].get('split')
+        if candidate_id is not None and split in SPLITS and run['id'] not in claimed and split not in owned[candidate_id]:
+            owned[candidate_id][split] = run
+            claimed.add(run['id'])
 
     baseline = next((run for run in runs.values() if run["id"] not in claimed
                      and run["variant"].get("split") == "dev"
@@ -99,6 +108,10 @@ def _associate_runs(
         if run["id"] in claimed or run is baseline:
             continue
         split = run["variant"].get("split")
+        step = run['variant'].get('evolution_step') or {}
+        if step.get('role') == 'comparison' and step.get('generation') in groups:
+            extras[step['generation']].append((run, 'comparison'))
+            continue
         index = bisect_right(candidate_times, run["created_at"]) - 1
         if index < 0:
             extras[0].append((run, "unassigned"))
@@ -184,21 +197,25 @@ def _cost(nodes: list[EvolutionNode]) -> float | None:
 
 def _add_run(
     dag: EvolutionDAG, run: dict, cases: list[EvolutionNode], parents: list[EvolutionNode],
-    *, split: str | None = None, role: str = "candidate",
+    *, split: str | None = None, role: str = "candidate", position: tuple[int, int, int],
 ) -> tuple[EvolutionNode, list[EvolutionNode]]:
     split = split or run["variant"].get("split")
     title = {"baseline": "基线评测", "comparison": "当代冠军评测", "unassigned": "未关联评测"}.get(role, "评测")
     label = f"{title} · {SPLITS[split]}" if split in SPLITS else title
+    band, level, column = position
     scores = [case.score for case in cases if case.score is not None]
     node = EvolutionNode(
         id=f"eval:{run['id']}", kind="eval_run", label=label, status=RUN_STATUS[run["status"]],
         score=sum(scores) / len(scores) if scores else None, cost_usd=_cost(cases),
         started_at=run["created_at"], finished_at=run["finished_at"],
         meta={"run_id": str(run["id"]), "split": split, "role": role,
-              "state": run["status"], "reason": run["variant"].get("reason")},
+              "state": run["status"], "reason": run["variant"].get("reason"),
+              "band": band, "level": level, "column": column,
+              "cases_passed": sum(score == 1 for score in scores)},
     )
     dag.add(node, parents, "sequence")
     for case in cases:
+        case.meta.update(band=band, level=level + 1, column=column)
         dag.add(case, [node], "spawn")
     return node, cases or [node]
 
@@ -228,8 +245,11 @@ def _add_candidate(
     node = EvolutionNode(
         id=f"candidate:{row['id']}", kind="candidate", label=f"候选 {number} · {row['hypothesis']}",
         status=_candidate_status(decision, runs, evolution_status), started_at=row["created_at"],
-        meta={"hypothesis": row["hypothesis"], "decision": decision, "reason": row.get("reason")},
+        meta={"hypothesis": row["hypothesis"], "decision": decision, "reason": row.get("reason"),
+              "band": row['generation'], "level": 1, "column": number},
     )
+    if row.get('reason') == '操作者已跳过候选':
+        node.status = 'stopped'
     dag.add(node, [generation], "spawn")
     costs = []
     tail = [node]
@@ -237,7 +257,8 @@ def _add_candidate(
         metrics = row.get(f"{split}_metrics") or {}
         evaluation = None
         if run := runs.get(split):
-            evaluation, tail = _add_run(dag, run, cases.get(run["id"], []), tail, split=split)
+            evaluation, tail = _add_run(dag, run, cases.get(run["id"], []), tail, split=split,
+                                        position=(row['generation'], 2 if split == 'dev' else 4, number))
         if split == "dev":
             node.score = metrics.get("pass_rate")
             if node.score is None and evaluation is not None:
@@ -267,7 +288,9 @@ def _promotion(
     return EvolutionNode(
         id=f"promotion:{number}", kind="promotion", label=f"晋升决定 · {title}", status=state,
         score=winner.score if winner else None,
-        meta={"decision": decision, "reason": winner.meta["reason"] if winner else None},
+        meta={"decision": decision, "reason": winner.meta["reason"] if winner else None,
+              "band": number, "level": 6, "column": 0,
+              "winner_column": winner.meta['column'] if winner else None},
     )
 
 
@@ -277,26 +300,38 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
     root = EvolutionNode(
         id=f"evolution:{row['id']}", kind="evolution", label=f"演进 · {str(row['id'])[:8]}", status=status,
         cost_usd=float(row["spent_usd"]), started_at=row["created_at"], finished_at=row["finished_at"],
-        meta={"state": row["status"], "reason": row["config"].get("reason"), "model": row["config"].get("model")},
+        meta={"state": row["status"], "reason": row["config"].get("reason"), "model": row["config"].get("model"),
+              "band": 0, "level": 0, "column": 0},
     )
     dag = EvolutionDAG(nodes=[root], edges=[])
     groups: dict[int, list[dict]] = defaultdict(list)
     for candidate in sorted(_ordered(history["candidates"]), key=lambda c: c["generation"]):
         groups[candidate["generation"]].append(candidate)
+    starts = {entry['generation']: entry['created_at'] for entry in history.get('generations', [])}
+    for number in starts:
+        groups.setdefault(number, [])
     promoted = {row["candidate_id"]: row for row in history["champions"]}
     cases = _cases(history)
     baseline, owned, extras = _associate_runs(history, groups, promoted)
     tail = [root]
     if baseline:
-        initial, tail = _add_run(dag, baseline, cases.get(baseline["id"], []), tail, role="baseline")
+        initial, tail = _add_run(dag, baseline, cases.get(baseline["id"], []), tail,
+                                 role="baseline", position=(0, 1, 1))
         root.score = initial.score
-    for run, role in extras[0]:
-        _add_run(dag, run, cases.get(run["id"], []), [root], role=role)
+    for column, (run, role) in enumerate(extras[0], start=2 if baseline else 1):
+        _add_run(dag, run, cases.get(run["id"], []), [root], role=role, position=(0, 1, column))
 
-    for number, group in groups.items():
+    last = max(groups, default=0)
+    final_champion = None
+    for number, group in sorted(groups.items()):
         generation = EvolutionNode(id=f"generation:{number}", kind="generation", label=f"第 {number} 代",
-                                   status="queued", started_at=group[0]["created_at"])
+                                   status="queued", started_at=starts.get(number) or group[0]["created_at"],
+                                   meta={'band': number, 'level': 0, 'column': 0})
         dag.add(generation, tail, "sequence")
+        if not group:
+            generation.status = status if status in ACTIVE or status == 'failed' else 'stopped'
+            tail = [generation]
+            continue
         branches, feeders = [], []
         winner = None
         champion = None
@@ -309,8 +344,10 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
             if node.meta["decision"] == "promoted":
                 winner, champion = node, registered
         evaluations = []
-        for run, role in extras[number]:
-            evaluation, ends = _add_run(dag, run, cases.get(run["id"], []), [generation], role=role)
+        for column, (run, role) in enumerate(extras[number], start=len(group) + 1):
+            level = 4 if run['variant'].get('split') == 'holdout' else 2
+            evaluation, ends = _add_run(dag, run, cases.get(run["id"], []), [generation],
+                                        role=role, position=(number, level, column))
             evaluations.append(evaluation)
             feeders.extend(ends)
         generation.cost_usd = _cost(branches + evaluations)
@@ -328,13 +365,38 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
         tail = [decision]
         if champion:
             dev = champion["metrics"].get("dev") or {}
+            is_best = champion["id"] == row.get("best_champion_id")
+            final_band = is_best and number == last and status not in ACTIVE and status != 'failed'
             champion_node = EvolutionNode(
                 id=f"champion:{champion['id']}", kind="champion", label=f"冠军 · {str(champion['id'])[:8]}",
                 status="succeeded", score=dev.get("pass_rate"), cost_usd=dev.get("cost_usd"),
-                started_at=champion["created_at"], meta={"champion_id": str(champion["id"])},
+                started_at=champion["created_at"], meta={"champion_id": str(champion["id"]), "best": is_best,
+                    "band": number + int(final_band), "level": 0 if final_band else 7, "column": 0,
+                    **({"band_title": "冠军"} if final_band else {})},
             )
             dag.add(champion_node, tail, "select")
             tail = [champion_node]
-            if champion["id"] == row.get("best_champion_id"):
+            if is_best:
                 root.score = champion_node.score
+                final_champion = champion_node
+
+    _result_band(dag, root, tail, final_champion, last, row['finished_at'])
     return dag
+
+
+def _result_band(dag: EvolutionDAG, root: EvolutionNode, tail: list[EvolutionNode],
+                 champion: EvolutionNode | None, last: int, at: datetime | None) -> None:
+    if root.status in ACTIVE or at is None or (champion is not None and champion.meta.get('band_title')):
+        return
+    label = '演进失败' if root.status == 'failed' else '演进结果'
+    meta = {'band': last + 1, 'level': 0, 'column': 0, 'band_title': '结果', 'reason': root.meta['reason']}
+    if root.status == 'failed':
+        reason = str(root.meta['reason'] or '')
+        failed = next((node for node in dag.nodes if node.kind == 'eval_run' and node.meta['run_id'] in reason), None)
+        critical = failed or tail[-1]
+        critical.meta['critical_failure'] = True
+    elif champion is not None:
+        label = '最终' + champion.label
+        meta.update(champion_id=champion.meta['champion_id'], band_title='冠军')
+    dag.add(EvolutionNode(id=f'{root.id}/finish', kind='finish', label=label, status=root.status,
+                          finished_at=at, meta=meta), tail, 'sequence')
