@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import suppress
+from math import ceil
 from pathlib import Path
 from typing import Literal
 from uuid import uuid4
@@ -22,7 +23,8 @@ from sca.sandbox._exec import NODE_RUNTIME_DIR, NODE_RUNTIME_LABEL
 
 NODE_VERSION = "24.22.3"
 NODE_IMAGE = f"node:{NODE_VERSION}-bookworm-slim"
-MAX_RUNTIME_BYTES = 270_000_000
+BYTES_PER_MB = 1_000_000
+INSTALL_HEADROOM_MB = 1000
 PACKAGES = {"dsh": "@deepseek-ai/dsh", "pi": "@earendil-works/pi-coding-agent"}
 
 INSTALL = r"""
@@ -61,7 +63,11 @@ class DockerNodeRuntime:
         self.version = getattr(settings, backend + "_version")
         self.docker = settings.docker_bin
         self.platform = "linux/amd64" if settings.container_arch == "x64" else "linux/arm64"
-        self.root = settings.data_dir.resolve() / "tools" / "docker-node"
+        self.data_dir = settings.data_dir.resolve()
+        self.root = self.data_dir / "tools" / "docker-node"
+        self.max_mb = (
+            settings.node_runtime_max_mb if backend == "dsh" else settings.pi_node_runtime_max_mb
+        )
         tag = f"{NODE_VERSION}-linux-{settings.container_arch}"
         self.node = self.root / f"node-{tag}"
         self.agent = self.root / f"{backend}-{self.version}-node-{tag}"
@@ -100,10 +106,17 @@ class DockerNodeRuntime:
                 name = "DeepSeek Harness" if self.backend == "dsh" else "Pi"
                 print(f"准备 Docker 模式的 {name} {self.version} 运行时…", flush=True)
                 size = self._install(need_node)
-                print(f"{name} Docker 运行时已准备（{size / 1e6:.0f} MB）", flush=True)
+                print(f"{name} Docker 运行时已准备（{size / BYTES_PER_MB:.0f} MB）", flush=True)
             self._prune_versions()
 
     def _install(self, need_node: bool) -> int:
+        required_mb = self.max_mb + INSTALL_HEADROOM_MB
+        free_mb = shutil.disk_usage(self.data_dir).free // BYTES_PER_MB
+        if free_mb < required_mb:
+            raise SandboxError(
+                f"{self.backend} Docker 运行时安装磁盘空间不足"
+                f"（SCA_DATA_DIR 需要至少 {required_mb} MB，可用 {free_mb} MB）"
+            )
         with tempfile.TemporaryDirectory(prefix=".install-", dir=self.root) as directory:
             stage = Path(directory)
             name = f"sca-node-install-{uuid4().hex}"
@@ -134,8 +147,11 @@ class DockerNodeRuntime:
             if not os.access(node / "bin" / "node", os.X_OK) or not self.installed(agent):
                 raise SandboxError(f"{self.backend} Docker 运行时安装不完整")
             size = allocated_bytes(node, agent)
-            if size > MAX_RUNTIME_BYTES:
-                raise SandboxError(f"{self.backend} Docker 运行时超过磁盘上限（{size / 1e6:.0f} MB）")
+            if size > self.max_mb * BYTES_PER_MB:
+                raise SandboxError(
+                    f"{self.backend} Docker 运行时超过磁盘上限"
+                    f"（占用 {ceil(size / BYTES_PER_MB)} MB，上限 {self.max_mb} MB）"
+                )
             if need_node:
                 self._publish(node, self.node)
             self._publish(agent, self.agent)

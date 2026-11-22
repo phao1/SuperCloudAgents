@@ -12,6 +12,7 @@ import httpx
 import pytest
 from pydantic import ValidationError
 
+from sca.agents import docker_node
 from sca.agents.docker_node import NODE_IMAGE, DockerNodeRuntime
 from sca.agents.dsh import KEY_ENV, LAUNCH, OVERLAY_FILENAME, OVERLAY_MODULE, DshBackend
 from sca.config import Settings
@@ -435,8 +436,9 @@ console.log(JSON.stringify({type: 'final', sessionId, reason: {kind: 'completed'
 async def test_docker_runtime_is_pinned_reused_and_prunes_unmounted_versions(
     tmp_path, monkeypatch, arch, platform, oversized,
 ):
-    from sca.agents import docker_node
-
+    monkeypatch.delenv("SCA_NODE_RUNTIME_MAX_MB", raising=False)
+    if oversized:
+        monkeypatch.setenv("SCA_NODE_RUNTIME_MAX_MB", "1000")
     settings = Settings(_env_file=None, container_arch=arch, data_dir=tmp_path, docker_bin="fixture-docker")
     runtime = DockerNodeRuntime(settings, "dsh")
     runtime.root.mkdir(parents=True)
@@ -444,6 +446,11 @@ async def test_docker_runtime_is_pinned_reused_and_prunes_unmounted_versions(
     stale.mkdir()
     in_use.mkdir()
     calls = []
+    free_bytes = 2_000_000_000 if oversized else 3_000_000_000
+
+    def fake_disk_usage(path):
+        assert path == settings.data_dir.resolve()
+        return SimpleNamespace(free=free_bytes)
 
     def fake_install(args, **kwargs):
         calls.append(args)
@@ -470,19 +477,45 @@ async def test_docker_runtime_is_pinned_reused_and_prunes_unmounted_versions(
     monkeypatch.setattr(docker_node.os, "getgid", lambda: 1000, raising=False)
     monkeypatch.setattr(docker_node.subprocess, "run", fake_install)
     monkeypatch.setattr(docker_node.subprocess, "check_output", fake_check_output)
+    monkeypatch.setattr(docker_node.shutil, "disk_usage", fake_disk_usage)
+    monkeypatch.setattr(docker_node, "allocated_bytes", lambda *paths: 1_179_000_000)
     if oversized:
-        monkeypatch.setattr(docker_node, "MAX_RUNTIME_BYTES", 0)
-        with pytest.raises(SandboxError, match="超过磁盘上限"):
+        with pytest.raises(SandboxError, match="超过磁盘上限.*占用 1179 MB，上限 1000 MB"):
             await runtime.mounts()
         assert stale.is_dir() and not runtime.agent.exists()
+        assert not runtime.node.exists()
         assert not list(runtime.root.glob(".install-*"))
         return
     mounts = await runtime.mounts()
+    free_bytes = 0
     assert mounts == await runtime.mounts()
     assert [mount.target for mount in mounts] == [NODE_RUNTIME_DIR, "/opt/sca-dsh"]
     assert all(mount.read_only for mount in mounts)
     assert (runtime.node / "bin/node").is_file()
     assert len(calls) == 1 and not stale.exists() and in_use.is_dir()
+    assert not list(runtime.root.glob(".install-*"))
+
+
+@pytest.mark.parametrize("backend,required_mb", [("dsh", 3000), ("pi", 1270)])
+def test_docker_runtime_rejects_low_disk_before_install(tmp_path, monkeypatch, backend, required_mb):
+    monkeypatch.delenv("SCA_NODE_RUNTIME_MAX_MB", raising=False)
+    monkeypatch.delenv("SCA_PI_NODE_RUNTIME_MAX_MB", raising=False)
+    settings = Settings(_env_file=None, data_dir=tmp_path / "data")
+    runtime = DockerNodeRuntime(settings, backend)
+
+    def fake_disk_usage(path):
+        assert path == settings.data_dir.resolve() and path.is_dir()
+        return SimpleNamespace(free=required_mb * 1_000_000 - 1)
+
+    def unexpected_install(*args, **kwargs):
+        pytest.fail("Docker installer started with insufficient disk space")
+
+    monkeypatch.setattr(docker_node.shutil, "disk_usage", fake_disk_usage)
+    monkeypatch.setattr(docker_node.subprocess, "run", unexpected_install)
+    with pytest.raises(
+        SandboxError, match=rf"{backend}.*需要至少 {required_mb} MB，可用 {required_mb - 1} MB",
+    ):
+        runtime.prepare()
     assert not list(runtime.root.glob(".install-*"))
 
 

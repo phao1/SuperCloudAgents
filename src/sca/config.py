@@ -330,6 +330,10 @@ class Settings(BaseSettings):
                 self.default_model = "deepseek-flash"
         return self
 
+    # Mounted Docker runtimes for Node agents
+    node_runtime_max_mb: int = Field(default=2000, ge=1)
+    pi_node_runtime_max_mb: int = Field(default=270, ge=1)
+
 
 # Local source mode
 SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"
