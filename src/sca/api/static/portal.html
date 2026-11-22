@@ -6,6 +6,7 @@
 <title>SuperCloudAgents · 工作台</title>
 <link rel="stylesheet" href="/portal/assets/portal-operations.css">
 <link rel="stylesheet" href="/portal/assets/task-dag.css">
+<link rel="stylesheet" href="/portal/assets/portal-conversation.css">
 <style>
 :root {
   color-scheme: light;
@@ -672,6 +673,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <p id="task-terminal-status" class="status-text" role="status"></p>
           <pre id="task-terminal-output" class="portal-terminal" tabindex="0" aria-label="终端输出"></pre>
         </div>
+        <div class="portal-run-workbench">
         <section id="task-dag" class="panel task-dag" aria-labelledby="task-dag-title">
           <div class="panel-head">
             <h2 id="task-dag-title">执行图 DAG</h2>
@@ -700,6 +702,8 @@ body[data-trace-expanded] { overflow: hidden; }
           </svg>
           <aside class="dag-detail" aria-label="节点详情" aria-live="polite" hidden></aside>
         </section>
+        <section id="task-conversation" aria-label="任务对话"></section>
+        </div>
         <section id="swimlane" aria-labelledby="task-time-title">
           <header class="task-time-toolbar">
             <h3 id="task-time-title">执行泳道</h3>
@@ -793,18 +797,6 @@ body[data-trace-expanded] { overflow: hidden; }
           </div>
           <details><summary>任务规格与结果</summary><pre id="task-summary"></pre></details>
           <div class="stack"><h3>事件记录</h3><div id="timeline"></div></div>
-          <form id="task-message-form" class="task-message-form stack" data-access="member" hidden>
-            <fieldset id="task-message-controls" class="stack" disabled>
-              <label for="task-message-text">插话：给正在运行的任务补充要求</label>
-              <textarea id="task-message-text" rows="2" maxlength="4000" required
-                        placeholder="回车发送，Shift + 回车换行"></textarea>
-              <div class="form-actions">
-                <label class="portal-check"><input id="task-message-interrupt" type="checkbox">立即打断当前轮</label>
-                <button type="submit" class="primary">发送</button>
-              </div>
-            </fieldset>
-            <p id="task-message-status" class="status-text portal-message" role="status"></p>
-          </form>
           <div id="task-missing-artifacts-panel" class="stack" hidden>
             <h3>缺失的文件</h3><ul id="task-missing-artifacts"></ul>
           </div>
@@ -940,6 +932,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
 <script src="/portal/assets/portal-ui.js"></script>
+<script src="/portal/assets/portal-conversation.js"></script>
 <script src="/portal/assets/portal-markdown.js"></script>
 <script src="/portal/assets/portal-tasks.js"></script>
 <script src="/portal/assets/portal-evolution.js"></script>

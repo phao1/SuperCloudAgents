@@ -33,10 +33,13 @@
 .dag-node[data-status="cancelled"], .dag-node[data-status="stopped"] {
   --node-ink: var(--warn); --node-bg: var(--warn-bg);
 }
+.dag-node[data-status="paused"] { --node-ink: var(--warn); --node-bg: var(--warn-bg); }
 .dag-node[data-status="skipped"] { --node-bg: var(--subtle); }
-.dag-node rect { fill: var(--node-bg); stroke: var(--node-ink); stroke-width: 1.5; }
-.dag-node[data-status="skipped"] rect { stroke-dasharray: 4 3; }
-.dag-node[aria-pressed="true"] rect, .dag-node:focus-visible rect { stroke-width: 3; }
+.dag-node-shape { fill: var(--node-bg); stroke: var(--node-ink); stroke-width: 1.5; }
+.dag-node[data-status="skipped"] .dag-node-shape { stroke-dasharray: 4 3; }
+.dag-node[aria-pressed="true"] .dag-node-shape, .dag-node:focus-visible .dag-node-shape {
+  stroke: var(--accent); stroke-width: 4;
+}
 .dag-node foreignObject { pointer-events: none; }
 .dag-node-label, .dag-node-state, .dag-node-counts {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -65,6 +68,25 @@
 .dag-detail li + li { margin-top: 4px; }
 .dag-detail summary { cursor: pointer; }
 .dag-detail code { white-space: pre-wrap; }
+.dag-band rect { fill: var(--panel); fill-opacity: .75; stroke: var(--line); }
+.dag-band text { fill: var(--muted); font-size: 13px; font-weight: 600; }
+.dag-type-legend { margin-bottom: 6px; }
+.dag-type-stage { --type-ink: var(--accent); --type-round: 6px; }
+.dag-type-branch { --type-ink: light-dark(#7953a4, #c5a3fb); --type-round: 4px 0; }
+.dag-type-work { --type-ink: var(--muted); --type-round: 3px; }
+.dag-type-check { --type-ink: light-dark(#176884, #76cce6); --type-round: 1px; }
+.dag-type-decision { --type-ink: var(--warn); --type-round: 6px 2px; }
+.dag-type-result { --type-ink: var(--good); --type-round: 20px; }
+.dag-type-key { inline-size: 13px; block-size: 10px; background: var(--type-ink); border-radius: var(--type-round); }
+.dag-node-type-mark { fill: none; stroke: var(--type-ink); stroke-width: 3; stroke-linecap: round; }
+.dag-path-key:empty { display: none; }
+[data-path="failure"] { --path-ink: var(--bad); }
+[data-path="champion"], [data-path="success"] { --path-ink: var(--good); }
+.dag-path-key { color: var(--path-ink); font-weight: 650; }
+.dag-edge[data-path]:not([data-path=""]) { stroke: var(--path-ink); stroke-width: 3.1; }
+.dag-node[data-path]:not([data-path=""], [aria-pressed="true"], :focus-visible) .dag-node-shape {
+  stroke: var(--path-ink); stroke-width: 3;
+}
 @media (max-width: 550px) {
   .dag-controls button { min-height: 44px; }
 }

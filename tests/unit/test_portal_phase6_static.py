@@ -11,7 +11,7 @@ import pytest
 
 STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
-    "portal-ui.js", "portal-markdown.js", "portal-tasks.js",
+    "portal-ui.js", "portal-conversation.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
@@ -53,7 +53,7 @@ def test_phase6_portal_navigation_and_local_assets():
     ):
         assert parser.nav[route] == (role, True)
         assert f"""'{route}-page','{title}'""" in source
-    for name in (*ASSETS, "portal-operations.css"):
+    for name in (*ASSETS, "portal-operations.css", "portal-conversation.css"):
         assert "/portal/assets/" + name in parser.refs
     assert all(not urlsplit(ref).scheme and not urlsplit(ref).netloc for ref in parser.refs)
     assert "'/portal/whoami'" in source
@@ -81,9 +81,10 @@ def test_project_dialog_visibility_uses_the_native_open_state():
         ("portal-ui.js", ("/v1/files",)),
         ("portal-tasks.js", ("/tasks", "/tools/available", "/best-of", "/select",
                              "/impact", "/terminal", "/artifacts/report.md", "/pr")),
+        ("portal-conversation.js", ("/messages",)),
         ("portal-evolution.js", ("/evolutions", "/evolution-schedules", "/champions",
                                  "/champions/rollouts", "/evals/harvest", "/run-now",
-                                 "/approve", "/reject", "/stop", "/rollback", "/solidify")),
+                                 "/approve", "/reject", "/rollback", "/solidify")),
         ("portal-settings.js", ("/tools", "/grants", "/knowledge/documents",
                                 "/knowledge/search", "/integrations/scm", "/v1/webhooks/",
                                 "/tenant/members", "/tenant/tokens", "/portal/tenant-quota",
@@ -185,7 +186,7 @@ def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
     assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
-    assert 'id="task-message-form" class="task-message-form stack" data-access="member" hidden' in source
+    assert 'id="task-conversation" aria-label="任务对话"' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
     node = shutil.which("node") or Path.home() / ".local/bin/node"
@@ -215,11 +216,12 @@ const localStorage={getItem:key=>key==='sca-portal-token'&&!guest?'fixture-membe
 class Element {
   constructor(id) {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
-    this.classList={toggle(){}};
+    this.classList={add(){},toggle(){}};
     this.attributes=new Map();
   }
   get options(){return this.children}
   append(...nodes){this.children.push(...nodes)}
+  prepend(...nodes){this.children.unshift(...nodes)}
   replaceChildren(...nodes){this.children=nodes}
   addEventListener(){}
   hasAttribute(name){return this.attributes.has(name)}
@@ -282,7 +284,9 @@ global.fetch=async (path,request)=>{
     [taskPath]:task,
     [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}}],
     [taskPath+'/artifacts']:artifacts,
+    [taskPath+'/conversation?limit=100']:{items:[],cursor:'0',has_more:false},
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
+    [evolutionPath+'/conversation?limit=100']:{items:[],cursor:'e:0',has_more:false},
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
   return {ok:true,json:async()=>fixtures[path]||[]};
@@ -353,7 +357,8 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await route();
     assert(walk($('evolution-content')).includes($('evolution-dag')));
     assert(!['停止演进','批准','拒绝'].some(label=>content().includes(label)));
-    assert.equal(calls.at(-1),evolutionPath+'/dag');
+    assert(calls.includes(evolutionPath+'/dag'));
+    assert(calls.includes(evolutionPath+'/conversation?limit=100'));
     await refresh();
     assert.equal(calls.filter(path=>path===evolutionPath+'/dag').length,2);
 
@@ -432,7 +437,7 @@ def serve_portal(route, path):
         route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
         return True
     name = path.rsplit("/", 1)[-1]
-    if name in {*ASSETS, "portal-operations.css", "task-dag.css", "task-flow.js", "task-timeline.js"}:
+    if name in {*ASSETS, "portal-operations.css", "portal-conversation.css", "task-dag.css", "task-flow.js", "task-timeline.js"}:
         kind = "text/javascript" if name.endswith(".js") else "text/css"
         route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
         return True
@@ -494,6 +499,7 @@ def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
         assert page.locator("#evolution-nav").get_by_role("link").count() == 2
         page.locator(f'#evolution-content a[href="#/evolutions/runs/{evolution_id}"]').click()
         panel = page.locator("#evolution-dag")
+        assert page.locator('#evolution-conversation form').is_hidden()
         evaluation = panel.locator('[data-node="evaluate"]')
         evaluation.wait_for()
         assert evaluation.get_attribute("aria-expanded") == "false"
@@ -527,6 +533,129 @@ def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
             assert page.get_by_role("button", name=label, exact=True).count() == 0
         assert page.get_by_role("link", name="设置灰度").count() == 0
         assert not any(path.startswith("/v1/evolution-schedules") or "rollouts" in path for path in requests)
+
+
+def test_portal_browser_launches_evolution_and_steers_through_the_conversation():
+    evolution_id = 'evolution-fixture'
+    path = f'/v1/evolutions/{evolution_id}'
+    root, generation, run = f'evolution:{evolution_id}', 'generation:1', 'eval:baseline'
+    at = '2026-11-22T00:00:00Z'
+    row = {'id': evolution_id, 'status': 'running', 'spent_usd': .01, 'created_at': at,
+           'config': {'suite': 'dsh-smoke', 'agent_backend': 'dsh', 'model': 'model-a', 'budget_usd': 1},
+           'candidates': [], 'journal': []}
+    graph = {'nodes': [
+        {'id': root, 'kind': 'evolution', 'label': '演进', 'status': 'running',
+         'meta': {'band': 0, 'level': 0, 'column': 0}},
+        {'id': run, 'kind': 'eval_run', 'label': '基线评测', 'status': 'succeeded', 'score': 1,
+         'meta': {'band': 0, 'level': 1, 'column': 1, 'cases_passed': 1}},
+        {'id': 'case', 'kind': 'case_task', 'label': '用例一', 'status': 'succeeded',
+         'meta': {'band': 0, 'level': 2, 'column': 1, 'parent': run}},
+        {'id': generation, 'kind': 'generation', 'label': '第 1 代', 'status': 'running',
+         'meta': {'band': 1, 'level': 0, 'column': 0}},
+    ], 'edges': [{'from': start, 'to': end, 'kind': 'sequence'} for start, end in (
+        (root, run), (run, 'case'), ('case', generation),
+    )]}
+    journal = [{'id': 'baseline', 'kind': 'evaluation', 'text': '基线评测结果 · 1/1 通过 · $0.01',
+                'created_at': at, 'dag_node_id': run}]
+    starts, messages, cursors = [], [], []
+
+    def handle(route):
+        url = urlsplit(route.request.url)
+        if serve_portal(route, url.path):
+            return
+        if url.path == '/v1/evolutions' and route.request.method == 'POST':
+            starts.append(route.request.post_data_json)
+            route.fulfill(status=201, json={'id': evolution_id})
+        elif url.path == path + '/messages':
+            body = route.request.post_data_json
+            messages.append(body)
+            mode = body['mode']
+            if mode == 'pause':
+                row['status'] = 'paused'
+            elif mode == 'resume':
+                row['status'] = 'running'
+            if mode == 'guidance':
+                journal.extend([
+                    {'id': 'hint', 'kind': 'message', 'text': body['text'], 'actor': 'operator',
+                     'created_at': at, 'dag_node_id': root},
+                    {'id': 'applied', 'kind': 'receipt', 'text': '已应用于第 1 代提议',
+                     'created_at': at, 'dag_node_id': generation},
+                ])
+            route.fulfill(status=202, json={})
+        elif url.path == path + '/conversation':
+            match = re.search(r'cursor=(\d+)', url.query)
+            offset = int(match[1]) if match else 0
+            cursors.append(offset)
+            route.fulfill(json={'items': journal[offset:], 'cursor': str(len(journal)), 'has_more': False})
+        else:
+            fixtures = {
+                '/v1/portal/whoami': {'role': 'admin', 'tenant_id': 'eval'},
+                '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'default_agent_backend': 'dsh'},
+                '/v1/agents/opencode/versions': [{'version': 'fixture-opencode'}],
+                '/v1/evals/suites': [
+                    {'name': 'dsh-smoke', 'cases': ['a', 'b', 'c'], 'case_metadata': {
+                        'a': {'split': 'dev'}, 'b': {'split': 'dev'}, 'c': {'split': 'holdout'},
+                    }},
+                    {'name': 'opencode-evolve', 'cases': ['a', 'b'], 'case_metadata': {
+                        'a': {'split': 'dev'}, 'b': {'split': 'holdout'},
+                    }},
+                    {'name': 'dev-only', 'cases': ['a'], 'case_metadata': {'a': {'split': 'dev'}}},
+                ],
+                path: row, path + '/dag': graph,
+            }
+            route.fulfill(json=fixtures.get(url.path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page(viewport={'width': 1400, 'height': 950})
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
+        page.route('**/*', handle)
+        page.goto('http://portal.test/portal#/evolutions')
+        start = page.get_by_role('button', name='开始演进', exact=True)
+        start.wait_for()
+        form = page.locator('#evolution-content form')
+        backend, suite = form.get_by_label('Agent 后端'), form.get_by_label('评测套件')
+        assert backend.input_value() == 'dsh' and suite.input_value() == 'dsh-smoke'
+        assert suite.locator('option').all_text_contents() == [
+            'dsh-smoke · 开发集 2 · 留出集 1', 'opencode-evolve · 开发集 1 · 留出集 1',
+        ]
+        backend.select_option('opencode')
+        assert suite.input_value() == 'opencode-evolve'
+        assert form.get_by_label('基线版本').input_value() == 'fixture-opencode'
+        backend.select_option('dsh')
+        form.get_by_label('评测模型').fill('model-b')
+        form.get_by_label('总预算（美元）').fill('0.5')
+        start.click()
+        page.wait_for_url(f'**/portal#/evolutions/runs/{evolution_id}')
+        assert {key: starts[0][key] for key in ('agent_backend', 'suite', 'model', 'generations', 'candidates',
+                                                'repeat', 'budget_usd')} == {
+            'agent_backend': 'dsh', 'suite': 'dsh-smoke', 'model': 'model-b', 'generations': 1,
+            'candidates': 2, 'repeat': 1, 'budget_usd': .5,
+        }
+        panel, chat = page.locator('#evolution-dag'), page.locator('#evolution-conversation')
+        panel.locator('[data-band="基线"]').wait_for()
+        assert '1 个用例 · 1 通过' in panel.locator(f'[data-node="{run}"]').get_attribute('aria-label')
+        assert chat.bounding_box()['x'] > panel.bounding_box()['x']
+        chat.get_by_role('link', name='定位节点').click()
+        assert panel.locator(f'[data-node="{run}"]').get_attribute('aria-pressed') == 'true'
+        assert panel.locator(f'[data-node="{run}"]').get_attribute('aria-expanded') == 'false'
+        prompt = chat.get_by_role('textbox', name='给下一代提议的指引')
+        prompt.fill('留意边界条件')
+        prompt.press('Enter')
+        chat.get_by_text('已应用于第 1 代提议', exact=True).wait_for()
+        assert chat.locator('.conversation-user').get_by_text('留意边界条件').is_visible()
+        assert messages[-1] == {'text': '留意边界条件', 'mode': 'guidance'}
+        assert 1 in cursors
+        chat.get_by_text('已应用于第 1 代提议', exact=True).locator('..').get_by_role('link').click()
+        assert panel.locator(f'[data-node="{generation}"]').get_attribute('aria-pressed') == 'true'
+        chat.get_by_role('button', name='暂停', exact=True).click()
+        chat.get_by_role('button', name='恢复', exact=True).wait_for(timeout=6000)
+        chat.get_by_role('button', name='恢复', exact=True).click()
+        assert [msg['mode'] for msg in messages] == ['guidance', 'pause', 'resume']
+        page.set_viewport_size({'width': 820, 'height': 850})
+        assert chat.bounding_box()['y'] > panel.bounding_box()['y']
+        row['status'] = 'stopped'
+        chat.get_by_text('演进已结束，无法发送消息。').wait_for(timeout=6000)
+        assert prompt.is_disabled()
 
 
 @pytest.mark.parametrize("destination", ["projects", "task"])

@@ -61,6 +61,19 @@ async def test_holdout_reflection_forbidden(tmp_path):
     gateway.complete.assert_not_awaited()
 
 
+async def test_operator_guidance_has_priority_in_both_prompts(tmp_path):
+    activities, _, gateway, request = setup(tmp_path)
+    request['operator_guidance'] = 'Prefer narrower checks.'
+    await activities.propose(request)
+    for call in gateway.complete.call_args_list:
+        system, context = call.args[0]
+        assert system['role'] == 'system' and 'Operator guidance (highest priority' in system['content']
+        assert 'Prefer narrower checks.' in system['content']
+        assert 'Never alter permissions or sandbox policy' in system['content']
+        assert 'Prefer narrower checks.' not in context['content']
+        assert 'HOLDOUT_MARKER' not in context['content']
+
+
 @pytest.mark.parametrize('response', ['not json', '{}', '[{"hypothesis": 3}]'])
 async def test_bad_model_output_is_journaled_invalid(tmp_path, response):
     activities, _, gateway, request = setup(tmp_path)

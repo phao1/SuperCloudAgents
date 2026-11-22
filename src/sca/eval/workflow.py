@@ -12,6 +12,14 @@ from sca.orchestration.provider_errors import patched_provider_account_error
 
 @workflow.defn
 class EvalRunWorkflow:
+    def __init__(self) -> None:
+        self.skip_requested = False
+
+    @workflow.signal
+    def skip_evolution_candidate(self) -> None:
+        if workflow.patched('eval-skip-evolution-candidate'):
+            self.skip_requested = True
+
     @workflow.run
     async def run(self, request: dict) -> str:
         options = {"start_to_close_timeout": timedelta(minutes=1)}
@@ -43,7 +51,8 @@ class EvalRunWorkflow:
         spent = 0
         collected = errored = 0
         pending = [(case, repeat) for repeat in range(request["repeat"]) for case in plan["cases"]]
-        while pending:
+        candidate_run = bool(request.get('evolution_step', {}).get('candidate_id'))
+        while pending and not (candidate_run and self.skip_requested):
             batch = []
             for _ in range(min(request["concurrency"], len(pending))):
                 if spent + round(request["case_budget"] * 1e6) * (len(batch) + 1) > round(request["budget"] * 1e6):
@@ -68,6 +77,8 @@ class EvalRunWorkflow:
                         del active[task_id]
                 if active:
                     await workflow.sleep(2)
+        if candidate_run and self.skip_requested:
+            return 'cancelled', '操作者已跳过候选'
         if errored * 2 > collected:
             return "failed", f"评测执行错误（{errored}/{collected} 个已执行用例），请查看任务日志"
         return ("budget_exhausted" if pending else "completed"), None

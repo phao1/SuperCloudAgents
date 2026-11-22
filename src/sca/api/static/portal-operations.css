@@ -49,9 +49,6 @@
   #evolution-candidates .diff { max-width: 65vw; }
 }
 
-.task-message-form { border-top: 1px solid var(--line); padding-top: 14px; }
-.task-message-form fieldset { border: 0; margin: 0; padding: 0; min-inline-size: 0; }
-.task-message-form textarea { min-height: 64px; }
 .event-card.task-message-card { border-color: var(--accent); background: var(--accent-bg); }
 .task-message-bubble { white-space: pre-wrap; overflow-wrap: anywhere; }
 

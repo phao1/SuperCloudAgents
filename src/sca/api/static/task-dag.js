@@ -6,7 +6,7 @@ const SCATaskDAG = (() => {
   const minScale = .85;
   const statusLabels = {
     pending: '待执行', running: '运行中', succeeded: '已完成',
-    failed: '失败', cancelled: '已取消', skipped: '已跳过', queued: '排队中', stopped: '已停止',
+    failed: '失败', cancelled: '已取消', skipped: '已跳过', queued: '排队中', stopped: '已停止', paused: '已暂停',
   };
   const kindLabels = {
     task: '任务', plan: '规划', subtask: '子任务', attempt: '候选', execution: '执行', turn: 'Agent 轮次',
@@ -18,6 +18,15 @@ const SCATaskDAG = (() => {
   const edgeKinds = ['sequence', 'dependency', 'spawn', 'select', 'merge'];
   const edgePriority = {sequence: 0, spawn: 1, merge: 2, dependency: 3, select: 4};
   const executionKinds = new Set(['turn', 'fix', 'tool_group', 'verification']);
+  const nodeTypes = {
+    task: 'stage', evolution: 'stage', generation: 'stage', plan: 'stage',
+    candidate: 'branch', attempt: 'branch', subtask: 'branch',
+    verification: 'check', ci: 'check', eval_run: 'check', case_task: 'check',
+    promotion: 'decision', merge: 'decision', review: 'decision',
+    champion: 'result', finish: 'result',
+  };
+  const typeLabels = {stage: '阶段', branch: '候选 / 子任务', work: '执行 / 插话',
+    check: '评测 / 验证', decision: '决策 / 审核', result: '结果'};
   const edgeKey = (from, to) => JSON.stringify([from, to]);
   const percentFormat = new Intl.NumberFormat('zh-CN', {style: 'percent', maximumFractionDigits: 1});
   let nextRenderer = 0;
@@ -147,7 +156,7 @@ const SCATaskDAG = (() => {
       if (edge.kind === 'dependency') addToList(dependencies, edge.to, edge.from);
     }
     // A planned subtask with a dependency already has a path from the plan through that dependency.
-    return {nodes, edges: [...edges.values()].filter(({from, to, kind}) =>
+    return {nodes, hidden, edges: [...edges.values()].filter(({from, to, kind}) =>
       kind !== 'spawn' || byId.get(to)?.kind !== 'subtask' ||
       !dependencies.get(to)?.some(need => edges.get(edgeKey(from, need))?.kind === 'spawn'))};
   }
@@ -161,8 +170,9 @@ const SCATaskDAG = (() => {
       if (!expanded.has(parent)) hidden.set(node.id, parent);
     }
     const nodes = dag.nodes.filter(node => !hidden.has(node.id)).map(node => counts.has(node.id)
-      ? {...node, caseCount: counts.get(node.id), collapsible: true, expanded: expanded.has(node.id)} : node);
-    return {nodes, edges: [...remapEdges(dag.edges, id => hidden.get(id) ?? id).values()]};
+      ? {...node, caseCount: counts.get(node.id), collapsible: true, expanded: expanded.has(node.id),
+        ...(node.meta?.cases_passed != null && {casePassed: node.meta.cases_passed})} : node);
+    return {nodes, hidden, edges: [...remapEdges(dag.edges, id => hidden.get(id) ?? id).values()]};
   }
 
   function scoreLabel(score) {
@@ -172,7 +182,8 @@ const SCATaskDAG = (() => {
   function metricLine(node) {
     if (!Object.hasOwn(node, 'score')) return '';
     const score = scoreLabel(node.score);
-    return [score && `通过率 ${score}`, Number.isFinite(node.cost_usd) && '$' + node.cost_usd.toFixed(6)]
+    const cases = node.casePassed == null ? score && `通过率 ${score}` : `${node.caseCount} 个用例 · ${node.casePassed} 通过`;
+    return [cases, Number.isFinite(node.cost_usd) && '$' + node.cost_usd.toFixed(6)]
       .filter(Boolean).join(' · ');
   }
 
@@ -283,6 +294,104 @@ const SCATaskDAG = (() => {
       width: horizontal ? length : breadth, height: horizontal ? breadth : length};
   }
 
+  function layoutEvolution(dag) {
+    if (!dag.nodes.length || dag.nodes.some(node => !Number.isInteger(node.meta?.band))) return layout(dag);
+    const groups = new Map(), positioned = new Map(), bands = [];
+    for (const node of dag.nodes) addToList(groups, node.meta.band, node);
+    const laneGap = 36, levelGap = 23, laneWidth = nodeWidth + laneGap;
+    const maxColumns = Math.max(1, ...[...groups.values()].map(group =>
+      new Set(group.map(node => node.meta.column).filter(Boolean)).size));
+    const width = margin * 2 + maxColumns * laneWidth - laneGap;
+    let top = 8;
+    for (const [stage, group] of [...groups].sort(([a], [b]) => a - b)) {
+      const title = group.find(node => node.meta.band_title)?.meta.band_title || (stage ? `第 ${stage} 代` : '基线');
+      const band = {top, title};
+      const columns = [...new Set(group.map(node => node.meta.column).filter(Boolean))].sort((a, b) => a - b);
+      const levels = new Map();
+      for (const node of group) addToList(levels, node.meta.level, node);
+      top += 33;
+      for (const [, layer] of [...levels].sort(([a], [b]) => a - b)) {
+        const ends = new Map();
+        for (const node of layer) {
+          const column = node.meta.column;
+          const lane = (column ? columns.indexOf(column) - (columns.length - 1) / 2 : 0) * laneWidth;
+          const x = (width - nodeWidth) / 2 + lane, y = ends.get(column) ?? top;
+          const height = metricLine(node) ? summaryHeight : nodeHeight;
+          positioned.set(node.id, {node, x, y, width: nodeWidth, height, entry: y, exit: y + height});
+          ends.set(column, y + height + 10);
+        }
+        top = Math.max(...ends.values()) - 10 + levelGap;
+      }
+      band.bottom = top - 8;
+      bands.push(band);
+      top += 8;
+    }
+    const edges = dag.edges.flatMap(({from, to, kind}) => {
+      const source = positioned.get(from), target = positioned.get(to);
+      return source && target ? [{source, target, kind, structured: true}] : [];
+    });
+    return {nodes: [...positioned.values()], edges, orientation: 'vertical', bands, width, height: top};
+  }
+
+  function taskBands(graph) {
+    if (graph.orientation !== 'vertical') return [];
+    const titles = {
+      task: '启动', plan: '规划', subtask: '子任务执行', attempt: '候选执行',
+      verification: '验证', merge: '汇合与选择', review: '审核', ci: '持续集成', pr: '交付', finish: '结果',
+    };
+    const levels = new Map(), bands = [];
+    for (const item of graph.nodes) addToList(levels, item.layerStart, item);
+    for (const [start, group] of levels) {
+      const names = new Set(group.map(({node}) => titles[node.kind] || '执行'));
+      const title = names.size === 1 ? [...names][0] : '并行阶段';
+      const bottom = group[0].layerEnd + 5;
+      if (bands.at(-1)?.title === title) bands.at(-1).bottom = bottom;
+      else bands.push({top: start - 23, bottom, title});
+    }
+    return bands;
+  }
+
+  function highlightedPath(dag) {
+    const root = dag.nodes.find(node => node.kind === 'evolution' || node.kind === 'task');
+    const failure = root?.status === 'failed';
+    const champion = dag.nodes.find(node => node.kind === 'champion' && node.meta?.best);
+    const finish = dag.nodes.find(node => node.kind === 'finish' && node.task_id === root?.task_id);
+    const failed = failure && dag.nodes.find(node => node.meta?.critical_failure);
+    let target = failure ? finish || failed || root
+      : champion || (root?.status === 'succeeded' && finish) || null;
+    const nodes = new Map(dag.nodes.map(node => [node.id, node])), incoming = new Map(), outgoing = new Map();
+    for (const edge of dag.edges) {
+      addToList(incoming, edge.to, edge);
+      addToList(outgoing, edge.from, edge.to);
+    }
+    const afterFailure = new Set(failed ? [failed.id] : []);
+    for (const id of afterFailure) {
+      for (const next of outgoing.get(id) || []) afterFailure.add(next);
+    }
+    if (failed && !afterFailure.has(target?.id)) target = failed;
+    const highlighted = new Set(), edges = new Set();
+    const style = failure ? 'failure' : champion ? 'champion' : 'success';
+    while (target && !highlighted.has(target.id)) {
+      highlighted.add(target.id);
+      const parents = incoming.get(target.id) || [];
+      const winner = target.meta?.winner_column;
+      const selected = edge => {
+        const parent = nodes.get(edge.from);
+        if (winner && parent?.meta?.column === winner) return true;
+        if (target.meta?.action !== 'select') return false;
+        return parent?.meta?.selected || (target.meta.attempt && parent?.id.includes(`/attempt:${target.meta.attempt}/`));
+      };
+      const edge = parents.find(e => afterFailure.has(e.from)) || parents.find(selected)
+        || (failure && parents.find(e => nodes.get(e.from)?.status === 'failed'))
+        || parents.find(e => nodes.get(e.from)?.status === 'succeeded') || parents[0];
+      if (!edge) break;
+      edges.add(edgeKey(edge.from, edge.to));
+      target = nodes.get(edge.from);
+    }
+    if (finish && (failure || champion)) highlighted.add(finish.id);
+    return {nodes: highlighted, edges, style};
+  }
+
   function svgElement(tag, attrs = {}, label) {
     const node = document.createElementNS(NS, tag);
     for (const [key, value] of Object.entries(attrs)) node.setAttribute(key, value);
@@ -297,7 +406,22 @@ const SCATaskDAG = (() => {
     return node;
   }
 
-  function edgePath({source, target, route, sourcePort, targetPort}, orientation) {
+  function edgePath({source, target, route, sourcePort, targetPort, structured}, orientation) {
+    if (structured) {
+      const sx = source.x + source.width / 2, tx = target.x + target.width / 2;
+      const toCase = target.node.kind === 'case_task', fromCase = source.node.kind === 'case_task';
+      if (toCase || fromCase) {
+        const gutter = (toCase ? target : source).x + nodeWidth + (toCase ? 9 : 17);
+        const begin = fromCase ? `M ${source.x + nodeWidth} ${source.y + source.height * .55}`
+          : `M ${sx} ${source.exit} V ${source.exit + 9}`;
+        const end = toCase ? `H ${target.x + nodeWidth}` : `H ${tx} V ${target.entry}`;
+        return `${begin} H ${gutter} V ${toCase ? target.y + target.height * .45 : target.entry - 9} ${end}`;
+      }
+      const bend = target.node.meta.column === 0 ? target.entry - 12
+        : (source.node.meta.column === 0 ? source.exit + 12 : (source.exit + target.entry) / 2);
+      return `M ${sx} ${source.exit} V ${bend - 6} Q ${sx} ${bend} ${sx + (tx - sx) / 2} ${bend}` +
+        ` Q ${tx} ${bend} ${tx} ${bend + 6} V ${target.entry}`;
+    }
     const point = (cross, depth) => orientation === 'horizontal' ? `${depth} ${cross}` : `${cross} ${depth}`;
     let path = `M ${point(sourcePort, source.exit)}`;
     for (let i = 1; i < route.length; i++) {
@@ -341,8 +465,8 @@ const SCATaskDAG = (() => {
     const expanded = new Set();
     const camera = {x: 0, y: 0, scale: 1};
     let screen = {width: 1, height: 1};
-    let resourceId, snapshot, graph, signature, selected, detailSignature, pendingGraph;
-    let orientation = 'vertical', needsFit = true;
+    let resourceId, snapshot, graph, signature, selected, detailSignature, pendingGraph, hiddenNodes, pendingFocus;
+    let orientation = 'vertical', needsFit = 'initial';
     let generation = 0, timer = null, inFlight = false, queued = false, dragged = false;
 
     const markerPrefix = `dag-arrow-${++nextRenderer}-`;
@@ -356,6 +480,16 @@ const SCATaskDAG = (() => {
       markers.append(marker);
     }
     svg.prepend(markers);
+    const nodeLegend = element('div', undefined, 'dag-legend dag-type-legend');
+    nodeLegend.setAttribute('aria-label', '节点类型');
+    for (const [type, name] of Object.entries(typeLabels)) {
+      const label = element('span', undefined, 'dag-type-' + type);
+      label.append(element('b', undefined, 'dag-type-key'), element('span', name));
+      nodeLegend.append(label);
+    }
+    const pathKey = element('span', undefined, 'dag-path-key');
+    nodeLegend.append(pathKey);
+    status.before?.(nodeLegend);
 
     function constrain(offset, available) {
       return Math.max(Math.min(0, available), Math.min(offset, Math.max(0, available)));
@@ -376,8 +510,9 @@ const SCATaskDAG = (() => {
       screen = {width, height};
       svg.setAttribute('viewBox', `0 0 ${screen.width} ${screen.height}`);
       if (needsFit) {
+        const all = needsFit === 'all';
         needsFit = false;
-        const scale = Math.max(minScale, Math.min(width / graph.width, height / graph.height, 1));
+        const scale = Math.max(all ? 0 : minScale, Math.min(width / graph.width, height / graph.height, 1));
         const extraX = width - graph.width * scale, extraY = height - graph.height * scale;
         const first = graph.nodes[0];
         camera.scale = scale;
@@ -395,7 +530,8 @@ const SCATaskDAG = (() => {
 
     function zoom(factor, x = screen.width / 2, y = screen.height / 2, offsetX = 0, offsetY = 0) {
       if (!graph) return;
-      const scale = Math.max(minScale, Math.min(3, camera.scale * factor));
+      const minimum = Math.min(minScale, screen.width / graph.width, screen.height / graph.height);
+      const scale = Math.max(minimum, Math.min(3, camera.scale * factor));
       const used = scale / camera.scale;
       camera.x = x + (camera.x - x) * used + offsetX;
       camera.y = y + (camera.y - y) * used + offsetY;
@@ -411,18 +547,22 @@ const SCATaskDAG = (() => {
       return camera.x !== previousX || camera.y !== previousY;
     }
 
-    function drawingNode({node, x, y, width, height}) {
+    function drawingNode({node, x, y, width, height}, path) {
       const state = statusLabels[node.status];
       const summary = node.summary;
       const activity = summary ? `${summary.turns} 轮 · ${summary.tools} 工具 · ${summary.verification} 验证`
         : metricLine(node);
       const facts = summary ? [state, node.duration_s == null ? '—' : node.duration_s.toFixed(1) + ' 秒',
         node.cost_usd == null ? '—' : '$' + node.cost_usd.toFixed(6)].join(' · ')
-        : [kindLabels[node.kind], state, node.caseCount && `${node.caseCount} 个用例`].filter(Boolean).join(' · ');
+        : [kindLabels[node.kind], state, node.caseCount && node.casePassed == null && `${node.caseCount} 个用例`]
+          .filter(Boolean).join(' · ');
+      const type = nodeTypes[node.kind] || 'work';
       const group = svgElement('g', {
-        transform: `translate(${x} ${y})`, class: 'dag-node', role: 'button', tabindex: 0,
+        transform: `translate(${x} ${y})`, class: `dag-node dag-type-${type}`, role: 'button', tabindex: 0,
         'data-node': node.id, 'data-kind': node.kind, 'data-status': node.status,
-        'aria-label': [node.label, activity, facts].filter(Boolean).join(' · '),
+        'data-path': path || '',
+        'aria-label': [node.label, activity, facts, node.casePassed != null && scoreLabel(node.score)]
+          .filter(Boolean).join(' · '),
         'aria-pressed': String(selected === node.id),
       });
       const label = svgElement('foreignObject', {x: 27, y: 8, width: width - (node.collapsible ? 54 : 38),
@@ -434,7 +574,8 @@ const SCATaskDAG = (() => {
       body.append(element('div', facts, 'dag-node-state'));
       group.append(
         svgElement('title', {}, node.label),
-        svgElement('rect', {width, height, rx: 9}),
+        nodeShape(type, width, height),
+        svgElement('path', {class: 'dag-node-type-mark', d: 'M 12 8 H 21'}),
         svgElement('circle', {cx: 15, cy: 20, r: 4}), label, body,
       );
       if (node.collapsible) {
@@ -446,6 +587,16 @@ const SCATaskDAG = (() => {
         }));
       }
       return group;
+    }
+
+    function nodeShape(type, width, height) {
+      if (type === 'decision' || type === 'branch') {
+        const cut = type === 'decision' ? 12 : 7;
+        return svgElement('path', {class: 'dag-node-shape', d: `M${cut} 0 H${width - cut} L${width} ${cut}` +
+          ` V${height - cut} L${width - cut} ${height} H${cut} L0 ${height - cut} V${cut}Z`});
+      }
+      const rx = {stage: 15, result: 22, check: 3, work: 9}[type];
+      return svgElement('rect', {class: 'dag-node-shape', width, height, rx});
     }
 
     function showDetail() {
@@ -474,6 +625,7 @@ const SCATaskDAG = (() => {
       fact('Token', node.tokens?.toLocaleString('zh-CN'));
       if (Number.isFinite(node.score)) fact('通过率', scoreLabel(node.score));
       if (node.caseCount) fact('用例数', node.caseCount);
+      if (node.casePassed != null) fact('通过数', node.casePassed);
       if (node.summary) {
         const {turns, tools, verification} = node.summary;
         fact('轮次', turns);
@@ -542,7 +694,10 @@ const SCATaskDAG = (() => {
       }
       pendingGraph = null;
       const nextSignature = JSON.stringify(dag);
-      if (signature === nextSignature) return;
+      if (signature === nextSignature) {
+        if (pendingFocus) focusNode(pendingFocus);
+        return;
+      }
       signature = nextSignature;
       snapshot = dag;
       redraw();
@@ -565,18 +720,31 @@ const SCATaskDAG = (() => {
     function redraw(anchorId) {
       const focused = document.activeElement?.getAttribute('data-node');
       const anchor = graphics.get(anchorId) || anchorNearCenter();
-      graph = layout(project(snapshot, expanded), orientation);
+      const projected = project(snapshot, expanded);
+      hiddenNodes = projected.hidden;
+      graph = project === projectEvolution ? layoutEvolution(projected) : layout(projected, orientation);
+      const path = highlightedPath(projected);
+      pathKey.textContent = path.nodes.size ? {champion: '冠军路径', failure: '失败路径', success: '完成路径'}[path.style] : '';
+      pathKey.setAttribute('data-path', path.style);
       graphics.clear();
       const edges = svgElement('g', {'aria-hidden': 'true'});
+      for (const band of graph.bands || taskBands(graph)) {
+        const group = svgElement('g', {class: 'dag-band', 'data-band': band.title});
+        group.append(svgElement('rect', {x: 5, y: band.top, width: graph.width - 10,
+          height: band.bottom - band.top, rx: 10}), svgElement('text', {x: 17, y: band.top + 17}, band.title));
+        edges.append(group);
+      }
       for (const edge of graph.edges) {
+        const highlighted = path.edges.has(edgeKey(edge.source.node.id, edge.target.node.id));
         edges.append(svgElement('path', {
-          d: edgePath(edge, orientation), class: 'dag-edge dag-edge-' + edge.kind,
+          d: edgePath(edge, graph.orientation), class: 'dag-edge dag-edge-' + edge.kind,
+          'data-path': highlighted ? path.style : '',
           'marker-end': 'url(#' + markerPrefix + edge.kind + ')',
         }));
       }
       const nodes = svgElement('g');
       for (const item of graph.nodes) {
-        item.element = drawingNode(item);
+        item.element = drawingNode(item, path.nodes.has(item.node.id) ? path.style : null);
         graphics.set(item.node.id, item);
         nodes.append(item.element);
       }
@@ -590,6 +758,30 @@ const SCATaskDAG = (() => {
       resize();
       graphics.get(focused)?.element.focus({preventScroll: true});
       showDetail();
+      if (pendingFocus && (graphics.has(pendingFocus) || hiddenNodes?.has(pendingFocus))) focusNode(pendingFocus);
+    }
+
+    function focusNode(id) {
+      pendingFocus = id;
+      if (hiddenNodes?.has(id)) {
+        expanded.add(hiddenNodes.get(id));
+        pendingFocus = null;
+        redraw();
+      }
+      const item = graphics.get(id);
+      if (!item) return false;
+      pendingFocus = null;
+      graphics.get(selected)?.element.setAttribute('aria-pressed', 'false');
+      selected = id;
+      item.element.setAttribute('aria-pressed', 'true');
+      camera.scale = Math.max(minScale, camera.scale);
+      camera.x = screen.width / 2 - (item.x + item.width / 2) * camera.scale;
+      camera.y = screen.height / 2 - (item.y + item.height / 2) * camera.scale;
+      transform();
+      svg.scrollIntoView?.({block: 'nearest'});
+      item.element.focus?.({preventScroll: true});
+      showDetail();
+      return true;
     }
 
     function reset() {
@@ -598,10 +790,11 @@ const SCATaskDAG = (() => {
       timer = null;
       inFlight = queued = false;
       resourceId = snapshot = graph = signature = selected = detailSignature = null;
-      pendingGraph = null;
+      pendingGraph = pendingFocus = hiddenNodes = null;
       pointers.clear();
       expanded.clear();
-      needsFit = true;
+      needsFit = 'initial';
+      pathKey.textContent = '';
       status.textContent = '';
       detail.replaceChildren();
       detail.hidden = true;
@@ -648,7 +841,7 @@ const SCATaskDAG = (() => {
     panel.querySelector('.dag-zoom-in').onclick = () => zoom(1.3);
     panel.querySelector('.dag-zoom-out').onclick = () => zoom(1 / 1.3);
     panel.querySelector('.dag-fit').onclick = () => {
-      needsFit = true;
+      needsFit = 'all';
       resize();
     };
     for (const button of orientationButtons) {
@@ -657,7 +850,7 @@ const SCATaskDAG = (() => {
         for (const option of orientationButtons) {
           option.setAttribute('aria-pressed', String(option === button));
         }
-        needsFit = true;
+        needsFit = 'initial';
         if (snapshot) redraw();
       };
     }
@@ -742,9 +935,9 @@ const SCATaskDAG = (() => {
     }
     const observer = new ResizeObserver(resize);
     observer.observe(svg);
-    return {refresh, reset, destroy() {reset(); observer.disconnect();}};
+    return {refresh, reset, focus: focusNode, destroy() {reset(); observer.disconnect();}};
   }
 
-  return {create, layout, projectGraph, projectEvolution};
+  return {create, layout, layoutEvolution, projectGraph, projectEvolution, highlightedPath};
 })();
 if (typeof module !== 'undefined') module.exports = SCATaskDAG;

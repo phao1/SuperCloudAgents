@@ -33,6 +33,24 @@ class FakeEval:
         return 'completed'
 
 
+@workflow.defn(name='EvalRunWorkflow')
+class SteerableFakeEval:
+    def __init__(self) -> None:
+        self.skipped = False
+
+    @workflow.signal
+    def skip_evolution_candidate(self) -> None:
+        self.skipped = True
+
+    @workflow.run
+    async def run(self, request: dict) -> str:
+        if not request['block']:
+            return 'completed'
+        await workflow.execute_activity('evo_test_candidate_ready', start_to_close_timeout=timedelta(seconds=5))
+        await workflow.wait_condition(lambda: self.skipped)
+        return 'cancelled'
+
+
 @pytest.fixture
 async def temporal_env():
     try:
@@ -102,9 +120,13 @@ async def test_evolution_paths(temporal_env, scenario, expected, promotions):
         return {'id': request['champion_id'], 'candidate_id': request['candidate']['id'],
                 'overlay': request['candidate']['overlay']}
 
+    @activity.defn(name='evolve_conversation')
+    async def conversation(request: dict) -> None:
+        pass
+
     queue = f'evolve-test-{uuid4()}'
     async with Worker(temporal_env.client, task_queue=queue, workflows=[EvolutionWorkflow, FakeEval],
-                      activities=[initialize, prepare, read, propose, record, status, promote]):
+                      activities=[initialize, prepare, read, propose, record, status, promote, conversation]):
         async with asyncio.timeout(45):
             handle = await temporal_env.client.start_workflow(EvolutionWorkflow.run,
                 {'id': str(uuid4()), 'config': cfg}, id=f'evolve-{uuid4()}', task_queue=queue)
@@ -124,6 +146,81 @@ async def test_evolution_paths(temporal_env, scenario, expected, promotions):
         assert len(records) == 2
         assert sum(r['split'] == 'dev' and not r['overlay'] for r in runs.values()) == 1
     assert all(c['decision'] != 'pending' for c in records.values())
+
+
+async def test_live_steering_and_replay(temporal_env):
+    started, release, paused, evaluating = (asyncio.Event() for _ in range(4))
+    runs, records, transcript, proposals = {}, {}, [], []
+
+    @activity.defn(name='evolve_initialize')
+    async def initialize(request: dict) -> dict:
+        started.set()
+        await release.wait()
+        return {'id': None, 'candidate_id': None, 'overlay': {}}
+
+    @activity.defn(name='evolve_prepare_run')
+    async def prepare(request: dict) -> dict:
+        run_id = request['run_id']
+        runs[run_id] = {'block': len(runs) == 1, 'id': run_id}
+        return runs[run_id]
+
+    @activity.defn(name='evolve_read_run')
+    async def read(request: dict) -> dict:
+        run = runs[request['run_id']]
+        return {'id': run['id'], 'status': 'cancelled' if run['block'] else 'completed', 'suite_hash': 'same',
+                'results': [{'case_id': 'a', 'repeat': 0, 'acceptance_passed': True,
+                             'cost_usd': .002, 'turns': 1}]}
+
+    @activity.defn(name='evolve_propose')
+    async def propose(request: dict) -> list[dict]:
+        proposals.append(request['operator_guidance'])
+        return [{'hypothesis': 'Check boundaries', 'overlay': {'tool_guidance': 'Be precise'},
+                 'static_check': {'valid': True}}]
+
+    @activity.defn(name='evolve_record')
+    async def record(request: dict) -> None:
+        records[request['candidate']['id']] = request['candidate']
+
+    @activity.defn(name='evolve_status')
+    async def status(request: dict) -> None:
+        pass
+
+    @activity.defn(name='evolve_conversation')
+    async def conversation(request: dict) -> None:
+        transcript.extend(request['items'])
+        if request.get('evolution_status', {}).get('status') == 'paused':
+            paused.set()
+
+    @activity.defn(name='evo_test_candidate_ready')
+    async def candidate_ready() -> None:
+        evaluating.set()
+
+    config = EvolutionConfig(suite='fixture', agent_backend='dsh', generations=2, candidates=1).model_dump()
+    workflows = [EvolutionWorkflow, SteerableFakeEval]
+    queue = f'evochat-test-{uuid4()}'
+    async with Worker(temporal_env.client, task_queue=queue, workflows=workflows,
+                      activities=[initialize, prepare, read, propose, record, status, conversation, candidate_ready]):
+        async with asyncio.timeout(30):
+            handle = await temporal_env.client.start_workflow(
+                EvolutionWorkflow.run, {'id': str(uuid4()), 'config': config}, id=f'evolve-{uuid4()}', task_queue=queue,
+            )
+            await started.wait()
+            await handle.signal(EvolutionWorkflow.user_message, {'id': 'guidance', 'mode': 'guidance', 'text': 'Check bounds'})
+            await handle.signal(EvolutionWorkflow.user_message, {'id': 'pause', 'mode': 'pause'})
+            release.set()
+            await paused.wait()
+            assert not runs
+            await handle.signal(EvolutionWorkflow.user_message, {'id': 'resume', 'mode': 'resume'})
+            await evaluating.wait()
+            await handle.signal(EvolutionWorkflow.user_message, {'id': 'stop', 'mode': 'stop'})
+            await handle.signal(EvolutionWorkflow.user_message, {'id': 'skip', 'mode': 'skip'})
+            assert await handle.result() == 'stopped'
+    assert proposals == ['Check bounds']
+    assert [row['reason'] for row in records.values()] == ['操作者已跳过候选']
+    assert {item['message_id'] for item in transcript if item['kind'] == 'receipt'} == {
+        'guidance', 'pause', 'resume', 'stop', 'skip',
+    }
+    await Replayer(workflows=workflows).replay_workflow(await handle.fetch_history())
 
 
 async def test_suite_change_fails_eval_and_evolution(temporal_env, store, tmp_path, monkeypatch):
@@ -280,9 +377,9 @@ async def test_dsh_evolution_integrity_persists_decisions(temporal_env, store, t
         return task_id
 
     queue = f"evolve-integrity-{uuid4()}"
-    activities = [initialize, propose, evolution.prepare_run, evolution.read_run, evolution.record,
-                  evolution.status, evolution.promote, evaluation.prepare, submit, evaluation.collect,
-                  evaluation.finish]
+    activities = [initialize, propose, *(item for item in evolution.all()
+                                       if item not in (evolution.initialize, evolution.propose)),
+                  evaluation.prepare, submit, evaluation.collect, evaluation.finish]
     async with Worker(temporal_env.client, task_queue=queue, workflows=[EvolutionWorkflow, EvalRunWorkflow],
                       activities=activities):
         async with asyncio.timeout(40):

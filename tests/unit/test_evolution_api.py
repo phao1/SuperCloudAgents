@@ -109,7 +109,8 @@ async def test_invalid_evolution_target_never_queues(harness, target):
 async def test_admin_eval_authorization(harness, role, tenant, scopes):
     http, _, _, _, user, _ = harness
     user.role, user.tenant_id, user.scopes = role, tenant, scopes
-    assert (await http.get('/v1/evolutions')).status_code == 403
+    assert (await http.get('/v1/evolutions')).status_code == (200 if role == 'member' else 403)
+    assert (await http.post('/v1/evolutions', json={'suite': 'suite', 'agent_version': 'v'})).status_code == 403
     assert (await http.post('/v1/champions/' + str(uuid4()) + '/activate')).status_code == 403
 
 

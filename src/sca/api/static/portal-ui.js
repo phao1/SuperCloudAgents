@@ -21,7 +21,7 @@ const portalUI = (() => {
     return ({
       public: true, history, tenant, admin, eval: evaluation, 'eval-admin': evaluation && admin,
       'eval-history': history && identity.tenant_id === 'eval',
-      'evolution-history': admin || (history && identity.guest && identity.tenant_id === 'eval'),
+      'evolution-history': admin || (history && identity.tenant_id === 'eval' && (identity.guest || identity.role === 'member')),
       member: tenant && ['member', 'admin'].includes(identity.role),
       platform: identity?.platform_admin === true,
     })[access] === true;

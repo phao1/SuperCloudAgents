@@ -108,7 +108,9 @@ async def test_controller(monkeypatch, mode, expected, promotions):
 
     monkeypatch.setattr(module.workflow, 'execute_activity', execute)
     monkeypatch.setattr(module.workflow, 'execute_child_workflow', child)
-    monkeypatch.setattr(module.workflow, 'patched', lambda _: mode != 'legacy_eval_failed')
+    monkeypatch.setattr(module.workflow, 'patched', lambda patch: (
+        patch != 'evolution-conversation' and mode != 'legacy_eval_failed'
+    ))
     monkeypatch.setattr(module.workflow, 'uuid4', uuid4)
     monkeypatch.setattr(module.workflow, 'wait_condition', wait)
     result = await controller.run({'id': str(uuid4()), 'config': cfg})
