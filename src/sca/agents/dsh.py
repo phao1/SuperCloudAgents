@@ -10,24 +10,76 @@ from typing import Any, Literal
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError, SandboxError
 from sca.core.interfaces import SandboxProvider
-from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
+from sca.core.models import (
+    AgentContext,
+    AgentEvent,
+    AgentOverlay,
+    ExecExit,
+    Mount,
+    SandboxAdditions,
+    tail,
+)
 
 DSH_VERSION = "0.2.2-rc.5"
+# Fixed opener and headless persona from the pinned npm release. Plugins assemble the rest per step.
+DSH_HEADLESS_PROMPT = (
+    "You are an AI agent powered by DeepSeek Harness.\n\n"
+    "You are a coding agent powered by the {{model}} model."
+)
 KEY_ENV = "DEEPSEEK_API_KEY"
 GatewayProtocol = Literal["messages", "openai"]
 
-# The launcher writes a credential-free overlay inside the sandbox, then hands stdin to dsh.
-LAUNCH = '''import os, sys, tempfile
-path, *argv = sys.argv[1:]
-with tempfile.NamedTemporaryFile(dir=os.path.dirname(path), mode="w", encoding="utf-8",
-                                 delete=False) as patch:
-    patch.write(os.environ.pop("SCA_DSH_PATCH"))
+# The config is data. A prompt section with interpolation disabled accepts literal braces.
+OVERLAY_MODULE = """export const inject = ['systemPrompt'];
+export function apply(ctx, config) {
+  ctx.effect(() => ctx.systemPrompt.section({
+    name: 'sca:evolution-guidance',
+    order: ctx.systemPrompt.getSectionOrder('DEPLOYMENT_PERSONA_SUFFIX'),
+    text: config.guidance,
+    interpolate: false,
+  }));
+}
+"""
+OVERLAY_FILENAME = "sca-dsh-overlay.mjs"
+
+# Read the patch before the task text to keep potentially large overlays out of the environment.
+LAUNCH = r'''import os, shutil, subprocess, sys, tempfile
+from pathlib import Path
+
+path, module_name, module_source, _, *argv = sys.argv[1:]
+path = Path(path)
+os.environ["DSH_HOME"] = str(path.parent / "dsh")
+if module_source:
+    directory = Path(tempfile.mkdtemp(prefix="sca-dsh-"))
+    (directory / module_name).write_text(module_source, encoding="utf-8")
+    path = directory / path.name
+argv[argv.index("--patch") + 1] = str(path)
+source = sys.stdin.buffer
+with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as patch:
+    patch.write(source.readline().removesuffix(b"\n"))
 os.replace(patch.name, path)
-os.execvp(argv[0], argv)
+with tempfile.TemporaryFile() as task:
+    shutil.copyfileobj(source, task)
+    task.seek(0)
+    if os.name == "nt":
+        sys.exit(subprocess.call(argv, stdin=task))
+    os.dup2(task.fileno(), sys.stdin.fileno())
+    os.execvp(argv[0], argv)
 '''
 
 
-def render_patch(base_url: str, model: str, protocol: GatewayProtocol) -> str:
+def _overlay_guidance(overlay: AgentOverlay | None) -> str:
+    if overlay is None:
+        return ""
+    sections = [overlay.system_prompt, overlay.tool_guidance]
+    descriptions = [f"- {name}: {text}" for name, text in sorted((overlay.tool_descriptions or {}).items())
+                    if text.strip()]
+    if descriptions:
+        sections.append("Additional tool guidance:\n" + "\n".join(descriptions))
+    return "\n\n".join(text for text in sections if text and text.strip())
+
+
+def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *, guidance: str = "") -> str:
     disabled = ["tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http",
                 "llm-deepseek-account"]
     if protocol == "messages":
@@ -48,11 +100,17 @@ def render_patch(base_url: str, model: str, protocol: GatewayProtocol) -> str:
             # Leave room for the prompt in the limiter's per-key token reservation.
             "defaultMaxTokens": 32_768, "models": [{"id": model}], "compat": compat,
         }}}}
-    return json.dumps([
+    rows = [
         *({"id": name, "disabled": True} for name in disabled),
         adapter,
         {"id": "agent-default-model", "config": {"provider": provider, "model": model}},
-    ])
+    ]
+    if guidance:
+        rows.append({"insert": [{
+            "id": "sca-evolution-guidance", "name": f"./{OVERLAY_FILENAME}",
+            "config": {"guidance": guidance},
+        }]})
+    return json.dumps(rows)
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -194,11 +252,14 @@ class DshBackend:
     state_transport = "mount"
 
     def __init__(self, default_model: str, version: str = DSH_VERSION,
-                 sandbox_image: str = "sca-sandbox-dsh:latest", *, protocol: GatewayProtocol = "messages") -> None:
+                 sandbox_image: str = "sca-sandbox-dsh:latest", *, protocol: GatewayProtocol = "messages",
+                 executable: str = "dsh", python_executable: str = "python3") -> None:
         self.default_model = default_model
         self.version = version
         self.sandbox_image = sandbox_image
         self.protocol = protocol
+        self.executable = executable
+        self.python_executable = python_executable
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         env = {"HOME": ctx.agent_home, "DSH_HOME": f"{ctx.agent_home}/dsh"}
@@ -223,22 +284,26 @@ class DshBackend:
         if not base_url.endswith("/v1"):
             base_url += "/v1"
         patch = f"{ctx.agent_home}/sca-dsh.patch.yml"
-        argv = ["python3", "-c", LAUNCH, patch, "dsh", "--profile", "headless", "--patch", patch,
+        guidance = _overlay_guidance(ctx.agent_overlay)
+        # Only the launcher path before -- is mapped by the local sandbox.
+        argv = [self.python_executable, "-c", LAUNCH, patch, OVERLAY_FILENAME, OVERLAY_MODULE if guidance else "",
+                "--", self.executable, "--profile", "headless", "--patch", patch,
                 "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"]
         if session_id is not None:
             argv.extend(["--session-id", session_id])
         argv.append("-")
         env = {"HOME": ctx.agent_home, "DSH_HOME": f"{ctx.agent_home}/dsh",
                "DSH_PERMISSION_MODE": "workspace-write", "DSH_TELEMETRY_MODE": "DISABLED",
-               KEY_ENV: key, "DEEPSEEK_BASE_URL": base_url,
-               "SCA_DSH_PATCH": render_patch(base_url, ctx.model or self.default_model, self.protocol)}
+               KEY_ENV: key, "DEEPSEEK_BASE_URL": base_url}
+        config = render_patch(base_url, ctx.model or self.default_model, self.protocol, guidance=guidance)
+        stdin = config.encode("ascii") + b"\n" + prompt.encode()
 
         run = _RunEvents(session_id)
         result = None
         stderr = ""
         try:
             async for output in sandbox.exec(sandbox_id, argv, workdir=ctx.workdir, env=env,
-                                             stdin=prompt.encode(), timeout_s=timeout_s):
+                                             stdin=stdin, timeout_s=timeout_s):
                 if isinstance(output, ExecExit):
                     result = output
                     continue

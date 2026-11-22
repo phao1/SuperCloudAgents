@@ -287,12 +287,14 @@ class KernelActivities:
         model = spec.model or self.settings.default_model
         # A champion is tuned for one version and model; an explicit different pin (for example a
         # Best-of-N attempt on another model) runs without it.
-        if champion is not None and (version or champion["agent_version"]) == champion["agent_version"] \
-                and model == champion["model"] and overlay is None:
+        if (champion is not None and overlay is None
+                and (version or champion["agent_version"]) == champion["agent_version"]
+                and model == champion["model"]
+                and champion.get("agent_backend", "opencode") == self._backend(spec).name):
             overlay = AgentOverlay.model_validate(champion["overlay"])
             version = champion["agent_version"]
-        if overlay is not None and self._backend(spec).name != "opencode":
-            raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode"))
+        if overlay is not None and self._backend(spec).name not in {"opencode", "dsh"}:
+            raise _non_retryable(InvalidTaskError("agent_overlay is only supported by opencode and dsh"))
         return AgentContext(
             task_id=task_id,
             agent_home_host=str(self._task_dir(task_id) / "agent_home"),
@@ -1249,24 +1251,27 @@ class KernelActivities:
         await self.store.complete_acceptance(task_id, passed, code.exit_code, tail(output))
         return passed
 
-    # Evolution productization
+    # Evolution productization and DeepSeek Harness evolution
 
     async def _pin_champion(self, task: Task, spec: dict) -> None:
         from sca.evolve.champions import select_champion
 
         use_champion = spec.get("use_champion")
         backend = spec.get("agent_backend") or self.agent.name
-        if (backend != "opencode" or spec.get("agent_overlay") is not None
+        if (backend not in {"opencode", "dsh"} or spec.get("agent_overlay") is not None
                 or use_champion is False or "champion_id" in task.result):
             return
         # Unqualified evaluation variants measure the baseline independently of live rollout.
         if spec.get("eval_run_id") and use_champion is None:
             return
+        version = spec.get("agent_version")
+        if version is None:
+            version = self.settings.dsh_version if backend == "dsh" else (
+                await self.store.resolve_task_opencode_version(str(task.id), self.settings.opencode_default_version)
+            )
         champion = await select_champion(
-            self.store, task.id, task.tenant_id,
-            spec.get("agent_version") or await self.store.resolve_task_opencode_version(
-                str(task.id), self.settings.opencode_default_version),
-            spec.get("model") or self.settings.default_model, use_champion,
+            self.store, task.id, task.tenant_id, version,
+            spec.get("model") or self.settings.default_model, use_champion, agent_backend=backend,
         )
         selection = None
         if champion is not None:

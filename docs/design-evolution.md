@@ -261,3 +261,79 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" -H "Authorization: Bearer $
 `gateway_provider_error` 提供最近一次已识别故障的 `kind` 和 UTC 时间 `at`。
 `gateway_provider_account_error` 保留账户故障，直到成功调用。`rate_limit` 和 `unavailable`
 继续走原有重试流程。
+
+## 7 DeepSeek Harness 自演进（Phase 7）
+
+运行 `alembic upgrade head` 应用迁移 `0025` 后重启 API 和 Worker。Worker 需要可用的
+`dsh` 后端、模型网关和 `SCA_EVAL_API_TOKEN`。在 Portal「自动演进」选择 DeepSeek
+Harness、评测套件和模型。
+基线版本填写已安装的 `@deepseek-ai/dsh` npm 版本，留空使用 `SCA_DSH_VERSION`（默认
+`0.2.2-rc.5`）。已有演进记录、冠军、灰度和定期计划默认归属 OpenCode。
+
+DSH 在每轮通过 `headless --patch` 载入附加提示词。它保留内置系统提示、工具定义和权限策略，
+将 `system_prompt`、`tool_guidance` 及按工具名组织的 `tool_descriptions` 追加到系统提示。
+提议者只编辑追加的文本。基线提供已知版本的内置开场白供参考，其余提示由 DSH 插件在运行时组装。
+配置写入沙箱中的临时目录，任务仓库无需添加指令文件。
+[DSH 系统提示组装](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/core/system-prompt/README.zh.md)
+
+### 最小试跑
+
+在已配置的 `SCA_EVAL_SUITES_DIR` 下准备一个包含少量用例的套件 `dsh-smoke`。下例从内置
+`opencode-evolve` 复制两个开发用例和一个留出用例到独立目录。在启动 API 和 Worker 的环境中
+设置同一个 `SCA_EVAL_SUITES_DIR`。
+
+```powershell
+$root = ".data/eval-suites"
+$suite = "$root/dsh-smoke"
+New-Item -ItemType Directory -Force "$suite/cases" | Out-Null
+@'
+name: dsh-smoke
+kind: coding
+defaults:
+  max_fix_attempts: 0
+  turn_timeout_s: 240
+'@ | Set-Content -Encoding utf8 "$suite/suite.yaml"
+foreach ($case in "interval-union", "unicode-offsets", "lazy-zip-strict") {
+  Copy-Item -Recurse -Force "evals/opencode-evolve/cases/$case" "$suite/cases"
+}
+$env:SCA_EVAL_SUITES_DIR = (Resolve-Path $root).Path
+```
+
+用 `eval` 租户管理员令牌提交一代、两个候选、每题一次、串行的演进。先评测开发集，有候选
+通过开发集门禁才评测留出集。下例把编码评测开支限制在 0.20 美元，每题最多 0.02 美元。
+反思与提议的模型调用单独计费。
+
+```powershell
+$headers = @{ Authorization = "Bearer $env:SCA_API_TOKEN" }
+$body = @{
+  suite = "dsh-smoke"
+  agent_backend = "dsh"
+  model = "deepseek-flash"
+  generations = 1
+  candidates = 2
+  repeat = 1
+  concurrency = 1
+  budget_usd = 0.20
+  case_budget = 0.02
+}
+$run = Invoke-RestMethod "$env:SCA_API_URL/v1/evolutions" -Method Post `
+  -Headers $headers -ContentType "application/json" -Body ($body | ConvertTo-Json)
+Invoke-RestMethod "$env:SCA_API_URL/v1/evolutions/$($run.id)" -Headers $headers
+```
+
+Portal「演进记录」按后端显示运行详情。单独跑开发集时，向 `POST /v1/evals/runs` 提交
+`{"suite":"dsh-smoke","split":"dev","variant":{"agent_backend":"dsh","model":"deepseek-flash"},"budget":0.04,"case_budget":0.02}`。
+定期演进使用 `POST /v1/evolution-schedules`，设置顶层 `"agent_backend":"dsh"` 与
+`"split":"dev"`，在 `config` 中传入代数、候选和预算配置。`opencode-prompt` 是专用的
+OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 套件可用于 DSH。
+
+冠军按后端、版本和模型分别管理。使用 `GET /v1/champions?agent_backend=dsh` 查看冠军。
+在 Portal 提交 DSH 任务时选择「冠军覆盖 → 使用当前冠军」，或在 `POST /v1/tasks` 的
+`spec` 中加入 `"agent_backend":"dsh","use_champion":true`。要配置灰度，在
+`PUT /v1/champions/rollouts` 的请求中加 `"agent_backend":"dsh"`。DSH 冠军即时可用，
+调用固化接口会返回 HTTP 200 和说明。
+
+### 验证
+
+模拟 API 和 headless 进程覆盖评测变体、提示词追加、冠军选择与灰度。迁移 SQL 已离线生成并检查。
+当前工作区禁止 Postgres 套接字连接，真实数据库迁移与行级权限测试、Windows 实机和付费模型试跑待验证。

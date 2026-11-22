@@ -20,7 +20,13 @@ from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.repo import Store
 from sca.eval.suites import load_suite
-from sca.evolve.models import ChampionRolloutSpec, EvolutionConfig, EvolutionScheduleSpec
+from sca.evolve.models import (
+    ChampionRolloutSpec,
+    EvolutionBackend,
+    EvolutionConfig,
+    EvolutionScheduleSpec,
+    EvolutionTarget,
+)
 from sca.evolve.scheduler import EvolutionSchedulerWorkflow, schedule_workflow_id
 from sca.evolve.workflow import EvolutionWorkflow
 
@@ -66,13 +72,23 @@ async def evolution_suite(name: str) -> tuple[Path, dict]:
     return resolved, suite
 
 
+def evolution_config(body: EvolutionTarget) -> dict:
+    values = body.model_dump()
+    if body.agent_backend == 'dsh':
+        installed = get_settings().dsh_version
+        if body.agent_version not in (None, installed):
+            raise HTTPException(422, '请选择已安装的 DeepSeek Harness 版本')
+        values['agent_version'] = installed
+    return values
+
+
 @router.post('/evolutions', status_code=201)
 async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
     store = scoped(request, user)
     require_model()
     settings = get_settings()
+    config = evolution_config(body)
     resolved, suite = await evolution_suite(body.suite)
-    config = body.model_dump()
     config['suite'] = str(resolved)
     evolution_id = uuid4()
     payload = {'id': str(evolution_id), 'tenant_id': user.tenant_id, 'created_by': user.subject,
@@ -144,8 +160,8 @@ async def reject(evolution_id: UUID, body: Decision, request: Request, user: Adm
 
 @router.get('/champions')
 async def champions(request: Request, user: Admin, agent_version: str | None = None,
-                    model: str | None = None) -> list[dict]:
-    return await scoped(request, user).list_champions(agent_version, model)
+                    model: str | None = None, agent_backend: EvolutionBackend | None = None) -> list[dict]:
+    return await scoped(request, user).list_champions(agent_version, model, agent_backend=agent_backend)
 
 
 @router.post('/champions/{champion_id}/activate')
@@ -166,6 +182,7 @@ async def put_rollout(body: ChampionRolloutSpec, request: Request, user: Admin) 
     store = request.app.state.store.for_tenant(user.tenant_id)
     return await store.put_champion_rollout(
         body.agent_version, body.model, body.champion_id, body.percent, user.subject,
+        agent_backend=body.agent_backend,
     )
 
 
@@ -177,8 +194,9 @@ async def rollback(champion_id: UUID, request: Request, user: Admin) -> dict:
 @router.post('/evolution-schedules', status_code=201)
 async def create_schedule(body: EvolutionScheduleSpec, request: Request, user: Admin) -> dict:
     store = scoped(request, user)
+    config = evolution_config(body)
     await evolution_suite(body.suite)
-    return await store.create_evolution_schedule(body.model_dump())
+    return await store.create_evolution_schedule(config)
 
 
 @router.get('/evolution-schedules')
@@ -196,8 +214,9 @@ async def update_schedule(
     schedule_id: UUID, body: EvolutionScheduleSpec, request: Request, user: Admin,
 ) -> dict:
     store = scoped(request, user)
+    config = evolution_config(body)
     await evolution_suite(body.suite)
-    return await store.update_evolution_schedule(schedule_id, body.model_dump())
+    return await store.update_evolution_schedule(schedule_id, config)
 
 
 @router.delete('/evolution-schedules/{schedule_id}', status_code=204)

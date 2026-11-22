@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
+from sca.agents.dsh import DshBackend
 from sca.agents.opencode import OpenCodeBackend
 from sca.config import Settings
 from sca.core.models import AgentOverlay, Task
@@ -102,7 +103,7 @@ async def test_load_task_pins_selection_used_by_sandbox_and_turn(tmp_path):
     await acts.load_task(task_id)
     platform.get_active_champion.return_value = {**champion, "id": uuid4(), "overlay": {}}
     await acts.load_task(task_id)
-    platform.get_active_champion.assert_awaited_once_with(version, "m")
+    platform.get_active_champion.assert_awaited_once_with(version, "m", agent_backend="opencode")
     store.pin_task_champion.assert_awaited_once()
     assert task.result["overlay_sha256"] == AgentOverlay.model_validate(champion["overlay"]).sha256()
     assert "overlay" not in task.result
@@ -115,6 +116,34 @@ async def test_load_task_pins_selection_used_by_sandbox_and_turn(tmp_path):
     turn = TurnInput(task_id, 1, "prompt")
     await acts.run_agent_turn(turn)
     acts._run_agent_turn.assert_awaited_once_with(turn, champion)
+
+
+@pytest.mark.parametrize("use_champion", [True, None])
+async def test_dsh_uses_its_own_active_champion_or_rollout(tmp_path, use_champion):
+    builtin.load()
+    settings = Settings(_env_file=None, data_dir=tmp_path, default_model="m")
+    champion = {"id": uuid4(), "agent_backend": "dsh", "agent_version": settings.dsh_version, "model": "m",
+                "overlay": {"system_prompt": "Pinned DeepSeek Harness guidance"}}
+    platform = SimpleNamespace(get_active_champion=AsyncMock(return_value=champion),
+                               get_champion=AsyncMock(return_value=champion))
+    tenant = SimpleNamespace(get_champion_rollout=AsyncMock(
+        return_value={"percent": 100, "champion_id": champion["id"]},
+    ))
+    store = SimpleNamespace(for_tenant=lambda name: platform if name == "eval" else tenant,
+                            pin_task_champion=AsyncMock(), resolve_task_opencode_version=AsyncMock())
+    acts = KernelActivities(settings=settings, store=store, sandbox=SimpleNamespace(),
+                            agent=DshBackend("m"), objects=SimpleNamespace())
+    spec = CodingSpec(repo_url="repo", instruction="change", agent_backend="dsh", use_champion=use_champion)
+    task = task_for(spec)
+    await acts._pin_champion(task, task.spec)
+    lookup = platform.get_active_champion if use_champion else tenant.get_champion_rollout
+    lookup.assert_awaited_once_with(settings.dsh_version, "m", agent_backend="dsh")
+    store.resolve_task_opencode_version.assert_not_awaited()
+    assert store.pin_task_champion.call_args.args[1]["champion_id"] == str(champion["id"])
+    ctx = acts._agent_ctx(str(task.id), spec, champion)
+    assert ctx.agent_version == settings.dsh_version
+    assert ctx.agent_overlay.model_dump(exclude_none=True) == champion["overlay"]
+    assert acts._agent_ctx(str(task.id), spec, {**champion, "agent_backend": "opencode"}).agent_overlay is None
 
 
 @pytest.mark.parametrize("overrides", [

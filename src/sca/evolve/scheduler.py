@@ -127,9 +127,11 @@ class EvolutionSchedulerActivities:
         select_cases(suite, "holdout")
         config = EvolutionConfig(
             **schedule["config"], suite=str(path), agent_version=schedule["agent_version"],
-            model=schedule["model"],
+            model=schedule["model"], agent_backend=schedule.get("agent_backend", "opencode"),
         )
-        champion = await self.store.get_active_champion(config.agent_version, config.model)
+        champion = await self.store.get_active_champion(
+            schedule["agent_version"], config.model, agent_backend=config.agent_backend,
+        )
         return {
             "schedule_id": request["schedule_id"], "tenant_id": PLATFORM_TENANT,
             "created_by": f"schedule:{request['schedule_id']}", "config": config.model_dump(),
@@ -172,8 +174,10 @@ class EvolutionSchedulerActivities:
         previous = await self.store.get_eval_run(request["previous_run_id"])
         params, config = previous["variant"], request["config"]
         variant = params.get("variant", {})
-        if params.get("suite") == config["suite"] and all(
-            variant.get(key) == config[key] for key in ("agent_version", "model")
+        if (
+            params.get("suite") == config["suite"]
+            and variant.get("agent_backend", "opencode") == config.get("agent_backend", "opencode")
+            and all(variant.get(key) == config[key] for key in ("agent_version", "model"))
         ):
             return previous
         return None

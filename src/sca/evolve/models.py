@@ -3,11 +3,12 @@
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from sca.core.models import AgentOverlay
 
 Surface = Literal['system_prompt', 'tool_guidance', 'tool_descriptions']
+EvolutionBackend = Literal["opencode", "dsh"]
 SuiteName = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 
 
@@ -39,18 +40,27 @@ class EvolutionOptions(BaseModel):
     surfaces: list[Surface] = Field(default_factory=lambda: ['system_prompt', 'tool_guidance', 'tool_descriptions'], min_length=1)
 
 
-class EvolutionConfig(EvolutionOptions):
+class EvolutionTarget(BaseModel):
+    agent_backend: EvolutionBackend = "opencode"
+    agent_version: str | None = Field(default=None, min_length=1)
+
+    @model_validator(mode="after")
+    def require_opencode_version(self) -> "EvolutionTarget":
+        if self.agent_backend == "opencode" and self.agent_version is None:
+            raise ValueError("请选择 OpenCode 基线版本")
+        return self
+
+
+class EvolutionConfig(EvolutionOptions, EvolutionTarget):
     suite: str = Field(min_length=1)
-    agent_version: str = Field(min_length=1)
     model: str = 'deepseek-flash'
 
 
-class EvolutionScheduleSpec(BaseModel):
+class EvolutionScheduleSpec(EvolutionTarget):
     model_config = ConfigDict(extra="forbid")
 
     suite: SuiteName
     split: Literal["dev"] = "dev"
-    agent_version: str = Field(min_length=1)
     model: str = Field(default="deepseek-flash", min_length=1)
     interval_hours: float = Field(gt=0, allow_inf_nan=False)
     config: EvolutionOptions = Field(default_factory=EvolutionOptions)
@@ -63,6 +73,7 @@ class EvolutionScheduleSpec(BaseModel):
 class ChampionRolloutSpec(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent_backend: EvolutionBackend = "opencode"
     agent_version: str = Field(min_length=1)
     model: str = Field(min_length=1)
     champion_id: UUID
