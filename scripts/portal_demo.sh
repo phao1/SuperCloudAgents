@@ -155,7 +155,12 @@ load_env() {
     # shellcheck disable=SC1091
     source .data/portal.env
     export SCA_RUNTIME_MODE="${SCA_RUNTIME_MODE:-docker}"
-    if [[ "$SCA_RUNTIME_MODE" == source ]]; then load_source_env; fi
+    if [[ "$SCA_RUNTIME_MODE" == source ]]; then
+        load_source_env
+    elif [[ "$SCA_RUNTIME_MODE" == docker && -f .env ]]; then
+        # Older Docker setups predate the local model configuration setting.
+        export SCA_PORTAL_LOCAL_CONFIG="${SCA_PORTAL_LOCAL_CONFIG-$ROOT/.env}"
+    fi
 }
 saved_mode() (
     unset SCA_RUNTIME_MODE
@@ -336,10 +341,8 @@ up() {
     done
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
-    if [[ "$SCA_RUNTIME_MODE" == source ]]; then
+    if [[ "$SCA_RUNTIME_MODE" == source || -n ${SCA_EVAL_API_TOKEN:-} ]]; then
         echo '登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。'
-    elif [[ -n ${SCA_EVAL_API_TOKEN:-} ]]; then
-        printf '登录令牌: %s\n' "$SCA_EVAL_API_TOKEN"
     fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"

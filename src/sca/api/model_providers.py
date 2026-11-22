@@ -1,14 +1,14 @@
 """Manage the installation's LiteLLM model routes from the local Portal."""
 
 from time import monotonic
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
 import httpx
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
 
-from sca.api.portal import model_admin, model_config_lock, restart_gateway
+from sca.api.portal import gateway_restarts, model_admin
 from sca.core.model_provider import classify_model_error
 from sca.gateway.configuration import deepseek_configured, demo_config_path
 from sca.gateway.model_providers import (
@@ -30,9 +30,14 @@ class ProviderList(BaseModel):
     deepseek_models: list[str]
 
 
+class RestartStatus(BaseModel):
+    id: UUID
+    status: Literal["restarting", "succeeded", "failed"]
+
+
 class ProviderChange(BaseModel):
     provider: Provider | None = None
-    gateway_restarted: bool
+    restart: RestartStatus
 
 
 class ConnectionInput(BaseModel):
@@ -64,12 +69,13 @@ def find_provider(registry: ProviderRegistry, provider_id: UUID) -> Provider:
     raise HTTPException(404, "供应商不存在")
 
 
-async def apply_registry(request: Request, registry: ProviderRegistry, command: list[str]) -> bool:
+def apply_registry(request: Request, registry: ProviderRegistry, command: list[str]) -> RestartStatus:
     try:
         registry.save(request.app.state.settings.data_dir)
     except OSError:
         raise HTTPException(503, "无法保存本机模型接入配置") from None
-    return await restart_gateway(command)
+    restart_id, _ = gateway_restarts(request).start(command)
+    return RestartStatus(id=restart_id, status="restarting")
 
 
 @router.get("", dependencies=[Depends(model_admin)])
@@ -83,43 +89,57 @@ async def get_provider(provider_id: UUID, request: Request) -> Provider:
     return find_provider(registry_for(request), provider_id)
 
 
-async def save_provider(request: Request, command: list[str], body: ProviderInput,
-                        *, provider_id: UUID | None = None) -> ProviderChange:
-    async with model_config_lock:
-        registry = registry_for(request)
-        if provider_id is None:
-            provider_id = uuid4()
-        else:
-            find_provider(registry, provider_id)
-        try:
-            updated = registry.with_provider(provider_id, body)
-        except RegistryError as exc:
-            raise HTTPException(409, str(exc)) from None
-        restarted = await apply_registry(request, updated, command)
-        return ProviderChange(provider=find_provider(updated, provider_id), gateway_restarted=restarted)
+def save_provider(request: Request, command: list[str], body: ProviderInput,
+                  *, provider_id: UUID | None = None) -> ProviderChange:
+    # Check, save and schedule the restart in one event loop turn.
+    gateway_restarts(request).require_idle()
+    registry = registry_for(request)
+    if provider_id is None:
+        provider_id = uuid4()
+    else:
+        find_provider(registry, provider_id)
+    try:
+        updated = registry.with_provider(provider_id, body)
+    except RegistryError as exc:
+        raise HTTPException(409, str(exc)) from None
+    restart = apply_registry(request, updated, command)
+    return ProviderChange(provider=find_provider(updated, provider_id), restart=restart)
 
 
-@router.post("", status_code=201)
+@router.post("", status_code=202)
 async def add_provider(body: ProviderInput, request: Request, command: ModelAdmin) -> ProviderChange:
-    return await save_provider(request, command, body)
+    return save_provider(request, command, body)
 
 
-@router.put("/{provider_id}")
+@router.put("/{provider_id}", status_code=202)
 async def update_provider(provider_id: UUID, body: ProviderInput, request: Request,
                           command: ModelAdmin) -> ProviderChange:
-    return await save_provider(request, command, body, provider_id=provider_id)
+    return save_provider(request, command, body, provider_id=provider_id)
 
 
-@router.delete("/{provider_id}", response_model_exclude_none=True)
+@router.delete("/{provider_id}", status_code=202, response_model_exclude_none=True)
 async def delete_provider(provider_id: UUID, request: Request, command: ModelAdmin) -> ProviderChange:
-    async with model_config_lock:
-        registry = registry_for(request)
-        updated = registry.without_provider(find_provider(registry, provider_id))
-        return ProviderChange(gateway_restarted=await apply_registry(request, updated, command))
+    gateway_restarts(request).require_idle()
+    registry = registry_for(request)
+    updated = registry.without_provider(find_provider(registry, provider_id))
+    return ProviderChange(restart=apply_registry(request, updated, command))
+
+
+@router.get("/restarts/{restart_id}", dependencies=[Depends(model_admin)])
+async def get_restart(restart_id: UUID, request: Request, response: Response) -> RestartStatus:
+    job = gateway_restarts(request).jobs.get(restart_id)
+    if job is None:
+        raise HTTPException(404, "找不到网关重启记录，请检查网关状态。")
+    response.headers["Cache-Control"] = "no-store"
+    if not job.done():
+        return RestartStatus(id=restart_id, status="restarting")
+    succeeded = not job.cancelled() and job.exception() is None and job.result()
+    return RestartStatus(id=restart_id, status="succeeded" if succeeded else "failed")
 
 
 @router.post("/test", dependencies=[Depends(model_admin)])
 async def test_connection(body: ConnectionInput, request: Request) -> ConnectionResult:
+    gateway_restarts(request).require_idle()
     if body.model not in registry_for(request).models and not (
         body.model in DEEPSEEK_MODELS and configured_deepseek()
     ):

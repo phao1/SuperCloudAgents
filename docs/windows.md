@@ -4,6 +4,8 @@
 Temporal 和 LiteLLM。默认 Agent 为 DeepSeek Harness（`dsh`），默认模型为
 `deepseek-flash`。Docker 和 WSL 均无需安装。
 
+如需由 Windows 上的编码 Agent 完成安装和验证，可直接复制启动提示词。[Windows Agent 启动提示词](windows-agent-start.md)
+
 ## 安装依赖
 
 ```powershell

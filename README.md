@@ -71,7 +71,7 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 ### Portal 快速启动
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
-用首次启动时生成的令牌登录。源码模式将令牌保存在 `.data/portal.env`，终端显示保存位置。
+用首次启动时生成的令牌登录。令牌保存在 `.data/portal.env`，终端显示保存位置。
 
 ```bash
 # Docker 模式，首次安装并启动
@@ -89,7 +89,7 @@ bash scripts/portal_demo.sh down
 省略两种设置时，脚本优先使用可用的 Docker，否则会提示并进入源码模式。
 源码模式的系统依赖和 API 示例见 [运维文档](docs/operations.md#源码模式)。
 Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
-[Windows 源码模式指南](docs/windows.md)
+[Windows 源码模式指南](docs/windows.md) · [交给 Windows Agent 的启动提示词](docs/windows-agent-start.md)
 
 在「概览 → 模型接入」配置 vLLM、Ollama、LM Studio 或其他兼容服务的地址、可选密钥和模型。
 [模型接入与预算](docs/models.md)
@@ -135,7 +135,7 @@ make portal-setup
 首次运行自动创建 `.env` 和随机网关密钥，并准备数据库、镜像、OpenCode 2.3.0
 缺陷基线后启动 Portal。连接管理员令牌后，可在概览页填写 DeepSeek API Key；
 密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
-脚本打印 `http://127.0.0.1:8000/portal` 和随机登录令牌；可在首次运行时通过
+脚本打印 `http://127.0.0.1:8000/portal` 和登录令牌的保存位置。可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
 在 Portal 中可用 `opencode-demo` 验证文件工具修复，也可用 `opencode-prompt` 让 OpenCode
 根据评测证据迭代系统提示词。macOS 的逐步操作见 [验证流程](Milestone/verification-flow.md#v4b-现场opencode-系统提示词自演进)。

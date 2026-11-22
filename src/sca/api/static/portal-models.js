@@ -47,17 +47,17 @@ const portalModels = (() => {
     input.addEventListener('focus', update);
   }
 
-  async function request(endpoint, body, method) {
+  async function request(endpoint, body, method = 'GET', timeout = 15000) {
     let response;
     try {
       response = await fetch('/v1' + endpoint, {
         method, headers: {...authHeaders(), 'Content-Type': 'application/json'},
-        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(130000),
+        body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(timeout),
       });
     } catch {
       throw Error('模型接入请求失败，请检查 Portal 和网关状态。');
     }
-    if (!response.ok) throw await apiFailure(response);
+    if (!response.ok) throw await apiFailure(response, true);
     return response.json();
   }
 
@@ -67,7 +67,7 @@ const portalModels = (() => {
     const control = choice.querySelector('select');
     const test = ui.action('测试连接', async () => {
       ui.setMessage(message, '正在通过网关测试连接…');
-      const result = await request(path + '/test', {model: control.value}, 'POST');
+      const result = await request(path + '/test', {model: control.value}, 'POST', 130000);
       ui.setMessage(message, result.message + ' · ' + result.latency_ms + ' 毫秒', !result.ok);
     }, message);
     row.append(choice, test);
@@ -101,12 +101,40 @@ const portalModels = (() => {
       input_usd_per_million: number('input_usd_per_million'), output_usd_per_million: number('output_usd_per_million')};
   }
 
-  function changed(state, result) {
-    if (view !== state) return;
-    ui.setMessage(state.message, result.gateway_restarted ? '已保存，模型网关已重启。'
-      : '已保存，网关重启失败。请检查网关日志后重启。', !result.gateway_restarted);
-    edit(state);
-    return Promise.all([loadConfig(), refresh(state)]);
+  async function waitForRestart(state, restart) {
+    const deadline = Date.now() + 135000;
+    while (view === state && restart.status === 'restarting') {
+      if (Date.now() >= deadline) throw Error('查询网关重启结果超时。');
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (view !== state) break;
+      restart = await request(path + '/restarts/' + enc(restart.id));
+    }
+    return restart.status === 'succeeded';
+  }
+
+  async function change(state, endpoint, body, method) {
+    const controls = [state.preset, state.list, state.editor];
+    for (const control of controls) control.inert = true;
+    ui.setMessage(state.message, '正在保存模型接入配置…');
+    let restart;
+    try {
+      ({restart} = await request(endpoint, body, method));
+      if (view !== state) return;
+      ui.setMessage(state.message, '配置已保存，正在重启模型网关…');
+      const succeeded = await waitForRestart(state, restart);
+      if (view !== state) return;
+      ui.setMessage(state.message, succeeded ? '配置已保存，模型网关已重启。'
+        : '配置已保存，网关重启失败。请检查网关日志后重启。', !succeeded);
+    } catch (e) {
+      if (view === state) ui.setMessage(state.message, restart
+        ? '配置已保存，无法确认网关重启结果。' + e.message : e.message, true);
+    } finally {
+      for (const control of controls) control.inert = false;
+    }
+    if (restart && view === state) {
+      edit(state);
+      await Promise.all([loadConfig(), refresh(state)]);
+    }
   }
 
   function edit(state, provider = null) {
@@ -133,15 +161,7 @@ const portalModels = (() => {
       if (ui.control(form, 'clear_key')?.checked) body.api_key = null;
       else if (key.value) body.api_key = key.value;
       key.value = '';
-      ui.setMessage(state.message, '正在保存并重启模型网关…');
-      let result;
-      try {
-        result = await request(provider ? path + '/' + enc(provider.id) : path, body, provider ? 'PUT' : 'POST');
-      } catch (e) {
-        ui.setMessage(state.message, e.message, true);
-        return;
-      }
-      await changed(state, result);
+      await change(state, provider ? path + '/' + enc(provider.id) : path, body, provider ? 'PUT' : 'POST');
     });
     state.editor.replaceChildren(form);
   }
@@ -149,7 +169,7 @@ const portalModels = (() => {
   async function refresh(state = view) {
     if (!state) return;
     try {
-      const config = await data(path);
+      const config = await request(path);
       if (view !== state) return;
       state.preset.replaceChildren(el('p', config.deepseek_models.length ? '内置 DeepSeek 已接入。'
         : '可在上方输入 DeepSeek API Key 启用内置模型。'),
@@ -160,7 +180,7 @@ const portalModels = (() => {
         ui.actions(ui.action('编辑', () => edit(state, provider)),
           ui.action('删除', async () => {
             if (!confirm('删除供应商「' + provider.name + '」？')) return;
-            await changed(state, await request(path + '/' + enc(provider.id), undefined, 'DELETE'));
+            await change(state, path + '/' + enc(provider.id), undefined, 'DELETE');
           }, state.message),
           tester(provider.models.map(model => model.name), state.message)),
       ]), '尚未添加自定义供应商。');

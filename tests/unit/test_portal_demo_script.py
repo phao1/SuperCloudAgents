@@ -12,7 +12,7 @@ from uuid import uuid4
 import pytest
 import yaml
 
-from sca.gateway.model_providers import GATEWAY_FILE, ProviderInput, ProviderRegistry
+from sca.gateway.model_providers import COMPOSE_FILE, GATEWAY_FILE, ProviderInput, ProviderRegistry
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/portal_demo.sh"
@@ -90,7 +90,12 @@ start_postgres() {
 start_source_services() { gateway_config > source-gateway-config; }
 start_litellm() { gateway_config > source-gateway-config; }
 stop_source_services() { echo "stopped native services"; }
-start() { echo "$1" >> startup-calls; }
+start() {
+    echo "$1" >> startup-calls
+    if [[ $1 == api || $1 == worker ]]; then
+        printf '%s\n' "${SCA_PORTAL_LOCAL_CONFIG-}" > "$1-model-config"
+    fi
+}
 owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }
 request() { :; }
 stop() { :; }
@@ -191,6 +196,34 @@ def test_invalid_mode_is_rejected(demo, monkeypatch):
     assert run("up", "--mode", "other").returncode == 2
 
 
+@POSIX_ONLY
+@pytest.mark.parametrize("saved", [None, "", "custom model config"])
+def test_docker_up_derives_local_config_for_older_setup(demo, monkeypatch, saved):
+    run, portal_env = demo
+    root = portal_env.parents[1]
+    monkeypatch.delenv("SCA_PORTAL_LOCAL_CONFIG", raising=False)
+    key = "fixture-model-key"
+    token = "fixture-eval-token"
+    dotenv = root / ".env"
+    dotenv.write_text(f"DEEPSEEK_API_KEY={key}\n")
+    original = f"export SCA_EVAL_API_TOKEN='{token}'\nexport SCA_API_TOKENS='{token}:eval:admin'\n"
+    if saved is not None:
+        original += f"export SCA_PORTAL_LOCAL_CONFIG={shlex.quote(saved)}\n"
+    portal_env.write_text(original)
+
+    result = run("up", "--mode", "docker")
+
+    assert result.returncode == 0, result.stderr
+    assert "SCA_EVAL_API_TOKEN" in result.stdout
+    assert all(value not in result.stdout + result.stderr for value in (key, token))
+    assert dotenv.read_text() == f"DEEPSEEK_API_KEY={key}\n"
+    assert portal_env.read_text().splitlines() == [*original.splitlines(), "export SCA_RUNTIME_MODE='docker'"]
+    for service in ("api", "worker"):
+        assert (root / f"{service}-model-config").read_text().strip() == (
+            str(dotenv) if saved is None else saved
+        )
+
+
 @pytest.mark.parametrize("mode", ["docker", "source"])
 def test_gateway_starts_with_and_without_a_model_key(demo, mode):
     run, portal_env = demo
@@ -220,6 +253,21 @@ def test_gateway_launchers_load_registry_on_start_and_restart(demo, mode, host):
         rows = yaml.safe_load((data_dir / GATEWAY_FILE).read_text(encoding='utf-8'))['model_list']
         assert [row['model_name'] for row in rows] == ['local']
         assert rows[0]['litellm_params']['api_base'] == f'http://{host}:8001/v1'
+
+
+@POSIX_ONLY
+def test_docker_restart_waits_for_keyless_gateway_and_restarts_worker(demo):
+    run, portal_env = demo
+    data_dir = portal_env.parent
+    assert run("up", "--mode", "docker").returncode == 0
+    result = run("restart-gateway")
+    assert result.returncode == 0, result.stderr
+    override = json.loads((data_dir / COMPOSE_FILE).read_text())
+    healthcheck = override["services"]["litellm"]["healthcheck"]
+    assert "/health/readiness" in healthcheck["test"][-1]
+    root = data_dir.parent
+    assert f"-f {data_dir / COMPOSE_FILE}" in (root / "docker-calls").read_text()
+    assert (root / "startup-calls").read_text().splitlines()[-2:] == ["worker", "worker"]
 
 
 @POSIX_ONLY

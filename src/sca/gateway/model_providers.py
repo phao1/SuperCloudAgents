@@ -231,9 +231,8 @@ def docker_gateway_command(root: Path, data_dir: Path, registry: ProviderRegistr
                            docker_bin: str, options: Sequence[str]) -> list[str]:
     command = [docker_bin, "compose", "--env-file", str(root / ".env"),
                "-f", str(root / "deploy/docker-compose.yml")]
-    if registry.providers:
+    if registry.providers or "--force-recreate" in options:
         service: dict = {
-            "environment": list(registry.keys),
             "healthcheck": {
                 "test": ["CMD", "python", "-c", (
                     "from urllib.request import urlopen; "
@@ -242,8 +241,10 @@ def docker_gateway_command(root: Path, data_dir: Path, registry: ProviderRegistr
                 "interval": "2s", "timeout": "3s", "retries": 35,
             },
         }
-        if sys.platform == "linux":
-            service["extra_hosts"] = ["host.docker.internal:host-gateway"]
+        if registry.providers:
+            service["environment"] = list(registry.keys)
+            if sys.platform == "linux":
+                service["extra_hosts"] = ["host.docker.internal:host-gateway"]
         override = data_dir.resolve() / COMPOSE_FILE
         atomic_write(override, json.dumps({"services": {"litellm": service}}) + "\n")
         command.extend(("-f", str(override)))
