@@ -9,13 +9,13 @@ def demo_config_path() -> Path | None:
     return Path(config) if config else None
 
 
-def model_configured() -> bool:
-    path = demo_config_path()
+def model_configured(path: Path | None = None) -> bool:
+    path = path if path is not None else demo_config_path()
     if path is None:
         # Standalone agents and external gateways manage their own credentials.
         return True
     try:
-        key = dotenv_values(path).get("DEEPSEEK_API_KEY")
+        key = dotenv_values(path, encoding="utf-8").get("DEEPSEEK_API_KEY")
     except OSError:
         return False
     return bool(key and key.strip() not in {"", "REPLACE_ME"})

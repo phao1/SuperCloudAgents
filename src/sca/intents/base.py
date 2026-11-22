@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -72,9 +73,12 @@ def get(name: str) -> IntentAdapter:
 
 
 def read_local(workspace: Path, name: str) -> bytes:
-    parts = Path(name).parts
-    if not parts or Path(name).is_absolute() or any(p in {"..", "."} for p in parts):
+    path = Path(name)
+    parts = path.parts
+    if not parts or path.anchor or any(p in {"..", "."} for p in parts):
         raise ValueError("source must be a relative file path")
+    if sys.platform == "win32":
+        return _read_windows(workspace, parts)
     fd = os.open(workspace, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts[:-1]:
@@ -88,6 +92,33 @@ def read_local(workspace: Path, name: str) -> bytes:
             data = stream.read(MAX_SOURCE_BYTES + 1)
     finally:
         os.close(fd)
+    if len(data) > MAX_SOURCE_BYTES:
+        raise ValueError("intent source exceeds size limit")
+    return data
+
+
+def _read_windows(workspace: Path, parts: tuple[str, ...]) -> bytes:
+    import msvcrt
+
+    import win32file
+
+    path = workspace.resolve()
+    for part in parts:
+        if ":" in part or Path(part).is_reserved():
+            raise ValueError("source must be a regular file")
+        path /= part
+        if path.is_symlink() or path.is_junction():
+            raise ValueError("source path must not use symlinks or junctions")
+    with path.open("rb") as stream:
+        descriptor = stream.fileno()
+        target = win32file.GetFinalPathNameByHandle(msvcrt.get_osfhandle(descriptor), 0)
+        # Verify the opened handle before reading, including if a parent was swapped after the walk.
+        final = target.removeprefix("\\\\?\\")
+        if final.startswith("UNC\\"):
+            final = "\\\\" + final[4:]
+        if Path(final) != path or not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("source must be a regular workspace file")
+        data = stream.read(MAX_SOURCE_BYTES + 1)
     if len(data) > MAX_SOURCE_BYTES:
         raise ValueError("intent source exceeds size limit")
     return data

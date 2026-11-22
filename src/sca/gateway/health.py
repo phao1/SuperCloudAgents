@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import fcntl
 import json
 import logging
 import tempfile
@@ -10,6 +9,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from sca.core.model_provider import ModelProviderError, valid_provider_kind
+from sca.host import lock_file
 
 log = logging.getLogger(__name__)
 
@@ -20,7 +20,7 @@ class ProviderHealth:
 
     def read(self) -> dict[str, dict[str, str]]:
         try:
-            data = json.loads(self.path.read_text())
+            data = json.loads(self.path.read_text(encoding="utf-8"))
             result = {}
             for field in ("last_error", "account_error"):
                 entry = data.get(field)
@@ -35,9 +35,9 @@ class ProviderHealth:
         """Publish an observation from a model call. A success clears the account alert."""
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.with_suffix(".lock").open("a") as lock:
+            with self.path.with_suffix(".lock").open("a+b") as lock:
                 # The worker and API can both make model calls.
-                fcntl.flock(lock, fcntl.LOCK_EX)
+                lock_file(lock)
                 self._write(error)
         except OSError:
             log.warning("Could not update model provider health")
@@ -53,7 +53,9 @@ class ProviderHealth:
             status["account_error"] = entry
         temporary = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", dir=self.path.parent, delete=False) as stream:
+            with tempfile.NamedTemporaryFile(
+                mode="w", encoding="utf-8", dir=self.path.parent, delete=False,
+            ) as stream:
                 temporary = Path(stream.name)
                 json.dump(status, stream)
             temporary.replace(self.path)

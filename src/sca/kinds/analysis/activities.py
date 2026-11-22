@@ -59,9 +59,10 @@ class AnalysisActivities(KernelActivities):
                 used.add(name)
                 data = await self.objects.get(f"tenants/{task.tenant_id}/files/{file_id}")
                 (seed / "data" / name).write_bytes(data)
-            (seed / ".gitattributes").write_text("data/** binary\n")
+            (seed / ".gitattributes").write_text("data/** binary\n", encoding="utf-8", newline="\n")
             trusted = GitWorkspace(Path(temp), "main")
             await trusted._git("-C", str(seed), "init", "-b", "main")
+            await trusted._git("-C", str(seed), "config", "core.autocrlf", "false")
             await trusted._git("-C", str(seed), "add", ".")
             await trusted._git(
                 "-C",

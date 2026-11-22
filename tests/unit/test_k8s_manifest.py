@@ -1,11 +1,16 @@
 import re
 import socket
+import sys
 
 import pytest
 
 from sca.core.errors import SandboxError
 from sca.core.models import Mount, SandboxSpec
-from sca.sandbox.k8s import NETWORK, egress_manifests, pod_manifest, safe_name
+
+if sys.platform == "win32":
+    pytest.skip("Kubernetes driver tests require POSIX", allow_module_level=True)
+else:
+    from sca.sandbox.k8s import NETWORK, egress_manifests, pod_manifest, safe_name
 
 
 def test_pod_security_resources_and_runtime():

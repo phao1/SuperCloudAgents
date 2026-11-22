@@ -6,12 +6,12 @@ import asyncio
 import hashlib
 import io
 import json
-import shutil
 import tempfile
 from pathlib import Path
 
 from sca.core.errors import NotFoundError, WorkspaceError
 from sca.core.interfaces import ObjectStore
+from sca.host import remove_tree
 from sca.workspace.git import GitWorkspace
 from sca.workspace.tarsafe import extract, pack
 
@@ -84,7 +84,8 @@ class TaskStateStore:
             bundle = staging / "mirror.bundle"
             bundle.write_bytes(data["mirror.bundle"])
             rebuilt = GitWorkspace(staging, ws.branch)
-            await rebuilt._git("clone", "--mirror", "--", str(bundle), str(rebuilt.mirror))
+            await rebuilt._git("clone", "--mirror", "-c", "core.autocrlf=false",
+                               "--", str(bundle), str(rebuilt.mirror))
             await asyncio.to_thread(
                 extract, io.BytesIO(data["agent_home.tar"]), staging / "agent_home"
             )
@@ -100,7 +101,7 @@ class TaskStateStore:
                 if dest.is_symlink() or dest.is_file():
                     dest.unlink()
                 elif dest.exists():
-                    shutil.rmtree(dest)
+                    remove_tree(dest)
                 (staging / name).replace(dest)
         if not overlay:
             # Rebuilding from Git does not restore ignored setup output from a prepared fork.
@@ -111,5 +112,5 @@ class TaskStateStore:
             else:
                 (ws.task_dir / "workspace.ready").unlink(missing_ok=True)
                 await ws.build_workspace(manifest["commit"])
-        marker.write_text(json.dumps(manifest, sort_keys=True))
+        marker.write_text(json.dumps(manifest, sort_keys=True), encoding="utf-8")
         return True

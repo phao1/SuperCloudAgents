@@ -102,8 +102,13 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
 LAUNCH = '''import json, os, pathlib, sys
 config = pathlib.Path(os.environ["PI_CODING_AGENT_DIR"]) / "models.json"
 config.parent.mkdir(parents=True, exist_ok=True)
-config.write_text(os.environ.pop("SCA_PI_CONFIG"))
+config.write_text(os.environ.pop("SCA_PI_CONFIG"), encoding="utf-8")
 binary = os.environ.pop("SCA_PI_BIN", "pi")
+if os.name == "nt":
+    import subprocess
+    node = os.environ.pop("SCA_PI_NODE", None)
+    argv = [node, binary] if node else [binary]
+    sys.exit(subprocess.call([*argv, *sys.argv[1:]]))
 os.execvp(binary, ["pi", *sys.argv[1:]])
 '''
 
@@ -113,12 +118,14 @@ class PiBackend:
     state_transport = "mount"
 
     def __init__(self, default_model: str, version: str = PI_VERSION,
-                 sandbox_image: str = "sca-sandbox-pi:latest", *, executable: str | None = None):
+                 sandbox_image: str = "sca-sandbox-pi:latest", *, executable: str | None = None,
+                 node_executable: str | None = None):
         self.default_model = default_model
         self.version = version
         # pi is installed in its own image; the kernel uses it when the task names no image.
         self.sandbox_image = sandbox_image
         self.executable = executable
+        self.node_executable = node_executable
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         env = {"HOME": ctx.agent_home}
@@ -153,6 +160,7 @@ class PiBackend:
             env={"HOME": ctx.agent_home, "PI_CODING_AGENT_DIR": f"{ctx.agent_home}/pi",
                  "PI_OFFLINE": "1", "PI_TELEMETRY": "0", KEY_ENV: ctx.model_api_key,
                  **({"SCA_PI_BIN": self.executable} if self.executable else {}),
+                 **({"SCA_PI_NODE": self.node_executable} if self.node_executable else {}),
                  "SCA_PI_CONFIG": render_config(ctx.model_base_url, model)},
         )
         async with closing_stream(stream):

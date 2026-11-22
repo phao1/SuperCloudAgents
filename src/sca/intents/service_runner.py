@@ -9,10 +9,38 @@ import time
 import urllib.request
 
 
+def start_service(command: str) -> subprocess.Popen:
+    if sys.platform == "win32":
+        from sca.host import windows_bash
+
+        return subprocess.Popen(
+            [sys.executable, "-m", "sca.sandbox._windows_job", str(windows_bash()),
+             "--noprofile", "--norc", "-c", command],
+            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW,
+        )
+    return subprocess.Popen(["bash", "-lc", command], start_new_session=True)
+
+
+def stop_service(process: subprocess.Popen) -> None:
+    try:
+        if sys.platform == "win32":
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            return
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except ProcessLookupError:
+        pass
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.wait()
+
+
 def main() -> int:
-    with open(sys.argv[1]) as stream:
+    with open(sys.argv[1], encoding="utf-8") as stream:
         config = json.load(stream)
-    process = subprocess.Popen(["bash", "-lc", config["start_command"]], start_new_session=True)
+    process = start_service(config["start_command"])
     try:
         deadline = time.monotonic() + config["timeout_s"]
         while True:
@@ -26,14 +54,7 @@ def main() -> int:
                 time.sleep(0.1)
         return subprocess.call(config["argv"])
     finally:
-        try:
-            os.killpg(process.pid, signal.SIGTERM)
-            process.wait(timeout=5)
-        except ProcessLookupError:
-            pass
-        except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
+        stop_service(process)
 
 
 if __name__ == "__main__":

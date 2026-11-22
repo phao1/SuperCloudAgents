@@ -17,7 +17,7 @@ from prometheus_client import Gauge
 
 from sca.core.errors import WorkspaceError
 from sca.workspace.cache import RepoCache
-from sca.workspace.layers import command, disk_bytes, permissions
+from sca.workspace.layers import copy_tree, disk_bytes, permissions
 from sca.workspace.tarsafe import extract
 
 snapshot_bytes = Gauge("sca_workspace_snapshot_bytes", "Retained prepared workspace bytes")
@@ -75,7 +75,7 @@ class SnapshotStore:
         refs.mkdir(exist_ok=True)
         owner = str(target.resolve())
         pin = refs / hashlib.sha256(owner.encode()).hexdigest()
-        pin.write_text(owner)
+        pin.write_text(owner, encoding="utf-8")
         return pin
 
     async def publish(self, key: str, archive: AsyncIterator[bytes], *,
@@ -85,14 +85,16 @@ class SnapshotStore:
         async with (self.locks._lock(self.root / "locks" / "publication"),
                     self.locks._lock(self.root / "locks" / key)):
             if index.exists():
-                metadata = json.loads(index.read_text())
+                metadata = json.loads(index.read_text(encoding="utf-8"))
             else:
                 metadata = await self._publish(index, key, archive, base_commit, saved_seconds,
                                                archive_root)
             if retain_at is not None:
                 retain_at.mkdir(parents=True, exist_ok=True)
                 self._pin(retain_at, metadata["id"])
-                retain_at.with_name(f"{retain_at.name}.snapshot").write_text(metadata["id"])
+                retain_at.with_name(f"{retain_at.name}.snapshot").write_text(
+                    metadata["id"], encoding="utf-8",
+                )
             return metadata
 
     async def _publish(self, index: Path, key: str, archive: AsyncIterator[bytes], base_commit: str,
@@ -126,7 +128,7 @@ class SnapshotStore:
             if not target.exists():
                 tree.rename(target)
             pending = index.with_suffix(".tmp")
-            pending.write_text(json.dumps(metadata))
+            pending.write_text(json.dumps(metadata), encoding="utf-8")
             pending.replace(index)
             return metadata
 
@@ -135,7 +137,7 @@ class SnapshotStore:
         async with self.locks._lock(self.root / "locks" / key):
             if not index.exists():
                 return None
-            metadata = json.loads(index.read_text())
+            metadata = json.loads(index.read_text(encoding="utf-8"))
             identity = metadata["id"]
             if not DIGEST.fullmatch(identity) or metadata["key"] != key:
                 raise WorkspaceError("Invalid snapshot manifest")
@@ -145,15 +147,16 @@ class SnapshotStore:
             if overlay:
                 target.mkdir(parents=True, exist_ok=True)
                 source_file = target.parent / "layer-source.json"
-                source = json.loads(source_file.read_text()) if source_file.exists() else {}
-                source_file.write_text(json.dumps({**source, "snapshot_key": key}))
+                source = (json.loads(source_file.read_text(encoding="utf-8"))
+                          if source_file.exists() else {})
+                source_file.write_text(json.dumps({**source, "snapshot_key": key}), encoding="utf-8")
             pin = self._pin(target, identity)
             try:
                 if not overlay:
-                    await command("cp", "-a", "--reflink=auto", "--", str(tree), str(target))
+                    await copy_tree(tree, target)
                     await asyncio.to_thread(permissions, target, True)
                 marker = target.parent / f"{target.name}.snapshot"
-                marker.write_text(identity)
+                marker.write_text(identity, encoding="utf-8")
             except BaseException:
                 pin.unlink(missing_ok=True)
                 raise
@@ -167,7 +170,7 @@ class SnapshotStore:
             async with self.locks._lock(self.root / "locks" / key):
                 if not index.exists():
                     continue
-                metadata = json.loads(index.read_text())
+                metadata = json.loads(index.read_text(encoding="utf-8"))
                 identity = metadata["id"]
                 if not DIGEST.fullmatch(identity):
                     raise WorkspaceError("Invalid snapshot manifest")
@@ -176,17 +179,17 @@ class SnapshotStore:
                 live = False
                 if refs.exists():
                     for pin in refs.iterdir():
-                        target = Path(pin.read_text())
+                        target = Path(pin.read_text(encoding="utf-8"))
                         marker = target.parent / f"{target.name}.snapshot"
                         source_file = target.parent / "layer-source.json"
-                        source = (json.loads(source_file.read_text())
+                        source = (json.loads(source_file.read_text(encoding="utf-8"))
                                   if source_file.is_file() else {})
                         retained_checkpoint = (target.name == "overlay"
                                                and source.get("snapshot_key") == key
                                                and (target.parent / "state.manifest.json").is_file())
                         matching_source = (target.name != "overlay"
                                            or source.get("snapshot_key") == key)
-                        if (marker.is_file() and marker.read_text() == identity
+                        if (marker.is_file() and marker.read_text(encoding="utf-8") == identity
                                 and matching_source and (target.exists() or retained_checkpoint)):
                             live = True
                         else:
@@ -201,7 +204,8 @@ class SnapshotStore:
                     total += metadata["size_bytes"]
         # A crash between publishing the tree and its index can leave an orphan.
         async with self.locks._lock(self.root / "locks" / "publication"):
-            published = {json.loads(path.read_text())["id"] for path in self.root.glob("*.json")}
+            published = {json.loads(path.read_text(encoding="utf-8"))["id"]
+                         for path in self.root.glob("*.json")}
             for tree in self.root.iterdir():
                 if tree.is_symlink() or not tree.is_dir() or tree.name in published:
                     continue

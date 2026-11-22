@@ -12,9 +12,19 @@ from pydantic import ValidationError
 from sca.agents.dsh import KEY_ENV, LAUNCH, OVERLAY_FILENAME, OVERLAY_MODULE, DshBackend
 from sca.config import Settings
 from sca.core.errors import AgentTurnError, SandboxError
-from sca.core.models import AgentContext, AgentEvent, AgentOverlay, ExecEvent, ExecExit, ExecOutput
+from sca.core.models import (
+    AgentContext,
+    AgentEvent,
+    AgentOverlay,
+    ExecEvent,
+    ExecExit,
+    ExecOutput,
+    SandboxSpec,
+)
+from sca.host import host_executable
 from sca.kinds.coding.spec import CodingSpec
 from sca.orchestration.worker import make_agent_backend
+from sca.sandbox.local import LocalSandboxProvider
 
 SESSION = "session-8b20b100-007a-4a19-927a-c1e1d1db1e00"
 KEY = "fixture-virtual-key"
@@ -136,10 +146,11 @@ async def test_command_env_and_session_continuity(ctx, protocol):
     assert second.calls[0]["stdin"] == call["stdin"]
 
 
-async def test_parses_headless_events_and_redacts_nested_payloads(ctx):
+@pytest.mark.parametrize("shell", ["bash", "pwsh"])
+async def test_parses_headless_events_and_redacts_nested_payloads(ctx, shell):
     # Synthetic projection from @deepseek-ai/dsh-headless src/json-stream.ts.
     encoded_key = r"\u0066ixture-virtual-key"
-    call = stdout(type="tool_call", callId="cmd1", tool="bash", input={
+    call = stdout(type="tool_call", callId="cmd1", tool=shell, input={
         "command": "echo " + KEY, "meta": [{KEY: KEY}],
     })
     call.text = call.text.replace(KEY, encoded_key)
@@ -165,6 +176,7 @@ async def test_parses_headless_events_and_redacts_nested_payloads(ctx):
     assert [e.type for e in events] == ["session_started", "message", "tool", "command", "tool",
                                        "file_change", "tool", "usage", "turn_completed"]
     assert events[2].data["input"]["meta"] == [{"[REDACTED]": "[REDACTED]"}]
+    assert events[3].data["name"] == shell
     assert events[3].data["command"] == "echo [REDACTED]" and events[3].data["exit_code"] is None
     assert events[3].data["output_tail"].startswith("…") and events[3].data["output_tail"].endswith("[REDACTED]")
     assert events[5].data["changes"] == [{"path": "demo.py", "kind": "update"}]
@@ -272,22 +284,36 @@ async def test_invalid_context_and_mismatched_resume_are_refused(ctx):
         await collect(backend, sandbox, ctx, "session-other")
 
 
-def test_launcher_preserves_stdin_and_writes_only_patch(tmp_path):
+@pytest.fixture
+def launcher_env(tmp_path) -> dict[str, str]:
+    env = {"TMPDIR": str(tmp_path), "PYTHONUTF8": "1"}
+    if sys.platform == "win32":
+        env["SystemRoot"] = os.environ["SystemRoot"]
+    return env
+
+
+@pytest.mark.parametrize("exit_code", [0, 7])
+def test_launcher_preserves_stdin_and_writes_only_patch(tmp_path, launcher_env, exit_code):
     patch = tmp_path / "sca-dsh.patch.yml"
-    binary = tmp_path / "dsh"
-    binary.write_text('#!/bin/sh\ntest -n "$DEEPSEEK_API_KEY" && test -z "${SCA_DSH_PATCH+x}" && cat\n')
-    binary.chmod(0o700)
+    stub = """import os, sys
+assert os.environ['DEEPSEEK_API_KEY']
+assert 'SCA_DSH_PATCH' not in os.environ
+sys.stdout.buffer.write(sys.stdin.buffer.read())
+sys.exit(int(sys.argv[1]))
+"""
     result = subprocess.run(
-        [sys.executable, "-c", LAUNCH, str(patch), OVERLAY_FILENAME, "", "--", "dsh",
+        [sys.executable, "-c", LAUNCH, str(patch), OVERLAY_FILENAME, "", "--",
+         sys.executable, "-c", stub, str(exit_code),
          "--profile", "headless", "--patch", str(patch), "-"],
-        input=b"[]\nprompt\n", capture_output=True, check=True, timeout=5,
-        env={"PATH": str(tmp_path) + os.pathsep + os.defpath, KEY_ENV: KEY},
+        input=b"[]\nprompt\n", capture_output=True, check=False, timeout=5,
+        env={**launcher_env, KEY_ENV: KEY},
     )
+    assert result.returncode == exit_code
     assert result.stdout == b"prompt\n" and result.stderr == b""
-    assert patch.read_text() == "[]"
+    assert patch.read_text(encoding="utf-8") == "[]"
 
 
-async def test_overlay_launcher_writes_literal_guidance_outside_workspace(tmp_path, ctx):
+async def test_overlay_launcher_writes_literal_guidance_outside_workspace(tmp_path, ctx, launcher_env):
     home, workdir = tmp_path / "agent home", tmp_path / "user repo"
     home.mkdir()
     workdir.mkdir()
@@ -312,7 +338,7 @@ async def test_overlay_launcher_writes_literal_guidance_outside_workspace(tmp_pa
     argv = [sys.executable, "-c", LAUNCH, path, OVERLAY_FILENAME, OVERLAY_MODULE, "--",
             sys.executable, "-c", read_patch, "--profile", "headless", "--patch", path, "-"]
     result = await asyncio.to_thread(
-        subprocess.run, argv, cwd=workdir, env={**call["env"], "TMPDIR": str(tmp_path), "PYTHONUTF8": "1"},
+        subprocess.run, argv, cwd=workdir, env={**call["env"], **launcher_env},
         input=call["stdin"], capture_output=True, check=True, timeout=5,
     )
     filename, dsh_home, task = json.loads(result.stdout)
@@ -334,3 +360,61 @@ def test_task_spec_accepts_dsh_npm_versions_only_for_dsh():
             CodingSpec.model_validate({**spec, "agent_backend": backend})
     with pytest.raises(ValidationError, match="agent_version"):
         CodingSpec.model_validate({**spec, "agent_backend": "dsh", "agent_version": "../anything"})
+
+
+@pytest.mark.parametrize("guidance", [None, "保留 {{literal}}。\nVerify edits."], ids=["baseline", "overlay"])
+async def test_source_launcher_uses_task_home_and_same_gateway_env(tmp_path, ctx, guidance):
+    node = host_executable("node.exe" if sys.platform == "win32" else "node")
+    if node is None:
+        pytest.skip("Node.js is not installed")
+    binary = tmp_path / "dsh cli.mjs"
+    binary.write_text("""
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+const env = process.env;
+assert.equal(env.DEEPSEEK_BASE_URL, 'http://gateway/v1');
+assert.ok(env.DEEPSEEK_API_KEY);
+assert.equal(env.DSH_HOME, resolve(env.HOME, 'dsh'));
+assert.equal(env.DSH_TELEMETRY_MODE, 'DISABLED');
+assert.equal(env.DSH_PERMISSION_MODE, 'workspace-write');
+assert.equal(env.SCA_DSH_PATCH, undefined);
+const patch = process.argv[process.argv.indexOf('--patch') + 1];
+assert.ok(JSON.parse(readFileSync(patch, 'utf8')).length > 0);
+const sessionId = 'session-8b20b100-007a-4a19-927a-c1e1d1db1e00';
+console.log(JSON.stringify({type: 'session', sessionId}));
+console.log(JSON.stringify({type: 'text', text: JSON.stringify({patch, task: readFileSync(0, 'utf8')})}));
+console.log(JSON.stringify({type: 'final', sessionId, reason: {kind: 'completed'}, text: '完成'}));
+""", encoding="utf-8")
+    sandbox = LocalSandboxProvider(tmp_path / "sandboxes")
+    backend = DshBackend("deepseek-flash", executable=str(binary), node_executable=str(node))
+    assert backend.sandbox_image is None
+    assert backend.state_transport == "sync"
+    assert backend.python_executable == sys.executable
+    additions = backend.sandbox_additions(ctx)
+    assert not additions.mounts
+    sandbox_id = await sandbox.create("s", SandboxSpec(image="unused", env=additions.env))
+    task = "修改测试\r\nKeep {{literal}}.\n\n"
+    if guidance is not None:
+        ctx = ctx.model_copy(update={"agent_overlay": AgentOverlay(system_prompt=guidance)})
+    try:
+        events = [event async for event in backend.run_turn(
+            sandbox, sandbox_id, ctx, task, session_id=None, timeout_s=30,
+        )]
+        assert [event.type for event in events] == ["session_started", "message", "turn_completed"]
+        assert events[-1].data["final_message"] == "完成"
+        received = json.loads(events[1].data["text"])
+        assert received["task"] == task
+        patch = Path(received["patch"])
+        directory = sandbox.root / sandbox_id
+        if guidance is None:
+            assert patch == directory / "agent_home" / "sca-dsh.patch.yml"
+        else:
+            assert patch.parent.parent == directory / "tmp"
+            rows = json.loads(patch.read_text(encoding="utf-8"))
+            plugin, = rows[-1]["insert"]
+            assert plugin["name"] == f"./{OVERLAY_FILENAME}"
+            assert plugin["config"]["guidance"] == guidance
+            assert (patch.parent / OVERLAY_FILENAME).read_text(encoding="utf-8") == OVERLAY_MODULE
+    finally:
+        await sandbox.destroy(sandbox_id)
