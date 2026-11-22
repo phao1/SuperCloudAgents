@@ -6,16 +6,21 @@ const SCATaskDAG = (() => {
   const minScale = .85;
   const statusLabels = {
     pending: '待执行', running: '运行中', succeeded: '已完成',
-    failed: '失败', cancelled: '已取消', skipped: '已跳过',
+    failed: '失败', cancelled: '已取消', skipped: '已跳过', queued: '排队中', stopped: '已停止',
   };
   const kindLabels = {
     task: '任务', plan: '规划', subtask: '子任务', attempt: '候选', execution: '执行', turn: 'Agent 轮次',
     tool_group: '工具', verification: '验证', fix: '修复轮次', interjection: '插话',
     merge: '汇合', review: '人工审核', pr: 'PR', ci: 'CI', finish: '结束',
+    evolution: '演进', generation: '代', candidate: '候选', eval_run: '评测',
+    case_task: '用例任务', promotion: '晋升决定', champion: '冠军',
   };
   const edgeKinds = ['sequence', 'dependency', 'spawn', 'select', 'merge'];
   const edgePriority = {sequence: 0, spawn: 1, merge: 2, dependency: 3, select: 4};
   const executionKinds = new Set(['turn', 'fix', 'tool_group', 'verification']);
+  const edgeKey = (from, to) => JSON.stringify([from, to]);
+  const percentFormat = new Intl.NumberFormat('zh-CN', {style: 'percent', maximumFractionDigits: 1});
+  let nextRenderer = 0;
 
   function addToList(map, key, item) {
     if (!map.has(key)) map.set(key, []);
@@ -57,6 +62,19 @@ const SCATaskDAG = (() => {
       duration_s: duration === null ? null : Math.max(0, duration / 1000),
       cost_usd: totalMetric(steps, 'cost_usd'), tokens: totalMetric(steps, 'tokens'),
     };
+  }
+
+  function remapEdges(edges, source, target = source) {
+    const mapped = new Map();
+    for (const edge of edges) {
+      const from = source(edge.from), to = target(edge.to);
+      if (from === to) continue;
+      const key = edgeKey(from, to), existing = mapped.get(key);
+      if (!existing || edgePriority[edge.kind] > edgePriority[existing.kind]) {
+        mapped.set(key, {from, to, kind: edge.kind});
+      }
+    }
+    return mapped;
   }
 
   function projectGraph(dag, expanded = new Set()) {
@@ -119,19 +137,10 @@ const SCATaskDAG = (() => {
       const entry = entries.get(node.id);
       return [entry && headers.get(entry), !hidden.has(node.id) && (headers.get(node.id) || node)].filter(Boolean);
     });
-    const edges = new Map();
-    const key = (from, to) => JSON.stringify([from, to]);
-    for (const edge of dag.edges) {
-      const from = hidden.get(edge.from) ?? edge.from;
-      const to = hidden.get(edge.to) ?? entries.get(edge.to) ?? edge.to;
-      if (from === to) continue;
-      const existing = edges.get(key(from, to));
-      if (!existing || edgePriority[edge.kind] > edgePriority[existing.kind]) {
-        edges.set(key(from, to), {from, to, kind: edge.kind});
-      }
-    }
+    const edges = remapEdges(dag.edges, id => hidden.get(id) ?? id,
+      id => hidden.get(id) ?? entries.get(id) ?? id);
     for (const [first, id] of entries) {
-      if (expanded.has(id)) edges.set(key(id, first), {from: id, to: first, kind: 'sequence'});
+      if (expanded.has(id)) edges.set(edgeKey(id, first), {from: id, to: first, kind: 'sequence'});
     }
     const dependencies = new Map();
     for (const edge of edges.values()) {
@@ -140,7 +149,31 @@ const SCATaskDAG = (() => {
     // A planned subtask with a dependency already has a path from the plan through that dependency.
     return {nodes, edges: [...edges.values()].filter(({from, to, kind}) =>
       kind !== 'spawn' || byId.get(to)?.kind !== 'subtask' ||
-      !dependencies.get(to)?.some(need => edges.get(key(from, need))?.kind === 'spawn'))};
+      !dependencies.get(to)?.some(need => edges.get(edgeKey(from, need))?.kind === 'spawn'))};
+  }
+
+  function projectEvolution(dag, expanded = new Set()) {
+    const counts = new Map(), hidden = new Map();
+    for (const node of dag.nodes) {
+      const parent = node.meta?.parent;
+      if (node.kind !== 'case_task' || !parent) continue;
+      counts.set(parent, (counts.get(parent) ?? 0) + 1);
+      if (!expanded.has(parent)) hidden.set(node.id, parent);
+    }
+    const nodes = dag.nodes.filter(node => !hidden.has(node.id)).map(node => counts.has(node.id)
+      ? {...node, caseCount: counts.get(node.id), collapsible: true, expanded: expanded.has(node.id)} : node);
+    return {nodes, edges: [...remapEdges(dag.edges, id => hidden.get(id) ?? id).values()]};
+  }
+
+  function scoreLabel(score) {
+    return Number.isFinite(score) ? percentFormat.format(score) : null;
+  }
+
+  function metricLine(node) {
+    if (!Object.hasOwn(node, 'score')) return '';
+    const score = scoreLabel(node.score);
+    return [score && `通过率 ${score}`, Number.isFinite(node.cost_usd) && '$' + node.cost_usd.toFixed(6)]
+      .filter(Boolean).join(' · ');
   }
 
   function orderLayers(layers) {
@@ -170,7 +203,7 @@ const SCATaskDAG = (() => {
     const layerGap = horizontal ? 52 : 32, siblingGap = horizontal ? 24 : 34, wireGap = 17;
     const nodes = new Map(dag.nodes.map(node => [node.id, {
       node, incoming: [], outgoing: [], before: [], after: [], remaining: 0, rank: 0,
-      width: nodeWidth, height: node.summary ? summaryHeight : nodeHeight,
+      width: nodeWidth, height: node.summary || metricLine(node) ? summaryHeight : nodeHeight,
     }]));
     const links = [];
     for (const {from, to, kind} of dag.edges) {
@@ -299,7 +332,7 @@ const SCATaskDAG = (() => {
     detail.append(tools);
   }
 
-  function create(panel, fetchGraph) {
+  function create(panel, fetchGraph, {project = projectGraph} = {}) {
     const svg = panel.querySelector('svg'), world = svg.querySelector('.dag-world');
     const status = panel.querySelector('.dag-load-status'), detail = panel.querySelector('.dag-detail');
     const panHint = panel.querySelector('.dag-pan-hint');
@@ -308,14 +341,15 @@ const SCATaskDAG = (() => {
     const expanded = new Set();
     const camera = {x: 0, y: 0, scale: 1};
     let screen = {width: 1, height: 1};
-    let taskId, snapshot, graph, signature, selected, detailSignature, pendingGraph;
+    let resourceId, snapshot, graph, signature, selected, detailSignature, pendingGraph;
     let orientation = 'vertical', needsFit = true;
     let generation = 0, timer = null, inFlight = false, queued = false, dragged = false;
 
+    const markerPrefix = `dag-arrow-${++nextRenderer}-`;
     const markers = svgElement('defs');
     for (const kind of edgeKinds) {
       const marker = svgElement('marker', {
-        id: 'dag-arrow-' + kind, viewBox: '0 0 8 8', markerWidth: '6',
+        id: markerPrefix + kind, viewBox: '0 0 8 8', markerWidth: '6',
         markerHeight: '6', refX: '8', refY: '4', orient: 'auto', class: 'dag-edge-' + kind,
       });
       marker.append(svgElement('path', {d: 'M0 0 L8 4 L0 8 Z', fill: 'currentColor'}));
@@ -380,10 +414,11 @@ const SCATaskDAG = (() => {
     function drawingNode({node, x, y, width, height}) {
       const state = statusLabels[node.status];
       const summary = node.summary;
-      const activity = summary && `${summary.turns} 轮 · ${summary.tools} 工具 · ${summary.verification} 验证`;
+      const activity = summary ? `${summary.turns} 轮 · ${summary.tools} 工具 · ${summary.verification} 验证`
+        : metricLine(node);
       const facts = summary ? [state, node.duration_s == null ? '—' : node.duration_s.toFixed(1) + ' 秒',
         node.cost_usd == null ? '—' : '$' + node.cost_usd.toFixed(6)].join(' · ')
-        : `${kindLabels[node.kind]} · ${state}`;
+        : [kindLabels[node.kind], state, node.caseCount && `${node.caseCount} 个用例`].filter(Boolean).join(' · ');
       const group = svgElement('g', {
         transform: `translate(${x} ${y})`, class: 'dag-node', role: 'button', tabindex: 0,
         'data-node': node.id, 'data-kind': node.kind, 'data-status': node.status,
@@ -395,7 +430,7 @@ const SCATaskDAG = (() => {
       label.append(element('div', node.label, 'dag-node-label'));
       const body = svgElement('foreignObject', {x: 13, y: 33, width: width - 26,
         height: height - 33, 'aria-hidden': 'true'});
-      if (summary) body.append(element('div', activity, 'dag-node-counts'));
+      if (activity) body.append(element('div', activity, 'dag-node-counts'));
       body.append(element('div', facts, 'dag-node-state'));
       group.append(
         svgElement('title', {}, node.label),
@@ -437,6 +472,8 @@ const SCATaskDAG = (() => {
       fact('时长', node.duration_s == null ? null : node.duration_s.toFixed(2) + ' 秒');
       fact('费用', node.cost_usd == null ? null : '$' + node.cost_usd.toFixed(6));
       fact('Token', node.tokens?.toLocaleString('zh-CN'));
+      if (Number.isFinite(node.score)) fact('通过率', scoreLabel(node.score));
+      if (node.caseCount) fact('用例数', node.caseCount);
       if (node.summary) {
         const {turns, tools, verification} = node.summary;
         fact('轮次', turns);
@@ -446,14 +483,26 @@ const SCATaskDAG = (() => {
       if (meta.depends_on?.length) fact('依赖', meta.depends_on.join('、'));
       if (meta.model) fact('模型', meta.model);
       if (meta.merge_status) fact('合并状态', meta.merge_status);
-      if (meta.decision) fact('审核决定', {approve: '通过', reject: '拒绝', request_changes: '要求修改'}[meta.decision]);
+      if (meta.split) fact('评测分组', {dev: '开发集', holdout: '留出集'}[meta.split]);
+      if (meta.decision) {
+        if (node.kind === 'candidate' || node.kind === 'promotion') {
+          fact('晋升决定', {promoted: '已晋升', rejected: '未晋升', invalid: '静态检查未通过', pending: '待定'}[meta.decision]);
+        } else fact('审核决定', {approve: '通过', reject: '拒绝', request_changes: '要求修改'}[meta.decision]);
+      }
       detail.replaceChildren(heading, facts);
-      const childId = meta.child_task_id || (node.task_id !== taskId ? node.task_id : null);
+      const childId = meta.child_task_id || (node.task_id !== resourceId ? node.task_id : null);
       if (childId) {
-        const anchor = element('a', '打开子任务 ↗');
+        const anchor = element('a', node.kind === 'case_task' ? '打开用例任务 ↗' : '打开子任务 ↗');
         anchor.href = '#/tasks/' + encodeURIComponent(childId);
         detail.append(anchor);
       }
+      if (meta.run_id || meta.champion_id) {
+        const anchor = element('a', meta.run_id ? '打开评测 ↗' : '打开冠军记录 ↗');
+        anchor.href = meta.run_id ? '#/runs/' + encodeURIComponent(meta.run_id)
+          : '#/evolutions/champions/' + encodeURIComponent(meta.champion_id);
+        detail.append(anchor);
+      }
+      if (meta.hypothesis) detail.append(element('p', meta.hypothesis));
       const note = meta.text || meta.feedback || meta.reason || meta.message;
       if (note) detail.append(element('p', note));
       const checks = Object.values(meta.stages ?? {}).flatMap(stage => {
@@ -516,13 +565,13 @@ const SCATaskDAG = (() => {
     function redraw(anchorId) {
       const focused = document.activeElement?.getAttribute('data-node');
       const anchor = graphics.get(anchorId) || anchorNearCenter();
-      graph = layout(projectGraph(snapshot, expanded), orientation);
+      graph = layout(project(snapshot, expanded), orientation);
       graphics.clear();
       const edges = svgElement('g', {'aria-hidden': 'true'});
       for (const edge of graph.edges) {
         edges.append(svgElement('path', {
           d: edgePath(edge, orientation), class: 'dag-edge dag-edge-' + edge.kind,
-          'marker-end': 'url(#dag-arrow-' + edge.kind + ')',
+          'marker-end': 'url(#' + markerPrefix + edge.kind + ')',
         }));
       }
       const nodes = svgElement('g');
@@ -548,7 +597,7 @@ const SCATaskDAG = (() => {
       clearTimeout(timer);
       timer = null;
       inFlight = queued = false;
-      taskId = snapshot = graph = signature = selected = detailSignature = null;
+      resourceId = snapshot = graph = signature = selected = detailSignature = null;
       pendingGraph = null;
       pointers.clear();
       expanded.clear();
@@ -562,14 +611,14 @@ const SCATaskDAG = (() => {
       graphics.clear();
     }
 
-    function refresh(id, fromStream = false) {
-      if (id !== taskId) {
+    function refresh(id, coalesce = false) {
+      if (id !== resourceId) {
         reset();
-        taskId = id;
+        resourceId = id;
         status.textContent = '正在读取执行图…';
       }
       if (timer !== null || inFlight) {
-        if (inFlight && fromStream) queued = true;
+        if (inFlight && coalesce) queued = true;
         return;
       }
       const current = generation;
@@ -593,7 +642,7 @@ const SCATaskDAG = (() => {
             }
           }
         }
-      }, fromStream ? 300 : 0);
+      }, coalesce ? 300 : 0);
     }
 
     panel.querySelector('.dag-zoom-in').onclick = () => zoom(1.3);
@@ -693,9 +742,9 @@ const SCATaskDAG = (() => {
     }
     const observer = new ResizeObserver(resize);
     observer.observe(svg);
-    return {refresh, reset};
+    return {refresh, reset, destroy() {reset(); observer.disconnect();}};
   }
 
-  return {create, layout, projectGraph};
+  return {create, layout, projectGraph, projectEvolution};
 })();
 if (typeof module !== 'undefined') module.exports = SCATaskDAG;

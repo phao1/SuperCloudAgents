@@ -469,7 +469,7 @@ body[data-trace-expanded] { overflow: hidden; }
       <a href="#/analysis" data-access="history" hidden>数据分析</a>
       <a href="#/evals" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
-      <a href="#/evolutions" data-access="admin" hidden>自动演进</a>
+      <a href="#/evolutions" data-access="evolution-history" hidden>自动演进</a>
       <a href="#/compare" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
       <a href="#/versions" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
       <a href="#/memories" data-access="tenant" hidden>共享记忆</a>
@@ -841,6 +841,25 @@ body[data-trace-expanded] { overflow: hidden; }
     <section id="evolutions-page" class="page" hidden>
       <nav id="evolution-nav" class="portal-tabs" aria-label="自动演进功能"></nav>
       <div id="evolution-content" class="page"></div>
+      <template id="evolution-dag-template">
+        <section id="evolution-dag" class="panel task-dag" aria-labelledby="evolution-dag-title">
+          <div class="panel-head">
+            <h2 id="evolution-dag-title">演进执行图 DAG</h2>
+            <div class="dag-controls">
+              <button class="dag-zoom-out" type="button" aria-label="缩小演进图">−</button>
+              <button class="dag-zoom-in" type="button" aria-label="放大演进图">＋</button>
+              <button class="dag-fit" type="button">查看全图</button>
+            </div>
+          </div>
+          <p class="dag-pan-hint dag-legend" hidden>滚动或拖动查看其余节点</p>
+          <p class="dag-load-status" role="status"></p>
+          <svg class="dag-canvas" tabindex="0" role="group"
+               aria-label="演进执行图。滚动、拖动或按方向键平移，按加减键缩放。选择评测节点展开用例。">
+            <g class="dag-world"></g>
+          </svg>
+          <aside class="dag-detail" aria-label="节点详情" aria-live="polite" hidden></aside>
+        </section>
+      </template>
     </section>
     <section id="tools-page" class="page" hidden><div id="tools-content" class="page"></div></section>
     <section id="integrations-page" class="page" hidden><div id="integrations-content" class="page"></div></section>
@@ -1643,7 +1662,7 @@ function stopTaskStream(){
 function refreshTaskDag(id, fromStream=false){
   if(!location.hash.startsWith('#/tasks'))return;
   const panel=$('task-dag');
-  panel.hidden=!portalUI.can('tenant')||typeof SCATaskDAG==='undefined';
+  panel.hidden=!portalUI.can('history')||typeof SCATaskDAG==='undefined';
   if(panel.hidden)return;
   taskDag??=SCATaskDAG.create(panel,taskId=>data('/tasks/'+enc(taskId)+'/dag'));
   taskDag.refresh(id,fromStream);
@@ -2402,7 +2421,7 @@ const pages={
   compare:['compare-page','版本对比','查看通过率、耗时和费用的变化。'],
   tasks:['trace','任务进度','沿架构图查看任务经过的模块和事件。'],
   loop:['loop','自演进闭环','追踪从基线、候选到回归的进度。'],
-  evolutions:['evolutions-page','自动演进','查看开发集与留出集证据，管理晋升、定期计划与灰度。'],
+  evolutions:['evolutions-page','自动演进','查看演进执行图、开发集与留出集证据。'],
   versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
   tools:['tools-page','工具与知识库','查看 MCP 工具和知识库文档。'],
   integrations:['integrations-page','集成','管理代码托管集成并查看设计与工单的凭证配置。'],
@@ -2412,7 +2431,7 @@ const pages={
 const pageAccess={
   projects:'tenant',
   overview:'public',submit:'member',tasks:'history',analysis:'history',versions:'tenant',memories:'tenant',
-  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'admin',integrations:'admin',
+  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'evolution-history',integrations:'admin',
   tools:'tenant',team:'admin',platform:'platform',
 };
 function pageRoute(){
@@ -2459,6 +2478,7 @@ async function showRoute({page,current,parts}){
   if(hash!==location.hash||identity!==portalIdentity)return;
   if(current!=='team')portalSettings.clearSensitive();
   if(current!=='projects')portalProjects.leave();
+  if(current!=='evolutions')portalEvolution.reset();
   syncAccess();
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;

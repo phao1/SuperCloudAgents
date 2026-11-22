@@ -38,6 +38,7 @@ if TYPE_CHECKING:
         Thread,
         ThreadGroup,
     )
+    from sca.evolve.dag import EvolutionHistory
 
 
 def task_uuid(value: str | UUID) -> UUID:
@@ -2919,3 +2920,59 @@ class Store:
                 tasks.c.result["parent_task_id"].astext == str(task_id),
             ).order_by(tasks.c.created_at, tasks.c.id))).mappings()
             return [Task.model_validate(dict(row)) for row in rows]
+
+    # Evolution DAG
+
+    async def get_evolution_dag_history(self, evolution_id: UUID) -> "EvolutionHistory":
+        from sca.db.schema import (
+            champions,
+            eval_results,
+            eval_runs,
+            evolution_candidates,
+            evolutions,
+        )
+
+        tenant = self.tenant_id
+        if tenant is None:
+            raise ValueError("Evolution graph lookup requires a tenant")
+        c, r, t = evolution_candidates.c, eval_results.c, tasks.c
+        async with self._transaction() as session:
+            evolution = (await session.execute(select(evolutions).where(
+                evolutions.c.id == evolution_id, evolutions.c.tenant_id == tenant,
+            ))).mappings().one()
+            candidates = (await session.execute(select(evolution_candidates).where(
+                c.evolution_id == evolution_id, c.tenant_id == tenant,
+            ))).mappings().all()
+            referenced = {row[key] for row in candidates for key in ("dev_run_id", "holdout_run_id")
+                          if row[key] is not None}
+            owner = eval_runs.c.variant["evolution_id"].astext
+            runs = (await session.execute(select(eval_runs).where(
+                eval_runs.c.tenant_id == tenant,
+                (owner == str(evolution_id)) | (owner.is_(None) & eval_runs.c.id.in_(referenced)),
+            ))).mappings().all()
+            run_ids = [run["id"] for run in runs]
+            results = (await session.execute(select(
+                r.run_id, r.case_id, r.repeat, r.task_id, r.acceptance_passed, r.trajectory_passed,
+                r.cost_usd, r.duration_s, r.tokens,
+            ).join(tasks, (t.id == r.task_id) & (t.tenant_id == tenant)).where(
+                r.tenant_id == tenant, r.run_id.in_(run_ids),
+            ).order_by(r.run_id, r.case_id, r.repeat))).mappings().all()
+            run_ref = t.spec["eval_run_id"].astext
+            # Submissions are visible before the collector records their results.
+            case_tasks = (await session.execute(select(
+                t.id, t.state, t.created_at, t.updated_at, t.idempotency_key, run_ref.label("eval_run_id"),
+                t.usage["cost_micro_usd"].label("cost_micro_usd"),
+                t.result["model_provider_error"].label("model_provider_error"),
+            ).where(t.tenant_id == tenant, (
+                run_ref.in_([str(run_id) for run_id in run_ids])
+                | t.id.in_({row["task_id"] for row in results})
+            )).order_by(t.created_at, t.id))).mappings().all()
+            promoted = (await session.execute(select(champions).where(
+                champions.c.tenant_id == tenant,
+                champions.c.candidate_id.in_([row["id"] for row in candidates]),
+            ).order_by(champions.c.created_at, champions.c.id))).mappings().all()
+        return {
+            "evolution": dict(evolution), "candidates": list(map(dict, candidates)),
+            "runs": list(map(dict, runs)), "results": list(map(dict, results)),
+            "tasks": list(map(dict, case_tasks)), "champions": list(map(dict, promoted)),
+        }

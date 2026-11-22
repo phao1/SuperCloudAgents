@@ -13,6 +13,36 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/dag" \
 
 返回完整的 `nodes` 和 `edges`。每条边包含 `from`、`to` 和 `kind`。五种边分别表示执行顺序（`sequence`）、子任务依赖（`dependency`）、派生（`spawn`）、候选选择（`select`）和合并（`merge`）。`merge` 节点的 `meta.action` 表示候选选择或子任务合并。`tool_group` 节点的 `meta` 包含工具列表和按名称统计的调用次数。可折叠的执行节点通过可选的 `meta.parent` 引用所属节点 ID。费用单位为美元，耗时单位为秒。
 
+## 演进执行图与访客历史
+
+在 Portal 打开「自动演进」→「演进记录」，选择一次运行。执行图从基线评测向下展示各代候选、开发集与留出集评测、晋升决定和登记的冠军。评测节点默认收起用例任务。点击评测节点展开用例，选中用例后点击「打开用例任务」进入该任务的执行图。演进排队、运行或待审批时，Portal 每 4 秒刷新，保留展开状态和查看位置。
+
+节点区分排队、运行、完成、失败和停止。`score` 是 0 到 1 的通过率，未取得成绩时为 `null`。候选显示开发集通过率，评测按已收集且可评分的用例计算通过率。`cost_usd` 为记录的美元费用。候选的评测关联尚未写入时，执行图按已保存的时间、分组和覆盖内容展示进度，无法确认归属的评测仍可在图中打开。
+
+接口使用演进详情的读权限，返回 `nodes` 和 `edges`。用例节点的 `task_id` 指向同租户任务，`meta.parent` 指向可展开的评测节点。无需数据库迁移。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/dag" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+在 API 启用 `SCA_GUEST_VIEW=local` 并设置 `SCA_GUEST_TENANT=eval`，访客可从本机打开演进记录、执行图、评测和冠军谱系。演示启动脚本默认使用 `eval` 租户。访客响应会清除操作者和凭据信息，界面隐藏启动、停止、审批、固化、定期计划等管理功能。历史浏览无需模型密钥。[访客模式配置](operations.md#只读访客模式)
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/evolutions
+curl -fsS "http://127.0.0.1:8000/v1/evolutions/$EVOLUTION_ID/dag"
+curl -fsS "http://127.0.0.1:8000/v1/evals/runs/$EVAL_RUN_ID"
+curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
+```
+
+### 演进图演示
+
+使用 `SCA_DATABASE_URL` 指向已迁移的演示数据库，并使用具有写权限的数据库用户。脚本在 `eval` 租户写入两代、六个候选以及 `fake` 后端的历史任务，包含一次晋升和一次未通过的留出集评测。费用为演示数据，全程无需 Worker 或模型调用。打开脚本打印的 Portal 链接即可查看。
+
+```bash
+python scripts/evo_dag_demo.py --url http://127.0.0.1:8000
+```
+
 ## 进行中的任务工作区
 
 更新 Worker 后，已有的子工作区继续使用原路径。以 `SCA_DATA_DIR/tasks/<id>/sub/` 为基准，

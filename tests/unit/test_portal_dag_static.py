@@ -189,6 +189,38 @@ assert.deepEqual(layout(folded).nodes.map(n => n.node.id),
 """)
 
 
+def test_evolution_dag_folds_cases_without_losing_paths_to_decisions():
+    run_node("""
+const assert = require('node:assert/strict');
+const {layout, projectEvolution} = require(process.argv[1]);
+const dag = {
+  nodes: [
+    {id: 'candidate', kind: 'candidate'}, {id: 'dev', kind: 'eval_run', score: .5, cost_usd: .02},
+    {id: 'case1', kind: 'case_task', meta: {parent: 'dev'}},
+    {id: 'case2', kind: 'case_task', meta: {parent: 'dev'}},
+    {id: 'holdout', kind: 'eval_run'}, {id: 'holdout-case', kind: 'case_task', meta: {parent: 'holdout'}},
+    {id: 'decision', kind: 'promotion'},
+  ],
+  edges: [
+    ['candidate', 'dev'], ['dev', 'case1'], ['dev', 'case2'], ['case1', 'holdout'], ['case2', 'holdout'],
+    ['holdout', 'holdout-case'], ['holdout-case', 'decision'],
+  ].map(([from, to]) => ({from, to, kind: 'sequence'})),
+};
+const folded = projectEvolution(dag);
+assert.deepEqual(folded.nodes.map(node => node.id), ['candidate', 'dev', 'holdout', 'decision']);
+assert.deepEqual(folded.edges.map(e => [e.from, e.to]),
+  [['candidate', 'dev'], ['dev', 'holdout'], ['holdout', 'decision']]);
+assert.deepEqual(folded.nodes[1], {...dag.nodes[1], caseCount: 2, collapsible: true, expanded: false});
+const opened = projectEvolution(dag, new Set(['dev']));
+assert(opened.nodes.find(node => node.id === 'dev').expanded);
+assert.deepEqual(opened.nodes.filter(node => node.kind === 'case_task').map(node => node.id), ['case1', 'case2']);
+assert.equal(layout(folded).nodes.length, 4);
+const graph = layout(opened);
+assert.equal(graph.nodes.length, opened.nodes.length);
+assert(graph.edges.every(e => e.source.y < e.target.y));
+""")
+
+
 def test_stream_refresh_keeps_open_groups_and_the_pan_and_zoom(demo_dag):
     run_node("""
 const assert = require('node:assert/strict');

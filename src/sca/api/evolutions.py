@@ -20,6 +20,7 @@ from sca.config import get_settings
 from sca.core.models import Principal
 from sca.db.repo import Store
 from sca.eval.suites import load_suite
+from sca.evolve.dag import EvolutionDAG, build_evolution_dag
 from sca.evolve.models import ChampionRolloutSpec, EvolutionConfig, EvolutionScheduleSpec
 from sca.evolve.scheduler import EvolutionSchedulerWorkflow, schedule_workflow_id
 from sca.evolve.workflow import EvolutionWorkflow
@@ -100,6 +101,15 @@ async def get(evolution_id: UUID, request: Request, user: HistoryReader) -> dict
     return history_payload(user, await detail(request, user, evolution_id))
 
 
+@router.get('/evolutions/{evolution_id}/dag', response_model=EvolutionDAG)
+async def evolution_dag(evolution_id: UUID, request: Request, user: HistoryReader) -> dict:
+    try:
+        history = await scoped(request, user).get_evolution_dag_history(evolution_id)
+    except NoResultFound:
+        raise HTTPException(404, '演进记录不存在') from None
+    return history_payload(user, build_evolution_dag(history).model_dump())
+
+
 class Decision(BaseModel):
     candidate_id: UUID
 
@@ -143,9 +153,9 @@ async def reject(evolution_id: UUID, body: Decision, request: Request, user: Adm
 
 
 @router.get('/champions')
-async def champions(request: Request, user: Admin, agent_version: str | None = None,
+async def champions(request: Request, user: HistoryReader, agent_version: str | None = None,
                     model: str | None = None) -> list[dict]:
-    return await scoped(request, user).list_champions(agent_version, model)
+    return history_payload(user, await scoped(request, user).list_champions(agent_version, model))
 
 
 @router.post('/champions/{champion_id}/activate')

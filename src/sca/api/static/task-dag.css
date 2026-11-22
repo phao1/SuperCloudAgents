@@ -30,7 +30,9 @@
 .dag-node[data-status="running"] { --node-ink: var(--accent); --node-bg: var(--accent-bg); }
 .dag-node[data-status="succeeded"] { --node-ink: var(--good); --node-bg: var(--good-bg); }
 .dag-node[data-status="failed"] { --node-ink: var(--bad); --node-bg: var(--bad-bg); }
-.dag-node[data-status="cancelled"] { --node-ink: var(--warn); --node-bg: var(--warn-bg); }
+.dag-node[data-status="cancelled"], .dag-node[data-status="stopped"] {
+  --node-ink: var(--warn); --node-bg: var(--warn-bg);
+}
 .dag-node[data-status="skipped"] { --node-bg: var(--subtle); }
 .dag-node rect { fill: var(--node-bg); stroke: var(--node-ink); stroke-width: 1.5; }
 .dag-node[data-status="skipped"] rect { stroke-dasharray: 4 3; }
