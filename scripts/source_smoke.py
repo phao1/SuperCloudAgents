@@ -1,4 +1,4 @@
-"""Submit a model-free task to a running source-mode Portal."""
+"""Smoke test a model-free task and history transfer in source mode."""
 
 from __future__ import annotations
 
@@ -62,27 +62,64 @@ def smoke(client: httpx.Client, repo: Path, wait_s: float) -> UUID:
     raise ValueError(f"Timed out waiting for task {task_id}.")
 
 
+def check_history(client: httpx.Client, task_id: UUID) -> None:
+    scripts = Path(__file__).resolve().parent
+    if os.name == "nt":
+        wrapper = ["powershell.exe", "-NoProfile", "-NonInteractive", "-File",
+                   str(scripts / "portal_source.ps1")]
+    else:
+        wrapper = ["bash", str(scripts / "portal_source.sh")]
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+    with tempfile.TemporaryDirectory(prefix="sca source history ") as temporary:
+        archive = str(Path(temporary) / "history.zip")
+        for command in ("export-history", "import-history"):
+            result = subprocess.run(
+                [*wrapper, command, archive], cwd=scripts.parent, env=env, timeout=120, check=False,
+                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, encoding="utf-8", errors="replace",
+            )
+            if result.returncode != 0:
+                raise ValueError(f"{command} failed (exit {result.returncode}).")
+        if not any(line.startswith("已导入 0 条历史记录和 ") for line in result.stdout.splitlines()):
+            raise ValueError("History re-import did not report 0 new records.")
+
+    tasks = client.get("/v1/tasks").raise_for_status().json()
+    if not any(task["id"] == str(task_id) for task in tasks):
+        raise ValueError(f"Task {task_id} is missing from /v1/tasks after history re-import.")
+    print(f"History re-import reported 0 new records. Task {task_id} is listed in /v1/tasks.")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--api", default=os.environ.get("SCA_API_URL", "http://127.0.0.1:8000"))
     parser.add_argument("--wait", type=float, default=120)
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--task-id-only", action="store_true", help="Print only the task ID on success.")
+    mode.add_argument("--check-history", type=UUID, metavar="TASK_ID",
+                      help="Export and re-import source history, then verify the task is still listed.")
     args = parser.parse_args()
     token = os.environ.get("PORTAL_TOKEN") or os.environ.get("SCA_EVAL_API_TOKEN")
     if not token:
         parser.error("Set PORTAL_TOKEN to the current Portal login token.")
     try:
-        with tempfile.TemporaryDirectory(prefix="sca source smoke ") as temporary, httpx.Client(
+        with httpx.Client(
             base_url=args.api, headers={"Authorization": f"Bearer {token}"},
             timeout=10, trust_env=False,
         ) as client:
-            task_id = smoke(client, Path(temporary) / "repo", args.wait)
+            if args.check_history is not None:
+                check_history(client, args.check_history)
+                return
+            with tempfile.TemporaryDirectory(prefix="sca source smoke ") as temporary:
+                task_id = smoke(client, Path(temporary) / "repo", args.wait)
     except httpx.HTTPStatusError as exc:
         raise SystemExit(f"Source smoke received HTTP {exc.response.status_code}.") from None
     except httpx.RequestError:
         raise SystemExit("Cannot reach the source-mode Portal API.") from None
     except (ValueError, OSError, subprocess.SubprocessError) as exc:
         raise SystemExit(str(exc)) from None
-    print(f"Portal loaded and task {task_id} SUCCEEDED with the expected patch.")
+    if args.task_id_only:
+        print(task_id)
+    else:
+        print(f"Portal loaded and task {task_id} SUCCEEDED with the expected patch.")
 
 
 if __name__ == "__main__":
