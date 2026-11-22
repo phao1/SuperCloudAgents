@@ -962,6 +962,7 @@ function overallPassed(row){return row.acceptance_passed===true&&row.trajectory_
 function evalCaseErrored(row){return row.status==='errored'||Boolean(row.infrastructure_error)}
 function resultLabel(row){
   if(row.infrastructure_error)return '⚠ 基础设施错误 · '+providerAccountLabel(row.infrastructure_error.kind);
+  if(row.reason)return (evalCaseErrored(row)?'⚠ ':'✕ ')+row.reason;
   if(evalCaseErrored(row))return '⚠ 用例执行错误';
   return row.acceptance_passed===true&&row.trajectory_passed===false?'⚠ 验收通过 · 过程未通过':overallPassed(row)?'✓ 总体通过':row.acceptance_passed===false?'✕ 验收失败':'◷ 待验收';
 }

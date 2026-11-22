@@ -333,6 +333,8 @@ def _make_dsh_backend(settings: Settings, executable: Path | None = None) -> Age
     return DshBackend(settings.default_model, settings.dsh_version, settings.dsh_sandbox_image,
                       protocol=protocol, executable=str(executable) if executable else None,
                       node_executable=str(node) if node else None,
+                      # DSH request budgets
+                      max_output_tokens=settings.dsh_max_output_tokens,
                       docker_runtime=DockerNodeRuntime(settings, "dsh") if settings.sandbox_driver == "docker" else None)
 
 

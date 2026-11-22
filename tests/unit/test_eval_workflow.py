@@ -10,9 +10,11 @@ from temporalio.worker.workflow_sandbox import SandboxedWorkflowRunner
 
 from sca.api.evals import summary
 from sca.config import Settings
+from sca.core.errors import MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED
 from sca.eval.activities import EvalActivities
 from sca.eval.compare import compare
 from sca.eval.workflow import EvalRunWorkflow
+from sca.evolve.checks import paired_complete
 
 
 @pytest.mark.parametrize('patched', [True, False])
@@ -119,3 +121,69 @@ async def test_eval_distinguishes_execution_errors_from_scored_failures(monkeypa
     report = compare(run, run)
     assert report["errored"] == {"A": failures, "B": failures}
     assert all(row["A"] is row["B"] is None for row in report["cases"][:failures])
+
+
+@pytest.mark.parametrize("reason", [MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED])
+async def test_eval_scores_dsh_budget_failure_after_first_model_call(monkeypatch, reason):
+    run_id, task_id = str(uuid4()), str(uuid4())
+    exhausted = reason == MODEL_BUDGET_EXHAUSTED
+    store = SimpleNamespace(record_eval_result=AsyncMock(), finish_eval_run=AsyncMock())
+    activities = EvalActivities(Settings(_env_file=None), store)
+    submitted = []
+
+    def api(request):
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json=[
+                {"seq": 1, "type": "agent.turn_started", "payload": {"turn": 1, "backend": "dsh"}},
+                {"seq": 2, "type": "budget.exceeded", "payload": {"turn": 1, "reason": reason}},
+            ])
+        return httpx.Response(200, json={
+            "id": task_id, "state": "FAILED", "state_reason": reason, "result": {},
+            "usage": {"cost_micro_usd": 304 if exhausted else 0},
+            "created_at": "2026-11-22T00:00:00Z", "updated_at": "2026-11-22T00:00:09Z",
+        })
+
+    monkeypatch.setattr(activities, "http", lambda: httpx.AsyncClient(
+        base_url="http://api", transport=httpx.MockTransport(api),
+    ))
+
+    async def execute(name, item, **options):
+        match name:
+            case "eval_prepare":
+                return {"cases": [{"id": "first"}, {"id": "second"}]}
+            case "eval_submit":
+                submitted.append(item["case"]["id"])
+                return task_id
+            case "eval_collect":
+                try:
+                    return await activities.collect(item)
+                except ApplicationError as exc:
+                    assert exc.non_retryable and exc.type == "InvalidEvalInput"
+                    raise ActivityError(
+                        "Activity failed", scheduled_event_id=1, started_event_id=2,
+                        identity="test", activity_type=name, activity_id="1",
+                        retry_state=RetryState.NON_RETRYABLE_FAILURE,
+                    ) from exc
+            case "eval_finish":
+                await activities.finish(item)
+
+    monkeypatch.setattr(workflow, "execute_activity", execute)
+    monkeypatch.setattr(workflow, "patched", lambda _: True)
+    status = await EvalRunWorkflow().run({
+        "id": run_id, "repeat": 1, "concurrency": 1, "budget": .04, "case_budget": .02,
+    })
+    rows = [call.args[0] for call in store.record_eval_result.await_args_list]
+    run = {"suite_hash": "same", "status": status, "results": rows}
+    counts = summary(run)
+    if exhausted:
+        assert status == "completed" and submitted == ["first", "second"]
+        store.finish_eval_run.assert_awaited_once_with(run_id, "completed", reason=None)
+        assert counts["failed"] == 2 and counts["errored"] == 0
+        assert all(row["acceptance_passed"] is row["verification_passed"] is False for row in rows)
+        assert all(row["cost_usd"] == .000304 for row in rows)
+        assert paired_complete(run, run)
+    else:
+        assert status == "failed" and submitted == ["first"]
+        store.finish_eval_run.assert_awaited_once_with(run_id, "failed", reason=reason)
+        assert counts["failed"] == 0 and counts["errored"] == 1
+        assert not paired_complete(run, run)

@@ -338,8 +338,8 @@ Portal「演进记录」按后端显示运行详情。单独跑开发集时，�
 `"split":"dev"`，在 `config` 中传入代数、候选和预算配置。`opencode-prompt` 是专用的
 OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 套件可用于 DSH。
 
-任务因 Agent 或环境故障结束且未完成一轮时，用例标记为 `errored`。评测详情返回
-`errored` 计数及逐题状态。超过半数已执行用例出错时，评测以 `failed` 结束并记录原因。
+任务因 Agent 或环境故障结束且未完成一轮时，用例标记为 `errored`。DSH 预算拒绝有单独的判定规则。
+评测详情返回 `errored` 计数及逐题状态。超过半数已执行用例出错时，评测以 `failed` 结束并记录原因。
 演进需要完整的配对结果。基线无效会结束演进，候选评测无效会记录拒绝原因。
 效率晋升要求双方有正的实测费用，开发集通过率持平或提高，留出集通过率不降且费用不涨。
 Portal 的评测和演进详情显示失败原因，演进活动失败时还会显示错误类别。
@@ -359,11 +359,52 @@ curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
 `PUT /v1/champions/rollouts` 的请求中加 `"agent_backend":"dsh"`。DSH 冠军即时可用，
 调用固化接口会返回 HTTP 200 和说明。
 
+### DSH 单题预算
+
+Worker 的 `SCA_DSH_MAX_OUTPUT_TOKENS` 默认为 `8192`，适用于 Messages、Chat Completions
+和上下文压缩请求。修改环境变量后重启 Worker。Headless 模式关闭 `session-title-llm` 的后台模型请求。
+按仓库配置的峰值费率，`deepseek-flash` 的 8,192 个输出 Token 约为 $0.00983，预留时还会
+计入输入费用。`deepseek-v4-pro` 的输出费率更高，使用小额 `case_budget` 时需相应降低输出上限。
+[DSH Messages 默认值](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/packages/llm/llm-deepseek/src/defaults.ts)
+
+LiteLLM 1.110.2 按估算输入费用加最大输出费用预留金额，输出上限取请求值和模型上限中的较小值。
+有剩余额度时，默认机制可把超大的预留缩到剩余额度，导致同一虚拟密钥的并发请求暂时被拒。
+Messages 流的成功回调在取得最终用量后按实测费用结算，多余预留随之释放，回调可能晚于客户端收到响应。
+失败路径会清理预留，取消时可能保留已发出的输入费用。平台保留预留机制以约束并发开支。
+启用 `disable_budget_reservation` 后并发请求可能透支。`fail_closed_budget_enforcement` 会直接拒绝
+估算费用超过剩余额度的请求。
+[金额预留与释放](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/spend_tracking/budget_reservation.py)
+[流式请求处理](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/common_request_processing.py#L3269-L3294)
+[费用回调](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/hooks/proxy_track_cost_callback.py#L1195-L1254)
+
+OpenCode 和 Pi 的网关配置走 Chat Completions，分别按模型目录及上下文余量、Pi 自定义模型的
+16,384 Token 默认值及上下文余量设置输出上限。Codex 走 Responses，其请求体省略输出上限时
+由 LiteLLM 估算。启用 SCA 限流代理时，默认的 `auto` 协议为 DSH 选用 Chat Completions。
+代理按请求体大小和输出上限预留 TPM，读到流中的 `usage.total_tokens` 后校正。LiteLLM 继续
+执行独立的美元预算检查。
+[OpenCode 请求构建](https://github.com/anomalyco/opencode/blob/v2.3.0/packages/core/src/session/model-request.ts)
+[Pi 模型默认值](https://github.com/earendil-works/pi/blob/v1.5.2/packages/coding-agent/src/core/provider-composer.ts#L220-L237)
+[Pi 请求设置](https://github.com/earendil-works/pi/blob/v1.5.2/packages/ai/src/api/simple-options.ts#L44-L74)
+[Codex 请求结构](https://github.com/openai/codex/blob/main/codex-rs/codex-api/src/common.rs#L382-L412)
+
+模型已有响应后遇到预算拒绝时，评测计入一个失败用例并保留配对，`results[].reason` 为「预算耗尽」。
+任务的首个模型请求就被拒时，评测以配置错误结束，`reason` 提示检查预算和输出上限。可读取评测详情
+和任务事件核对分类与用量。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evals/runs/$EVAL_RUN_ID" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
 ### 验证
 
 模拟的 headless 进程和网关验证了提示词追加、续接、Token 用量和虚拟密钥费用。
 安装器单测模拟了 1,179 MB 的 DSH 安装，覆盖 DSH 与 Pi 的磁盘空间门槛及缓存复用。
 评测与演进测试覆盖多数用例出错、基线失效、候选拒绝和零费用门禁。启动测试验证迁移
 先于 API 和 Worker，迁移 `0025` 的 SQL 已离线检查。
+使用已安装的 DSH 0.2.2-rc.5 和模拟流式响应，核对了两个协议的 `max_tokens` 请求字段和标题请求数。
+单测验证了首个请求被拒和中途耗尽预算对应的评测结果。
 当前沙箱拒绝 Postgres 和 Temporal 套接字连接。真实服务、Docker 安装体积、Windows 实机
 和付费模型仍需现场验证。

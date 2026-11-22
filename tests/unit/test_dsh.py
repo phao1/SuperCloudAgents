@@ -11,12 +11,19 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from pydantic import ValidationError
+from temporalio import workflow
+from temporalio.exceptions import ActivityError, ApplicationError, RetryState
 
 from sca.agents import docker_node
 from sca.agents.docker_node import NODE_IMAGE, DockerNodeRuntime
 from sca.agents.dsh import KEY_ENV, LAUNCH, OVERLAY_FILENAME, OVERLAY_MODULE, DshBackend
 from sca.config import Settings
-from sca.core.errors import AgentTurnError, SandboxError
+from sca.core.errors import (
+    MODEL_BUDGET_EXHAUSTED,
+    MODEL_BUDGET_MISCONFIGURED,
+    AgentTurnError,
+    SandboxError,
+)
 from sca.core.models import (
     AgentContext,
     AgentEvent,
@@ -30,6 +37,7 @@ from sca.core.models import (
 from sca.gateway.litellm import LiteLLMGateway
 from sca.host import host_executable
 from sca.kernel.activities import KernelActivities, TurnInput
+from sca.kernel.workflow import TaskWorkflow
 from sca.kinds.coding.spec import CodingSpec
 from sca.orchestration.worker import make_agent_backend
 from sca.sandbox._exec import NODE_EXECUTABLE, NODE_RUNTIME_DIR, NODE_RUNTIME_LABEL
@@ -99,17 +107,28 @@ def test_home_and_image(ctx, transport):
     (False, "auto", "messages"), (True, "auto", "openai"),
     (False, "openai", "openai"), (True, "messages", "messages"),
 ])
-def test_worker_protocol_selection(limiter, setting, protocol):
+def test_worker_protocol_selection(limiter, setting, protocol, monkeypatch):
+    monkeypatch.setenv("SCA_DSH_MAX_OUTPUT_TOKENS", "6144")
     spec = CodingSpec(repo_url="/repo", instruction="test", agent_backend="dsh")
     config = Settings(_env_file=None, agent_backend=spec.agent_backend, gateway_limiter=limiter,
                       dsh_gateway_protocol=setting, default_model="deepseek-flash")
     backend = make_agent_backend(config)
     assert isinstance(backend, DshBackend) and backend.protocol == protocol
+    assert backend.max_output_tokens == 6144
+
+
+def test_dsh_output_cap_must_be_positive(monkeypatch):
+    monkeypatch.setenv("SCA_DSH_MAX_OUTPUT_TOKENS", "0")
+    with pytest.raises(ValidationError, match="dsh_max_output_tokens"):
+        Settings(_env_file=None)
 
 
 @pytest.mark.parametrize("protocol", ["messages", "openai"])
-async def test_command_env_and_session_continuity(ctx, protocol):
-    backend = DshBackend("deepseek-flash", protocol=protocol)
+@pytest.mark.parametrize("override", [None, 6144])
+async def test_command_env_and_session_continuity(ctx, protocol, override):
+    options = {"max_output_tokens": override} if override is not None else {}
+    backend = DshBackend("deepseek-flash", protocol=protocol, **options)
+    cap = override or 8192
     first = Sandbox(opening(), final(), ExecExit(exit_code=0))
     context = ctx.model_copy(update={"model": "deepseek-v4-pro", "model_base_url": "http://gateway"})
     events = await collect(backend, first, context)
@@ -132,19 +151,23 @@ async def test_command_env_and_session_continuity(ctx, protocol):
     }
     assert KEY.encode() not in patch and KEY not in str(call["argv"])
     rows = {row["id"]: row for row in json.loads(patch)}
-    for plugin in ("tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http"):
+    for plugin in ("tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http", "session-title-llm"):
         assert rows[plugin]["disabled"] is True
+    assert rows["compaction-basic"]["config"]["maxTokens"] == cap
     selection = rows["agent-default-model"]["config"]
     assert selection["model"] == "deepseek-v4-pro"
     if protocol == "messages":
         assert selection["provider"] == "deepseek-official"
-        assert rows["llm-deepseek"]["config"] == {"baseURL": "http://gateway/v1", "apiKeyEnv": KEY_ENV}
+        assert rows["llm-deepseek"]["config"] == {
+            "baseURL": "http://gateway/v1", "apiKeyEnv": KEY_ENV, "maxTokens": cap,
+        }
         assert rows["llm-pi-ai"]["disabled"] is True
     else:
         provider = rows["llm-pi-ai"]["config"]["providers"][selection["provider"]]
         assert provider["api"] == "openai-completions" and provider["baseURL"] == "http://gateway/v1"
-        assert provider["apiKeyEnv"] == KEY_ENV and provider["models"] == [{"id": "deepseek-v4-pro"}]
-        assert provider["defaultMaxTokens"] < Settings(_env_file=None).gateway_key_tpm
+        assert provider["apiKeyEnv"] == KEY_ENV
+        assert provider["models"] == [{"id": "deepseek-v4-pro", "maxTokens": cap}]
+        assert provider["compat"]["maxTokensField"] == "max_tokens"
         assert rows["llm-deepseek"]["disabled"] is True
 
     second = Sandbox(opening(), final(text="same session"), ExecExit(exit_code=0))
@@ -261,17 +284,79 @@ async def test_stderr_only_failure_is_classified(ctx):
     assert "HTTP 429 [REDACTED]" in str(caught.value) and KEY not in str(caught.value)
 
 
-async def test_gateway_budget_failure_keeps_gateway_classification(ctx):
-    reason = {"kind": "error", "error": {"code": "QUOTA", "message": "Budget exceeded"}}
-    sandbox = Sandbox(opening(), stdout(type="final", sessionId=SESSION, reason=reason, text=""),
-                      ExecExit(exit_code=1))
-    events = []
-    with pytest.raises(AgentTurnError, match="model gateway budget refused"):
-        async for event in DshBackend("deepseek-flash").run_turn(
-            sandbox, "s", ctx, "task", session_id=None, timeout_s=30,
-        ):
-            events.append(event)
-    assert events[-1].data == {"message": "model gateway budget refused"}
+@pytest.mark.parametrize(("progress", "prior_spend", "expected"), [
+    ("none", 0, MODEL_BUDGET_MISCONFIGURED),
+    ("zero_usage", 0, MODEL_BUDGET_MISCONFIGURED),
+    ("usage", 0, MODEL_BUDGET_EXHAUSTED),
+    ("tool", 0, MODEL_BUDGET_EXHAUSTED),
+    ("none", 304, MODEL_BUDGET_EXHAUSTED),
+])
+async def test_dsh_gateway_budget_failure_reaches_task_state(tmp_path, monkeypatch, progress, prior_spend, expected):
+    model_events = {
+        "none": [],
+        "zero_usage": [stdout(type="status", phase="step_end", usage={"inputTokens": 0, "outputTokens": 0})],
+        "usage": [stdout(type="status", phase="step_end", usage={"inputTokens": 561, "cacheReadTokens": 5248,
+                                                                  "outputTokens": 87})],
+        "tool": [stdout(type="tool_call", callId="glob-1", tool="glob", input={"pattern": "*.py"})],
+    }
+    refusal = {"kind": "error", "error": {"code": "HTTP_422", "message": f"Budget has been exceeded! Key={KEY}"}}
+    sandbox = Sandbox(opening(), *model_events[progress],
+                      stdout(type="final", sessionId=SESSION, reason=refusal, text=""), ExecExit(exit_code=1))
+    store = SimpleNamespace(
+        get_task=AsyncMock(return_value=SimpleNamespace(kind="coding", usage={"cost_micro_usd": prior_spend})),
+        get_session_id=AsyncMock(return_value=None), set_session=AsyncMock(),
+        append_event=AsyncMock(), add_usage=AsyncMock(),
+    )
+    gateway = SimpleNamespace(sandbox_url="http://gateway/v1", issue_key=AsyncMock(return_value=KEY),
+                              finalize_key=AsyncMock(return_value=(0, True)))
+    kernel = KernelActivities(settings=Settings(_env_file=None, data_dir=tmp_path), store=store,
+                              sandbox=sandbox, agent=DshBackend("deepseek-flash"), objects=None, gateway=gateway)
+    kernel._ensure_state = AsyncMock(return_value=False)
+    kernel._spec = AsyncMock(return_value=CodingSpec(repo_url="/repo", instruction="test"))
+    kernel._sandbox_id = AsyncMock(return_value="sandbox")
+    monkeypatch.setattr("sca.kernel.activities.activity.info", lambda: SimpleNamespace(attempt=1))
+    monkeypatch.setattr("sca.kernel.activities.activity.heartbeat", lambda: None)
+
+    states, budget_checks = [], []
+
+    async def execute(name, arg, **kwargs):
+        match name:
+            case "load_task":
+                return {"max_fix_attempts": 0, "turn_timeout_s": 5,
+                        "hooks": {"prepare": "prepare", "initial_prompt": "initial_prompt"}}
+            case "initial_prompt":
+                return "prompt"
+            case "check_budget":
+                budget_checks.append(arg.turn)
+                return "Task cost budget exhausted" if arg.turn else None
+            case "set_state":
+                states.append(arg)
+            case "run_agent_turn":
+                with pytest.raises(ApplicationError) as failure:
+                    await kernel._run_agent_turn(arg)
+                assert failure.value.non_retryable and failure.value.type == "BudgetExceeded"
+                raise ActivityError(
+                    "Activity failed", scheduled_event_id=1, started_event_id=2,
+                    activity_type=name, activity_id="1", identity="test",
+                    retry_state=RetryState.NON_RETRYABLE_FAILURE,
+                ) from failure.value
+            case "prepare" | "create_sandbox" | "destroy_sandbox":
+                return None
+            case _:
+                pytest.fail(f"Unexpected activity {name}")
+
+    monkeypatch.setattr(workflow, "execute_activity", execute)
+    monkeypatch.setattr(workflow, "patched", lambda _: True)
+    with pytest.raises(ApplicationError, match=expected):
+        await TaskWorkflow().run("task")
+    assert states[-1].state == "FAILED" and states[-1].reason == expected
+    assert budget_checks == [0]
+    gateway.finalize_key.assert_awaited_once()
+    events = [(call.args[1], call.args[2]) for call in store.append_event.await_args_list]
+    assert events[-1] == ("budget.exceeded", {"turn": 1, "reason": expected})
+    assert any(payload.get("message") == "model gateway budget refused" for _, payload in events)
+    assert not any(kind in ("agent.turn_completed", "model.provider_error") for kind, _ in events)
+    assert KEY not in str(events)
 
 
 async def test_sandbox_error_keeps_key_out_of_diagnosis(ctx):

@@ -12,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from temporalio import activity
 
 from sca.config import Settings
+from sca.core.errors import MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED
 from sca.core.model_provider import ModelProviderError
 from sca.core.models import TERMINAL_STATES, EventType
 from sca.db.repo import Store
@@ -209,8 +210,12 @@ class EvalActivities:
         if turns is None:
             turns = max((event["payload"].get("turn", 0) for event in events
                          if event["type"] == "agent.turn_started"), default=0)
-        errored = account_error or (
+        budget_reason = task.get("state_reason") if task["state"] == "FAILED" else None
+        budget_exhausted = budget_reason == MODEL_BUDGET_EXHAUSTED
+        budget_misconfigured = budget_reason == MODEL_BUDGET_MISCONFIGURED
+        errored = account_error or budget_misconfigured or (
             task["state"] != "SUCCEEDED"
+            and not budget_exhausted
             and not any(event["type"] == EventType.AGENT_TURN_COMPLETED for event in events)
         )
         trajectory_passed, trajectory_findings = None, []
@@ -224,9 +229,9 @@ class EvalActivities:
         await self.store.record_eval_result({
             "run_id": UUID(request["id"]), "tenant_id": "eval", "case_id": request["case"]["id"],
             "repeat": request["iteration"], "task_id": UUID(task["id"]),
-            "acceptance_passed": None if errored else result.get("acceptance_passed", False),
+            "acceptance_passed": None if errored else not budget_exhausted and result.get("acceptance_passed", False),
             "trajectory_passed": trajectory_passed, "trajectory_findings": trajectory_findings,
-            "verification_passed": None if errored else result.get("verification_passed", False),
+            "verification_passed": None if errored else not budget_exhausted and result.get("verification_passed", False),
             "turns": turns,
             "tokens": usage.get("input_tokens", 0) + usage.get("output_tokens", 0),
             "cost_usd": cost,
@@ -235,6 +240,8 @@ class EvalActivities:
         })
         if account_error and provider is not None:
             raise account_failure(provider)
+        if budget_misconfigured:
+            raise invalid_eval_input(MODEL_BUDGET_MISCONFIGURED)
         if request.get("report_outcome"):
             return {"cost_usd": cost, "errored": errored}
         return cost

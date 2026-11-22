@@ -8,6 +8,7 @@ from sqlalchemy import text
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
 from sca.api.evals import suite_path
+from sca.core.errors import MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED
 from sca.core.model_provider import ModelProviderError
 from sca.core.models import TaskState
 from sca.storage.local import LocalObjectStore
@@ -124,6 +125,28 @@ async def test_failed_provider_case_is_excluded_from_evaluation_scores(eval_api,
     report = (await client.get(f'/v1/evals/compare?a={run_id}&b={run_id}')).json()
     assert report['A'] == report['B'] == {}
     assert report['infrastructure_errors'] == {'A': 1, 'B': 1}
+
+
+@pytest.mark.parametrize('reason,score,status', [
+    (MODEL_BUDGET_EXHAUSTED, False, 'failed'),
+    (MODEL_BUDGET_MISCONFIGURED, None, 'errored'),
+])
+async def test_detail_includes_dsh_case_budget_reason(eval_api, store, reason, score, status):
+    client, _ = eval_api
+    task, _ = await store.create_task(tenant_id='eval', kind='coding', spec={}, idempotency_key=None)
+    await store.set_state(task.id, TaskState.FAILED, reason)
+    run_id = uuid4()
+    await store.create_eval_run({'id': run_id, 'tenant_id': 'eval', 'suite': 'coding-basic',
+                                'suite_hash': 'same', 'variant': {},
+                                'created_by': 'test', 'status': 'completed'})
+    await store.record_eval_result({'run_id': run_id, 'tenant_id': 'eval', 'case_id': 'case',
+        'repeat': 0, 'task_id': task.id, 'acceptance_passed': score, 'verification_passed': score,
+        'turns': 1, 'tokens': 0, 'cost_usd': 0, 'duration_s': 1})
+    response = await client.get(f'/v1/evals/runs/{run_id}')
+    assert response.status_code == 200
+    (case,) = response.json()['results']
+    assert case['reason'] == reason and case['status'] == status
+    assert case['passed'] is score and case['infrastructure_error'] is None
 
 
 def test_suite_path_rejects_symlinks(tmp_path, monkeypatch):

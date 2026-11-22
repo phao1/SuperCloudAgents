@@ -21,6 +21,7 @@ from temporalio.exceptions import (
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
+    from sca.core.errors import MODEL_BUDGET_REASONS
     from sca.core.models import MessageMode
     from sca.intents.base import REMOTE_TYPES
     from sca.kernel.activities import (
@@ -50,6 +51,14 @@ _NO_RETRY = RetryPolicy(maximum_attempts=1)
 
 def _retry(attempts: int) -> RetryPolicy:
     return RetryPolicy(maximum_attempts=attempts, initial_interval=timedelta(seconds=2))
+
+
+# Model gateway budget refusals
+def _model_budget_reason(cause: BaseException | None) -> str | None:
+    if (isinstance(cause, ApplicationError) and cause.non_retryable and cause.type == "BudgetExceeded"
+            and cause.message in MODEL_BUDGET_REASONS):
+        return cause.message
+    return None
 
 
 # Projects
@@ -141,7 +150,9 @@ class TaskWorkflow:
                 while isinstance(failure, ChildWorkflowError):
                     failure = failure.cause
                 cause = failure.cause or failure
-                reason = f"{getattr(failure, 'activity_type', 'extension')}: {getattr(cause, 'message', None) or cause}"
+                reason = _model_budget_reason(cause)
+                if reason is None:
+                    reason = f"{getattr(failure, 'activity_type', 'extension')}: {getattr(cause, 'message', None) or cause}"
                 await self._finish(task_id, "FAILED", reason)
                 raise ApplicationError(reason, type="TaskFailed", non_retryable=True) from e
             raise
@@ -325,7 +336,7 @@ class TaskWorkflow:
                 except TurnInterrupted:
                     interrupted = True
                 except ActivityError as exc:
-                    if not patched_provider_account_error(exc):
+                    if _model_budget_reason(exc.cause) is None and not patched_provider_account_error(exc):
                         await self._check_budget(task_id, turn)
                     raise
                 await workflow.execute_activity(
