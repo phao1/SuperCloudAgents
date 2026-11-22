@@ -1713,6 +1713,9 @@ class Store:
     async def _meter_finished_task(
         self, session: AsyncSession, task: Mapping[str, Any],
     ) -> None:
+        # History transfer records past execution and must never add local billable usage.
+        if task["result"].get("history_imported") is True:
+            return
         from sca.billing.metering import METERED_EVENTS, completion_time, daily_delta, task_usage
         from sca.config import get_settings
         from sca.db.schema import usage_daily

@@ -113,6 +113,9 @@ curl -fsS http://127.0.0.1:8000/v1/tasks
 无需输入令牌或 DeepSeek API Key。顶部「只读访客模式 · 登录」可切换到令牌登录。缺少模型密钥时
 仍可查看轨迹和补丁，登录后可在概览配置密钥以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
 
+从 Linux 服务器把任务、项目、评测和演进记录带到 Windows 源码实例时，使用
+[历史导出与导入](docs/history-transfer.md)。
+
 ### Docker 演示环境
 
 在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Docker Compose、

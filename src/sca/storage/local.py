@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import os
 import threading
 from pathlib import Path
@@ -67,3 +68,10 @@ class LocalObjectStore:
             )
 
         return await asyncio.to_thread(listing)
+
+
+# History transfer
+def history_artifact_key(task_id: str | UUID, name: str) -> str:
+    # An imported name can contain characters or case distinctions unavailable on Windows.
+    digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+    return key_for(task_id, f"history-artifacts/{digest}")
