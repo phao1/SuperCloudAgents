@@ -63,6 +63,32 @@ async def test_eval_workflow_loads_in_temporal_sandbox():
     SandboxedWorkflowRunner().prepare_workflow(workflow._Definition.must_from_class(EvalRunWorkflow))
 
 
+@pytest.mark.parametrize('mixed', [False, True])
+async def test_unpriced_cases_run_when_usd_budget_cannot_cover_a_priced_case(monkeypatch, mixed):
+    cases = [{'id': 'local', 'model_unpriced': True}]
+    if mixed:
+        cases.insert(0, {'id': 'priced'})
+    submitted = []
+
+    async def execute(name, item, **options):
+        if name == 'eval_prepare':
+            return {'cases': cases}
+        if name == 'eval_submit':
+            submitted.append(item['case']['id'])
+            return item['case']['id']
+        if name == 'eval_collect':
+            return {'cost_usd': 0, 'errored': False}
+        assert name == 'eval_finish'
+
+    monkeypatch.setattr(workflow, 'execute_activity', execute)
+    monkeypatch.setattr(workflow, 'patched', lambda _: True)
+    status = await EvalRunWorkflow().run({
+        'id': str(uuid4()), 'repeat': 1, 'concurrency': 2, 'budget': .01, 'case_budget': 1,
+    })
+    assert status == ('budget_exhausted' if mixed else 'completed')
+    assert submitted == ['local']
+
+
 @pytest.mark.parametrize("failures,total,expected", [
     (3, 3, "failed"), (2, 3, "failed"), (1, 2, "completed"), (1, 3, "completed"), (0, 2, "completed"),
 ])

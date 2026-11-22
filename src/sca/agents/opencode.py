@@ -199,6 +199,9 @@ class OpenCodeBackend:
         if not (ctx.model_base_url and ctx.model_api_key):
             raise AgentTurnError("OpenCode requires model_base_url and model_api_key")
         model = ctx.model or self.default_model
+        model_config = {}
+        if (context := ctx.model_context_window) is not None:
+            model_config["limit"] = {"context": context, "output": min(4096, max(1, context // 4))}
         config = {
             "providers": {
                 "sca": {
@@ -206,7 +209,7 @@ class OpenCodeBackend:
                     "env": ["SCA_MODEL_KEY"],
                     "package": "@opencode/ai/providers/openai-compatible",
                     "settings": {"baseURL": ctx.model_base_url},
-                    "models": {model: {}},
+                    "models": {model: model_config},
                 }
             },
             # Headless runs cannot answer a permission prompt, and a cancelled one fails the turn.

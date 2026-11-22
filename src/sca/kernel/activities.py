@@ -51,6 +51,7 @@ from sca.core.models import (
 )
 from sca.db.repo import Store
 from sca.gateway.health import ProviderHealth
+from sca.gateway.model_providers import read_registry
 from sca.kernel.interjection import (
     HEARTBEAT_INTERVAL,
     MESSAGES_PENDING,
@@ -929,8 +930,11 @@ class KernelActivities:
             else inp.session_id or await self.store.get_session_id(task_id)
         )
 
-        turn_budget = self.settings.model_gateway_turn_budget_usd
-        if gateway and spec.max_cost_usd is not None:
+        # Local model providers
+        model = read_registry(self.settings.data_dir).models.get(
+            spec.model or self.settings.default_model) if gateway else None
+        turn_budget = None if model and model.unpriced else self.settings.model_gateway_turn_budget_usd
+        if gateway and turn_budget is not None and spec.max_cost_usd is not None:
             task = await self.store.get_task(task_id)
             remaining = spec.max_cost_usd - task.usage.get("cost_micro_usd", 0) / 1e6
             if remaining <= 0:
@@ -938,6 +942,9 @@ class KernelActivities:
             turn_budget = min(turn_budget, remaining)
 
         ctx = await self._attach_tools(task_id, spec, key, champion)
+        if model is not None:
+            ctx.model_context_window = model.context_window
+            ctx.model_registered = True
         overlay_metadata = ({"overlay_sha256": ctx.agent_overlay.sha256()}
                             if ctx.agent_overlay is not None else {})
         if overlay_metadata:

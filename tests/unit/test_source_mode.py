@@ -9,19 +9,55 @@ import tarfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
+from uuid import uuid4
 from zipfile import ZipFile
 
 import httpx
 import pytest
+import yaml
 
 from sca.agents.local import DSH_PACKAGE, dsh_install_dir, installed_dsh
 from sca.api import portal
 from sca.api.app import _portal_page
 from sca.config import SOURCE_MODE_WARNING, SOURCE_OPENCODE_VERSION, Settings
 from sca.core.models import AgentContext, AgentOverlay, ExecExit, ExecOutput, Principal
+from sca.gateway.model_providers import ProviderInput, ProviderRegistry
 from sca.orchestration.worker import make_agent_backend, make_gateway, make_sandbox_provider
 from sca.sandbox.local import LocalSandboxProvider
 from scripts import portal_source, source_smoke
+
+
+def test_native_gateway_uses_generated_routes_and_loads_keys_only_in_gateway(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[2]
+    shutil.copytree(root / 'deploy/litellm', tmp_path / 'deploy/litellm')
+    stack = portal_source.WindowsSource(tmp_path)
+    starts = []
+    monkeypatch.setattr(stack, 'start', lambda *args: starts.append(args))
+    monkeypatch.setattr(stack, 'wait', lambda *args: None)
+    registry = ProviderRegistry().with_provider(uuid4(), ProviderInput(
+        name='Native local', type='openai-compatible', base_url='http://localhost:11434/v1',
+        api_key='fixture-cloud-key', models=[{'name': 'local', 'upstream_model': 'ml'}],
+    ))
+    registry.save(stack.data)
+    stack.start_gateway({'PATH': ''})
+    service, args, env, port = starts[0]
+    key_env = registry.providers[0].key_env
+    assert service == 'litellm' and port == 4000 and key_env not in env
+    config = args[-1]
+    params = yaml.safe_load(config.read_text(encoding='utf-8'))['model_list'][0]['litellm_params']
+    assert params['api_base'] == 'http://localhost:11434/v1'
+    assert params['api_key'] == f'os.environ/{key_env}'
+
+    calls = []
+    monkeypatch.setitem(sys.modules, 'litellm.proxy.proxy_cli', SimpleNamespace(
+        run_server=lambda args: calls.append((args, os.environ[key_env])),
+    ))
+    monkeypatch.setenv('DATABASE_URL', 'postgresql://ignored/fixture')
+    monkeypatch.setenv(key_env, '')
+    monkeypatch.chdir(tmp_path)
+    portal_source.serve_gateway(str(config))
+    assert calls[0][0][:2] == ['--config', str(config)]
+    assert calls[0][1] == 'fixture-cloud-key'
 
 
 @pytest.mark.parametrize(("system", "arch", "temporal_target", "opencode_target"), [

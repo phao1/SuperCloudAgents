@@ -163,24 +163,25 @@ async def test_pause_resume_skip_and_stop_at_generation_boundary(monkeypatch):
 
 
 @pytest.mark.parametrize('candidate_run', [True, False])
-async def test_candidate_skip_drains_the_active_batch_only(monkeypatch, candidate_run):
+@pytest.mark.parametrize('unpriced', [True, False])
+async def test_candidate_skip_drains_the_active_batch_only(monkeypatch, candidate_run, unpriced):
     evaluation = EvalRunWorkflow()
     submitted, collected = [], []
 
     async def execute(name, request, **kwargs):
         if name == 'eval_prepare':
-            return {'cases': ['one', 'two']}
+            return {'cases': [{'id': case, 'model_unpriced': unpriced} for case in ('one', 'two')]}
         if name == 'eval_submit':
-            submitted.append(request['case'])
-            return request['case']
+            submitted.append(request['case']['id'])
+            return request['case']['id']
         assert name == 'eval_collect'
-        collected.append(request['case'])
+        collected.append(request['case']['id'])
         evaluation.skip_evolution_candidate()
-        return {'cost_usd': .01, 'errored': False}
+        return {'cost_usd': 0 if unpriced else .01, 'errored': False}
 
     monkeypatch.setattr(module.workflow, 'execute_activity', execute)
     monkeypatch.setattr(module.workflow, 'patched', lambda _: True)
-    request = {'repeat': 1, 'concurrency': 1, 'case_budget': .1, 'budget': 2,
+    request = {'repeat': 1, 'concurrency': 1, 'case_budget': .1, 'budget': .01 if unpriced else 2,
                'evolution_step': {'candidate_id': 'c' if candidate_run else None}}
     status, _ = await evaluation.evaluate(request, {})
     assert status == ('cancelled' if candidate_run else 'completed')

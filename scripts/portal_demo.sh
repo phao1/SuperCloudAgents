@@ -15,7 +15,7 @@ help() {
   down    停止 Portal 和源码模式服务；Docker 模式下 --all 同时停止 Compose 服务
   status  查看运行模式、服务、网关连接和已注册版本
   logs    查看当前模式的服务日志
-  restart-gateway  加载更新后的模型密钥并重启网关
+  restart-gateway  加载模型接入配置并重启网关
   export-history   使用当前模式的数据库和对象存储导出历史 ZIP
   import-history   将历史 ZIP 导入本机源码模式
 也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
@@ -116,16 +116,37 @@ WRAPPER
 }
 compose() { run "$SCA_DOCKER_BIN" compose --env-file "$ROOT/.env" -f deploy/docker-compose.yml --profile gateway "$@"; }
 gateway_config() {
-    run "$PY" - <<'PY'
-from sca.gateway.configuration import model_configured
+    run "$PY" - "$ROOT" <<'PY'
+import sys
+from pathlib import Path
 
-print("config.yaml" if model_configured() else "history.yaml")
+from sca.config import get_settings
+from sca.gateway.configuration import deepseek_configured
+from sca.gateway.model_providers import gateway_config, read_registry
+
+root = Path(sys.argv[1])
+data = get_settings().data_dir
+print(gateway_config(root, data, read_registry(data),
+                     deepseek=deepseek_configured(root / ".env"), docker=False))
 PY
 }
 start_docker_gateway() {
-    local config
-    config=$(gateway_config)
-    SCA_LITELLM_CONFIG="$ROOT/deploy/litellm/$config" compose up -d --wait --no-deps "$@" litellm
+    run "$PY" - "$ROOT" "$SCA_DOCKER_BIN" "$@" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+from sca.config import get_settings
+from sca.gateway.configuration import deepseek_configured
+from sca.gateway.model_providers import docker_gateway_command, gateway_config, read_registry
+
+root = Path(sys.argv[1])
+data = get_settings().data_dir
+registry = read_registry(data)
+config = gateway_config(root, data, registry, deepseek=deepseek_configured(root / ".env"), docker=True)
+command = docker_gateway_command(root, data, registry, sys.argv[2], sys.argv[3:])
+os.execvpe(command[0], command, {**os.environ, **registry.environment(), "SCA_LITELLM_CONFIG": str(config)})
+PY
 }
 load_env() {
     [[ -f .data/portal.env ]] || fail '请先运行 setup。'

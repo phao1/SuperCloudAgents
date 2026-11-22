@@ -11,6 +11,7 @@ from sca.api.authz import authorize
 from sca.api.model_access import require_model
 from sca.core.errors import InvalidTaskError, NotFoundError
 from sca.core.models import Principal, Task
+from sca.gateway.configuration import local_default_model
 from sca.kernel.kind import get
 from sca.observability import current_trace_id
 
@@ -59,6 +60,10 @@ async def submit(
             backend = spec.agent_backend or settings.agent_backend
             if backend != "fake" and host_agent_binary(settings, backend) is None:
                 raise InvalidTaskError(unavailable_source_backend(backend))
+        if settings is not None and spec.model is None:
+            default = local_default_model(settings.data_dir, settings.default_model)
+            if default != settings.default_model:
+                spec.model = default
         return {**spec.model_dump(), "priority": body.priority}
 
     if body.kind == "analysis":

@@ -120,7 +120,7 @@ start_litellm() {
     config=$(gateway_config)
     DATABASE_URL="$LITELLM_DB_URL" PATH="$LITELLM_VENV/bin:$PATH" \
         PRISMA_BINARY_CACHE_DIR="$LITELLM_VENV/prisma-cache" \
-        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway "$ROOT/deploy/litellm/$config"
+        start litellm "$LITELLM_VENV/bin/python" "$SOURCE_HELPER" gateway "$config"
     wait_service litellm "${1:-300}" "$PY" -c \
         'from urllib.request import urlopen; urlopen("http://127.0.0.1:4000/health/readiness", timeout=1).close()'
 }

@@ -11,7 +11,7 @@ import pytest
 
 STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
-    "portal-ui.js", "portal-conversation.js", "portal-markdown.js", "portal-tasks.js",
+    "portal-ui.js", "portal-conversation.js", "portal-models.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
@@ -82,7 +82,7 @@ def test_project_dialog_visibility_uses_the_native_open_state():
         ("portal-tasks.js", ("/tasks", "/tools/available", "/best-of", "/select",
                              "/impact", "/terminal", "/artifacts/report.md", "/pr")),
         ("portal-conversation.js", ("/messages",)),
-        ("portal-evolution.js", ("/evolutions", "/evolution-schedules", "/champions",
+        ("portal-evolution.js", ("/evolutions", "/evolution-schedules", "/champions", "/models",
                                  "/champions/rollouts", "/evals/harvest", "/run-now",
                                  "/approve", "/reject", "/rollback", "/solidify")),
         ("portal-settings.js", ("/tools", "/grants", "/knowledge/documents",
@@ -185,7 +185,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
-    assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
+    assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
@@ -591,6 +591,8 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
             fixtures = {
                 '/v1/portal/whoami': {'role': 'admin', 'tenant_id': 'eval'},
                 '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'default_agent_backend': 'dsh'},
+                '/v1/models': {'default_model': 'model-b', 'evolve_model': 'proposer-a',
+                               'data': [{'id': 'model-b', 'unpriced': True}, {'id': 'proposer-a'}]},
                 '/v1/agents/opencode/versions': [{'version': 'fixture-opencode'}],
                 '/v1/evals/suites': [
                     {'name': 'dsh-smoke', 'cases': ['a', 'b', 'c'], 'case_metadata': {
@@ -622,13 +624,18 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         assert suite.input_value() == 'opencode-evolve'
         assert form.get_by_label('基线版本').input_value() == 'fixture-opencode'
         backend.select_option('dsh')
-        form.get_by_label('评测模型').fill('model-b')
+        assert form.get_by_label('评测模型').input_value() == 'model-b'
+        assert form.get_by_label('反思与候选生成模型').input_value() == 'proposer-a'
+        assert page.locator('#models option').evaluate_all('(options) => options.map(o => o.value)') == [
+            'model-b', 'proposer-a',
+        ]
+        assert form.get_by_text('未定价模型按 $0 计费', exact=False).is_visible()
         form.get_by_label('总预算（美元）').fill('0.5')
         start.click()
         page.wait_for_url(f'**/portal#/evolutions/runs/{evolution_id}')
-        assert {key: starts[0][key] for key in ('agent_backend', 'suite', 'model', 'generations', 'candidates',
+        assert {key: starts[0][key] for key in ('agent_backend', 'suite', 'model', 'evolve_model', 'generations', 'candidates',
                                                 'repeat', 'budget_usd')} == {
-            'agent_backend': 'dsh', 'suite': 'dsh-smoke', 'model': 'model-b', 'generations': 1,
+            'agent_backend': 'dsh', 'suite': 'dsh-smoke', 'model': 'model-b', 'evolve_model': 'proposer-a', 'generations': 1,
             'candidates': 2, 'repeat': 1, 'budget_usd': .5,
         }
         panel, chat = page.locator('#evolution-dag'), page.locator('#evolution-conversation')

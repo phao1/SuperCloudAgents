@@ -38,6 +38,7 @@ class EvolutionOptions(BaseModel):
     # Same pass rate with no paired losses and at least this dev cost saving also counts as progress.
     min_cost_saving: float = Field(default=.15, gt=0, lt=1, allow_inf_nan=False)
     surfaces: list[Surface] = Field(default_factory=lambda: ['system_prompt', 'tool_guidance', 'tool_descriptions'], min_length=1)
+    evolve_model: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class EvolutionTarget(BaseModel):

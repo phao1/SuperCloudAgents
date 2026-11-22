@@ -84,6 +84,7 @@ const portalEvolution = (() => {
     const config = Object.fromEntries(optionFields.map(([name]) => [name, Number(ui.value(form, name))]));
     config.require_approval = ui.checked(form, 'require_approval');
     config.surfaces = surfaces.map(([name]) => name).filter(name => ui.checked(form, 'surface_' + name));
+    config.evolve_model = ui.value(form, 'evolve_model') || null;
     return config;
   }
 
@@ -120,14 +121,17 @@ const portalEvolution = (() => {
     if (!choices.length) choices.push(['', '暂无含开发集和留出集的套件']);
     const pins = {opencode: versions[0]?.version || '', dsh: ''};
     if (row.agent_version) pins[selected] = row.agent_version;
-    const model = portalConfig?.default_model || 'deepseek-flash';
     const suiteField = ui.field('评测套件', 'suite', {
       required: true, value: row.suite || recommended(selected), choices,
     });
     const result = ui.fields(
       backendField(selected), suiteField,
       ui.field('基线版本', 'agent_version', {value: pins[selected]}),
-      ui.field('评测模型', 'model', {required: true, value: row.model || model})
+      portalModels.field('评测模型', 'model', {required: true, value: row.model || portalConfig?.default_model || ''}),
+      portalModels.field('反思与候选生成模型', 'evolve_model', {
+        value: row.config?.evolve_model || portalConfig?.evolve_model || '',
+        placeholder: portalConfig?.default_model || '',
+      })
     );
     const backend = result.querySelector('[name="agent_backend"]');
     const version = result.querySelector('[name="agent_version"]');
@@ -146,8 +150,12 @@ const portalEvolution = (() => {
       syncVersion();
     };
     syncVersion();
-    result.querySelector('[name="model"]').setAttribute('list', 'models');
     return result;
+  }
+
+  function evolutionBudget(form) {
+    portalModels.bindBudget(form, () => [ui.value(form, 'model'),
+      ui.value(form, 'evolve_model') || portalConfig?.evolve_model]);
   }
 
   function targetBody(form) {
@@ -156,8 +164,10 @@ const portalEvolution = (() => {
   }
 
   function loadTargets(state, ready) {
-    void Promise.allSettled([loadSuites(), loadVersions(), portalConfig ? null : loadConfig()]).then(results => {
-      if (active(state)) ready(results.find(result => result.status === 'rejected')?.reason);
+    void Promise.allSettled([loadSuites(), loadVersions(), portalConfig ? null : loadConfig(), data('/models')]).then(results => {
+      if (!active(state)) return;
+      portalModels.setCatalog(results[3].value);
+      ready(results.find(result => result.status === 'rejected')?.reason);
     });
   }
 
@@ -168,10 +178,12 @@ const portalEvolution = (() => {
       ui.setMessage(message, '正在读取评测套件和后端配置…');
       state.root.append(ui.panel('启动自动演进', launch, message));
       loadTargets(state, problem => {
-        launch.append(ui.form([targetFields(), configFields(launchDefaults, true)], '开始演进', async form => {
+        const form = ui.form([targetFields(), configFields(launchDefaults, true)], '开始演进', async form => {
           const result = await data(runsPath, {...targetBody(form), ...configBody(form)});
           if (active(state)) location.hash = pageHref('runs', result.id);
-        }));
+        });
+        evolutionBudget(form);
+        launch.append(form);
         ui.setMessage(message, problem?.message || '', Boolean(problem));
       });
     }
@@ -196,6 +208,7 @@ const portalEvolution = (() => {
     if (!metrics) return '—';
     const text = [
       ui.percent(metrics.pass_rate), ui.cost(metrics.cost_usd),
+      metrics.unpriced ? Number(metrics.tokens).toLocaleString('zh-CN') + ' Token' : null,
       metrics.turns === undefined ? null : Number(metrics.turns).toFixed(1) + ' 轮',
     ].filter(Boolean).join(' · ');
     return runId ? evidenceLink(text, runHref(runId)) : text;
@@ -454,6 +467,7 @@ const portalEvolution = (() => {
         await refresh(state);
       });
       if (row) form.append(ui.actions(ui.action('取消编辑', () => editor())));
+      evolutionBudget(form);
       edit.replaceChildren(form);
     }
     loadTargets(state, problem => {
@@ -595,7 +609,7 @@ const portalEvolution = (() => {
       const form = ui.form([ui.fields(
         backendField(row.agent_backend),
         ui.field('基线版本', 'agent_version', {required: true, value: row.agent_version || ''}),
-        ui.field('模型', 'model', {required: true, value: row.model || ''}),
+        portalModels.field('模型', 'model', {required: true, value: row.model || portalConfig?.default_model || ''}),
         ui.field('冠军 ID', 'champion_id', {required: true, value: row.champion_id || '',
           note: '填写 eval 评测空间提供的冠军 ID。'}),
         ui.field('灰度比例（%）', 'percent', {type: 'number', min: 0, max: 100, required: true,

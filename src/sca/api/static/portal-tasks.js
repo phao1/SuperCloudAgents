@@ -120,6 +120,7 @@ const portalTasks = (() => {
       image: optional('image'), push: c('push'), fork_from_snapshot: c('fork_from_snapshot'),
       plan: planMode === 'auto' ? 'auto' : 'none',
       ...(v('max_cost_usd') && {max_cost_usd: Number(v('max_cost_usd'))}),
+      ...(v('max_tokens') && {max_tokens: Number(v('max_tokens'))}),
     };
     const backend = spec.agent_backend || defaultBackend;
     if (backend?.startsWith('opencode')) spec.agent_version = optional('agent_version');
@@ -191,6 +192,8 @@ const portalTasks = (() => {
       field('尝试 OpenCode 版本（可选，逗号分隔）', 'best_versions'),
       field('每次尝试的预算（美元，可选）', 'best_costs', {note: '按尝试顺序填写金额，以逗号分隔。'})
     );
+    const bestModels = el('datalist');
+    bestModels.id = project ? 'project-best-models' : 'best-models';
     const planOptions = fields(
       field('共享路径（每行一个仓库相对路径）', 'shared_paths', {multiline: true}),
       field('子任务配置（JSON）', 'subtasks', {multiline: true, note: '每项填写 name、instruction，可填 depends_on 与 paths。'}),
@@ -204,7 +207,7 @@ const portalTasks = (() => {
           placeholder: primaryRepo?.base_ref || 'main'}),
         field(project ? '线程指令' : '任务指令', 'instruction', {required: true, multiline: true, wide: true}),
         field('准备命令（可选）', 'setup_command'),
-        field('模型（可选）', 'model', {placeholder: defaultModel}),
+        portalModels.field('模型（可选）', 'model', {placeholder: defaultModel}),
         field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
         field('Agent 后端', 'agent_backend', {choices: ui.backendChoices({
           ...portalConfig, default_agent_backend: defaultBackend,
@@ -215,11 +218,12 @@ const portalTasks = (() => {
       disclosure('Best-of-N 与执行设置', fields(
         field('并行尝试数', 'best_n', {choices: [[1, '1 · 单次执行'], ...[2, 3, 4, 5].map(n => [n, String(n)])]}),
         field('任务预算（美元）', 'max_cost_usd', {type: 'number', min: 0, step: 'any'}),
+        field('任务预算（Token）', 'max_tokens', {type: 'number', min: 1}),
         field('任务拆分', 'plan_mode', {choices: [['none', '无'], ['auto', '自动规划'], ['manual', '手动子任务']]}),
         field('冠军覆盖', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
         field('沙箱镜像（可选）', 'image'),
         check('复用已准备的工作区快照', 'fork_from_snapshot')
-      ), bestOptions, planOptions),
+      ), bestOptions, bestModels, planOptions),
       disclosure('工具', el('small', '已授权的 MCP 工具可附加到 OpenCode 任务。'), available),
       disclosure('设计意图与工单', ui.actions(addKind, add), list),
       versionsList,
@@ -261,7 +265,11 @@ const portalTasks = (() => {
       control(form, 'repo_url').setAttribute('list', repositories.id);
     }
     control(form, 'agent_version').setAttribute('list', versionsList.id);
-    control(form, 'model').setAttribute('list', 'models');
+    portalModels.multipleAliases(control(form, 'best_models'), bestModels);
+    portalModels.bindBudget(form, () => {
+      const explicit = Number(value(form, 'best_n')) > 1 && ui.items(value(form, 'best_models'));
+      return explicit?.length ? explicit : [value(form, 'model') || project?.default_model || portalConfig?.default_model];
+    });
     const sync = () => {
       const backend = value(form, 'agent_backend') || defaultBackend;
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');

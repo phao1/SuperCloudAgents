@@ -20,10 +20,13 @@ PI_VERSION = "1.5.2"
 KEY_ENV = "SCA_MODEL_KEY"
 
 
-def render_config(base_url: str, model: str) -> str:
+def render_config(base_url: str, model: str, context_window: int | None = None) -> str:
+    catalog = {"id": model}
+    if context_window is not None:
+        catalog.update(contextWindow=context_window, maxTokens=min(4096, max(1, context_window // 4)))
     return json.dumps({"providers": {"sca": {
         "baseUrl": base_url.rstrip("/"), "api": "openai-completions",
-        "apiKey": "$" + KEY_ENV, "models": [{"id": model}],
+        "apiKey": "$" + KEY_ENV, "models": [catalog],
     }}})
 
 
@@ -183,7 +186,7 @@ class PiBackend:
                  "PI_OFFLINE": "1", "PI_TELEMETRY": "0", KEY_ENV: ctx.model_api_key,
                  **({"SCA_PI_BIN": self.executable} if self.executable else {}),
                  **({"SCA_PI_NODE": self.node_executable} if self.node_executable else {}),
-                 "SCA_PI_CONFIG": render_config(ctx.model_base_url, model)},
+                 "SCA_PI_CONFIG": render_config(ctx.model_base_url, model, ctx.model_context_window)},
         )
         async with closing_stream(stream):
             async for output in stream:

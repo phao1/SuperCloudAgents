@@ -6,6 +6,7 @@ from dotenv import dotenv_values
 from fastapi import HTTPException
 
 from sca.api import portal
+from sca.core.models import Principal
 from sca.gateway.configuration import model_configured
 
 
@@ -34,15 +35,16 @@ async def test_provider_key_is_local_opt_in_and_restarts_gateway(tmp_path, monke
 
     monkeypatch.setattr(portal.asyncio, 'create_subprocess_exec', create_process)
     body = portal.ProviderKey(key='sk-test-key-123')
+    admin = Principal(tenant_id='eval', subject='admin', role='admin')
     remote = SimpleNamespace(client=SimpleNamespace(host='192.0.2.1'))
     with pytest.raises(HTTPException) as error:
-        await portal.set_provider_key(body, remote, None)
+        await portal.model_admin(remote, admin)
     assert error.value.status_code == 403
     assert dotenv_values(env_file)['DEEPSEEK_API_KEY'] == 'REPLACE_ME'
 
     local = SimpleNamespace(client=SimpleNamespace(host='127.0.0.1'))
     assert model_configured() is False
-    result = await portal.set_provider_key(body, local, None)
+    result = await portal.set_provider_key(body, await portal.model_admin(local, admin))
     assert result == {'saved': True, 'gateway_restarted': True}
     assert model_configured() is True
     assert dotenv_values(env_file) == {'DEEPSEEK_API_KEY': 'sk-test-key-123', 'OTHER': 'keep'}

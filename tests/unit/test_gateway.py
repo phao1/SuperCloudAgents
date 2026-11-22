@@ -59,19 +59,30 @@ async def test_settle_and_revoke(mode, monkeypatch):
         await gateway.aclose()
 
 
-@pytest.mark.parametrize("spent,expected", [(250000, 0.75), (0, 1.0), (1000000, None)])
-async def test_turn_key_uses_remaining_parent_budget(spent, expected, monkeypatch, tmp_path):
+@pytest.mark.parametrize("spent,expected,unpriced", [
+    (250000, 0.75, False), (0, 1.0, False), (1000000, None, False), (0, None, True),
+])
+async def test_turn_key_uses_remaining_parent_budget(spent, expected, unpriced, monkeypatch, tmp_path):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
+    from uuid import uuid4
 
     from sca.config import Settings
+    from sca.gateway.model_providers import ProviderInput, ProviderRegistry
     from sca.kinds.coding.activities import CodingActivities, TurnInput
     from sca.kinds.coding.spec import CodingSpec
 
-    async def events(*args, **kwargs):
+    async def events(sandbox, sandbox_id, context, *args, **kwargs):
+        if unpriced:
+            assert context.model_context_window == 8192 and context.model_registered
         if False:
             yield
 
+    if unpriced:
+        ProviderRegistry().with_provider(uuid4(), ProviderInput(
+            name="Fake local", type="openai-compatible", base_url="http://localhost:11434/v1",
+            models=[{"name": "free", "upstream_model": "coder", "context_window": 8192}],
+        )).save(tmp_path)
     monkeypatch.setattr(
         "sca.kinds.coding.activities.activity.info", lambda: SimpleNamespace(attempt=1)
     )
@@ -84,10 +95,10 @@ async def test_turn_key_uses_remaining_parent_budget(spent, expected, monkeypatc
     gateway = SimpleNamespace(
         sandbox_url="http://gateway",
         issue_key=AsyncMock(return_value="ephemeral"),
-        finalize_key=AsyncMock(return_value=(0.01, True)),
+        finalize_key=AsyncMock(return_value=(0 if unpriced else 0.01, True)),
     )
     activities = CodingActivities(
-        settings=Settings(data_dir=tmp_path),
+        settings=Settings(_env_file=None, data_dir=tmp_path),
         store=store,
         sandbox=SimpleNamespace(),
         agent=SimpleNamespace(name="fake", run_turn=events),
@@ -100,12 +111,19 @@ async def test_turn_key_uses_remaining_parent_budget(spent, expected, monkeypatc
             repo_url="x",
             instruction="x",
             max_cost_usd=1,
+            model="free" if unpriced else None,
         )
     )
     activities._sandbox_id = AsyncMock(return_value="sandbox")
     activities._sync_fake_home = AsyncMock()
     await activities._run_agent_turn(TurnInput("task", 1, "prompt", None))
-    if expected is None:
+    if unpriced:
+        assert gateway.issue_key.await_args.kwargs["models"] == ["free"]
+        assert gateway.issue_key.await_args.kwargs["max_budget_usd"] is None
+        gateway.finalize_key.assert_awaited_once()
+        store.add_usage.assert_not_awaited()
+        assert store.append_event.await_args.args[2]["cost_usd"] == 0
+    elif expected is None:
         gateway.issue_key.assert_not_awaited()
         gateway.finalize_key.assert_not_awaited()
         store.append_event.assert_not_awaited()

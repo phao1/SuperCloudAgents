@@ -64,12 +64,20 @@ def metrics(run: dict) -> dict:
     scored = [r for r in rows if not is_errored(r)]
     return {'pass_rate': mean(overall_passed(r) for r in scored) if scored else 0,
             'cost_usd': sum(float(r['cost_usd']) for r in rows),
-            'turns': mean(r['turns'] for r in rows) if rows else 0}
+            'turns': mean(r['turns'] for r in rows) if rows else 0,
+            **({'unpriced': True, 'tokens': sum(r.get('tokens') or 0 for r in rows)}
+               if run.get('variant', {}).get('model_unpriced') is True else {})}
 
 
 def select_best(runs: list[dict]) -> dict | None:
     valid = [r for r in runs if r.get('status') == 'completed' and r['results']]
-    return min(valid, key=lambda r: (-metrics(r)['pass_rate'], metrics(r)['cost_usd'], metrics(r)['turns'])) if valid else None
+
+    def rank(run: dict) -> tuple[float, float, float]:
+        report = metrics(run)
+        usage = (measured_efficiency(report) or float('inf')) if report.get('unpriced') else report['cost_usd']
+        return -report['pass_rate'], usage, report['turns']
+
+    return min(valid, key=rank) if valid else None
 
 
 def paired_complete(a: dict, b: dict, *, legacy: bool = False) -> bool:
@@ -83,6 +91,20 @@ def measured_cost(cost: float) -> bool:
     return isfinite(cost) and cost > 0
 
 
+def measured_efficiency(report: dict) -> float | None:
+    value = report.get('tokens' if report.get('unpriced') else 'cost_usd', 0)
+    return value if measured_cost(value) else None
+
+
+def paired_usage(before: dict, after: dict, *, legacy: bool) -> tuple[float, float] | None:
+    if legacy:
+        return before['cost_usd'], after['cost_usd']
+    if before.get('unpriced') != after.get('unpriced'):
+        return None
+    first, second = measured_efficiency(before), measured_efficiency(after)
+    return (first, second) if first is not None and second is not None else None
+
+
 def dev_basis(a: dict, b: dict, min_cost_saving: float = .15, *, legacy: bool = False) -> str | None:
     """Why a dev challenger beats the champion: more paired wins, or same quality for clearly less cost.
 
@@ -92,12 +114,14 @@ def dev_basis(a: dict, b: dict, min_cost_saving: float = .15, *, legacy: bool = 
         return None
     report = compare(a, b)
     before, after = metrics(a), metrics(b)
-    if after['pass_rate'] < before['pass_rate'] or (not legacy and before['cost_usd'] == after['cost_usd'] == 0):
+    if after['pass_rate'] < before['pass_rate'] or before.get('unpriced') != after.get('unpriced'):
+        return None
+    if not legacy and not before.get('unpriced') and before['cost_usd'] == after['cost_usd'] == 0:
         return None
     if report['B_wins'] > report['A_wins']:
         return 'quality'
-    costs_known = legacy or (measured_cost(before['cost_usd']) and measured_cost(after['cost_usd']))
-    if costs_known and report['A_wins'] == 0 and after['cost_usd'] <= before['cost_usd'] * (1 - min_cost_saving):
+    usage = paired_usage(before, after, legacy=legacy)
+    if usage and report['A_wins'] == 0 and usage[1] <= usage[0] * (1 - min_cost_saving):
         return 'efficiency'
     return None
 
@@ -109,9 +133,9 @@ def gate(a: dict, b: dict, max_cost_increase: float = .25, *, dev: bool = False,
         return False
     report = compare(a, b)
     before, after = metrics(a), metrics(b)
-    costs_known = legacy or (measured_cost(before['cost_usd']) and measured_cost(after['cost_usd']))
-    return (costs_known and after['pass_rate'] >= before['pass_rate'] and report['B_wins'] >= report['A_wins']
-            and after['cost_usd'] <= before['cost_usd'] * (1 + max_cost_increase))
+    usage = paired_usage(before, after, legacy=legacy)
+    return (usage is not None and after['pass_rate'] >= before['pass_rate']
+            and report['B_wins'] >= report['A_wins'] and usage[1] <= usage[0] * (1 + max_cost_increase))
 
 
 def invalid_run_reason(run: dict) -> str | None:

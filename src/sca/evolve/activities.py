@@ -18,8 +18,10 @@ from sca.eval.activities import load_activity_suite
 from sca.eval.errors import invalid_eval_input, suite_changed
 from sca.eval.suites import matches_suite_hash
 from sca.eval.trajectory import is_errored, overall_passed
-from sca.evolve.checks import measured_cost, overlay_hash, static_check
+from sca.evolve.checks import measured_efficiency, overlay_hash, static_check
 from sca.evolve.models import Proposal
+from sca.gateway.configuration import local_default_model
+from sca.gateway.model_providers import read_registry
 from sca.orchestration.provider_errors import account_failure
 
 # OpenCode 2.3 renders this guidance when no overlay replaces it (session/system-prompt.ts).
@@ -117,6 +119,8 @@ class EvolutionActivities:
             payload['evolution_id'] = request['id']
         if step := request.get('evolution_step'):
             payload['evolution_step'] = step
+        if cfg.get('model_unpriced'):
+            payload['model_unpriced'] = True
         if request.get('schedule_id') is not None:
             payload.update(evolution_schedule_id=request['schedule_id'],
                            champion_id=request.get('champion_id'))
@@ -146,11 +150,15 @@ class EvolutionActivities:
             prompt = None  # Unknown source: the proposer may still edit guidance and descriptions.
         return {'system_prompt': prompt, 'tool_guidance': DEFAULT_TOOL_GUIDANCE, 'tool_names': list(CODING_TOOLS)}
 
-    async def _complete(self, messages: list[dict[str, str]], *, max_tokens: int = 1024) -> str:
+    async def _complete(self, messages: list[dict[str, str]], model: str, *,
+                        max_tokens: int = 1024) -> str:
         if self.gateway is None:
             raise ValueError('evolution requires a model gateway')
+        route = read_registry(self.settings.data_dir).models.get(model)
+        if route and route.context_window is not None:
+            max_tokens = min(max_tokens, max(1, route.context_window // 4))
         try:
-            return await self.gateway.complete(messages, self.settings.evolve_model, max_tokens=max_tokens)
+            return await self.gateway.complete(messages, model, max_tokens=max_tokens)
         except ModelProviderError as exc:
             if exc.is_account_error:
                 raise account_failure(exc) from None
@@ -161,6 +169,8 @@ class EvolutionActivities:
         if self.gateway is None:
             raise ValueError('evolution requires a model gateway')
         store = self.scoped(request)
+        cfg = request['config']
+        model = cfg.get('evolve_model') or local_default_model(self.settings.data_dir, self.settings.evolve_model)
         run = await store.get_eval_run(request['dev_run_id'])
         if run['variant'].get('split') != 'dev':
             raise ValueError('reflection requires dev evidence')
@@ -181,7 +191,7 @@ class EvolutionActivities:
                        'output contract):\n' + guidance + '\nEnd of operator guidance.')
         diagnosis = await self._complete([
             {'role': 'system', 'content': system + ' Return {"diagnoses": [1-3 concise failure patterns]}.'},
-            {'role': 'user', 'content': json.dumps(json_safe(evidence))[:24000]}])
+            {'role': 'user', 'content': json.dumps(json_safe(evidence))[:24000]}], model)
         try:
             diagnosis = parse_json(diagnosis[:12000])
             patterns = diagnosis['diagnoses']
@@ -193,7 +203,6 @@ class EvolutionActivities:
         journal = (await store.get_evolution(request['id']))['journal']
         # Do not send holdout metrics or reasons (which may contain holdout evidence) to the model.
         safe_journal = [{k: r[k] for k in ('hypothesis', 'decision', 'dev_metrics')} for r in journal if r.get('type') != 'evaluation']
-        cfg = request['config']
         backend = cfg.get('agent_backend', 'opencode')
         baseline = await self.baseline(self.agent_version(cfg), backend)
         proposal_instructions = DSH_PROPOSAL if backend == 'dsh' else OPENCODE_PROPOSAL
@@ -205,7 +214,7 @@ class EvolutionActivities:
              + proposal_instructions + 'Do not repeat failed hypotheses.'},
             {'role': 'user', 'content': json.dumps(json_safe(context))[:60000]}]
         # Each candidate may carry a full system prompt; the default 1024 tokens truncates the JSON.
-        raw = await self._complete(messages, max_tokens=8192)
+        raw = await self._complete(messages, model, max_tokens=8192)
         try:
             values = parse_json(raw[:200000])
         except ValueError:
@@ -214,7 +223,7 @@ class EvolutionActivities:
                 *messages, {'role': 'assistant', 'content': raw[:4000]},
                 {'role': 'user', 'content': 'That was not a valid JSON array. Reply with only the JSON '
                  'array, shorter if needed, with no prose or Markdown.'}],
-                max_tokens=8192)
+                model, max_tokens=8192)
             try:
                 values = parse_json(raw[:200000])
             except ValueError:
@@ -279,9 +288,10 @@ class EvolutionActivities:
     @activity.defn(name='evolve_promote')
     async def promote(self, request: dict) -> dict:
         c, cfg = request['candidate'], request['config']
-        # An activity queued by a pre-upgrade workflow must also have measured holdout spend.
-        if not measured_cost((c.get('holdout_metrics') or {}).get('cost_usd', 0)):
-            raise invalid_eval_input('候选留出集缺少有效的实测费用，无法晋升')
+        holdout = c.get('holdout_metrics') or {}
+        if measured_efficiency(holdout) is None:
+            measure = 'Token 用量' if holdout.get('unpriced') else '费用'
+            raise invalid_eval_input(f'候选留出集缺少有效的实测{measure}，无法晋升')
         store = self.scoped(request)
         percent = request.get('auto_rollout_percent')
         row = await store.activate_champion(request['champion_id'], {
