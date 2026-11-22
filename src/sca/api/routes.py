@@ -5,7 +5,7 @@ from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 from sca.kinds import builtin as _builtin_kinds
@@ -238,6 +238,8 @@ async def download(
     guest = isinstance(user, GuestPrincipal)
     if guest and not guest_downloadable(artifact):
         raise ForbiddenError("访客只能读取文本制品")
+    if reason := artifact.missing_reason:
+        return JSONResponse({"error": {"code": "artifact_missing", "message": reason}}, status_code=410)
     artifact_key = history_artifact_key if task.result.get("history_imported") is True else key_for
     data = await request.app.state.object_store.get(artifact_key(task_id, artifact.name))
     return Response(guest_artifact_text(data) if guest else data,

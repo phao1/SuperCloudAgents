@@ -9,7 +9,7 @@ from enum import StrEnum
 from typing import Annotated, Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 # --------------------------------------------------------------------------- tasks
 
@@ -143,6 +143,14 @@ class Artifact(BaseModel):
     uri: str
     size_bytes: int
     created_at: datetime
+
+    # History transfer
+    @computed_field
+    @property
+    def missing_reason(self) -> str | None:
+        if self.uri == HISTORY_MISSING_ARTIFACT_URI:
+            return "文件缺失（源机器上已清理）"
+        return None
 
 
 class Principal(BaseModel):
@@ -319,3 +327,7 @@ class TaskMessage(BaseModel):
     created_at: datetime
     turn: int | None
     plan_attempt: int | None
+
+
+# History transfer
+HISTORY_MISSING_ARTIFACT_URI = "history:missing"

@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -13,7 +16,7 @@ from alembic.operations import Operations
 from alembic.script import ScriptDirectory
 from sqlalchemy import func, insert, select
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import create_async_engine
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
@@ -35,7 +38,12 @@ PATCH = b"diff --git a/readme.md b/readme.md\n+history\n"
 
 
 @pytest.fixture
-async def history_databases():
+def source_revision():
+    return "0025"
+
+
+@pytest.fixture
+async def history_databases(source_revision):
     url = make_url(Settings(_env_file=None).database_url)
     admin = create_async_engine(
         url, isolation_level="AUTOCOMMIT", connect_args={"timeout": 5}, hide_parameters=True,
@@ -56,18 +64,19 @@ async def history_databases():
         finally:
             await conn.close()
 
-        def migrate(sync):
+        def migrate(sync, revision):
             folder = Path(db.__file__).with_name("migrations")
             scripts = ScriptDirectory(str(folder))
+            revision = revision or scripts.get_current_head()
             context = MigrationContext.configure(sync)
             with Operations.context(context):
-                for script in reversed(list(scripts.walk_revisions())):
+                for script in reversed(list(scripts.iterate_revisions(revision, "base"))):
                     script.module.upgrade()
-                context.stamp(scripts, scripts.get_current_head())
+                context.stamp(scripts, revision)
 
-        for engine in engines:
+        for engine, revision in zip(engines, (source_revision, None), strict=True):
             async with engine.begin() as conn:
-                await conn.run_sync(migrate)
+                await conn.run_sync(migrate, revision)
         yield tuple(engines)
     finally:
         for engine in engines:
@@ -79,12 +88,13 @@ async def history_databases():
         await admin.dispose()
 
 
-async def seed_history(engine, objects):
+async def seed_history(engine, objects, *, agent_backend: str | None = "opencode"):
     ids = {name: uuid4() for name in (
         "project", "task", "child", "unrelated", "foreign", "message", "artifact",
         "eval_run", "evolution", "candidate", "champion", "session",
     )}
     root = ids["task"]
+    backend = {"agent_backend": agent_backend} if agent_backend is not None else {}
     uri = await objects.put(key_for(root, "result.patch"), PATCH, "text/x-diff")
     await objects.put(f"tasks/{root}/state/agent_home.tar", PRIVATE.encode())
     async with engine.begin() as conn:
@@ -169,15 +179,15 @@ async def seed_history(engine, objects):
         await conn.execute(insert(db.champions).values(
             id=ids["champion"], tenant_id="eval", agent_version="fake.1", model="fake",
             overlay={}, overlay_sha256="champion-sha", candidate_id=ids["candidate"],
-            active=True, metrics={}, created_at=OLD,
+            active=True, metrics={}, created_at=OLD, **backend,
         ))
         await conn.execute(insert(db.evolution_events).values(
             tenant_id="eval", type="rollout.updated", actor="fixture",
             payload={"champion_id": str(ids["champion"])}, created_at=NOW,
         ))
-        await conn.execute(insert(db.champion_rollouts).values(
+        await conn.execute(insert(db.champion_rollouts).inline().values(
             tenant_id="eval", agent_version="fake.1", model="fake", champion_id=ids["champion"],
-            percent=100, updated_by="fixture",
+            percent=100, updated_by="fixture", **backend,
         ))
         await conn.execute(insert(db.api_tokens).values(
             id=uuid4(), tenant_id="eval", name="fixture", token_hash=PRIVATE,
@@ -191,13 +201,18 @@ async def seed_history(engine, objects):
     return ids
 
 
-async def test_history_round_trip_and_existing_history_surfaces(history_databases, tmp_path, monkeypatch):
+@pytest.mark.parametrize("source_revision", ["0024", "0025"])
+async def test_history_round_trip_and_existing_history_surfaces(
+    history_databases, source_revision, tmp_path, monkeypatch,
+):
     linux, windows = history_databases
     source = LocalObjectStore(tmp_path / "linux" / "objects")
     target = LocalObjectStore(tmp_path / "windows" / "objects")
-    ids = await seed_history(linux, source)
+    backend = None if source_revision == "0024" else "dsh"
+    ids = await seed_history(linux, source, agent_backend=backend)
     path = tmp_path / "history.zip"
     manifest = await export_history(linux, source, path)
+    assert manifest.schema_revision == source_revision
     assert manifest.counts["tenants"] == 2
     assert manifest.counts["tasks"] == 4
     assert manifest.counts["objects"] == 2
@@ -234,6 +249,7 @@ async def test_history_round_trip_and_existing_history_surfaces(history_database
     assert evolution["best_champion_id"] == ids["champion"]
     champion = await scoped.get_champion(ids["champion"])
     assert not champion["active"] and champion["metrics"]["history_source_active"]
+    assert champion["agent_backend"] == (backend or "opencode")
     artifact = await scoped.get_artifact(task.id, "result.patch")
     assert artifact.uri == target._path(history_artifact_key(task.id, artifact.name)).as_uri()
     assert await target.get(history_artifact_key(task.id, artifact.name)) == PATCH
@@ -265,6 +281,89 @@ async def test_history_round_trip_and_existing_history_surfaces(history_database
         assert (await client.get(path, headers={"Authorization": "Bearer other"})).status_code == 404
     orchestrator.start_task.assert_not_awaited()
     orchestrator.resume_task.assert_not_awaited()
+
+
+def run_history_export(
+    engine: AsyncEngine, data_dir: Path, bundle: Path, *flags: str,
+) -> subprocess.CompletedProcess[str]:
+    env = {
+        **os.environ,
+        "SCA_DATABASE_URL": engine.url.render_as_string(hide_password=False),
+        "SCA_DATA_DIR": str(data_dir),
+        "SCA_OBJECT_STORE": "local",
+        "PYTHONIOENCODING": "utf-8",
+    }
+    return subprocess.run(
+        [sys.executable, "-m", "sca.history", "export", "--out", str(bundle), *flags],
+        env=env, capture_output=True, encoding="utf-8", check=False, timeout=30,
+    )
+
+
+async def test_history_round_trip_with_deleted_artifact_blob(history_databases, tmp_path, monkeypatch):
+    linux, windows = history_databases
+    data_dir = tmp_path / "linux"
+    source = LocalObjectStore(data_dir / "objects")
+    target = LocalObjectStore(tmp_path / "windows" / "objects")
+    ids = await seed_history(linux, source)
+    task_id, name = ids["task"], "result.patch"
+    await source.delete(key_for(task_id, name))
+    path = tmp_path / "history.zip"
+
+    strict = run_history_export(linux, data_dir, path, "--strict")
+    assert strict.returncode == 1 and not path.exists()
+    assert "严格模式下发现缺失的制品文件" in strict.stderr
+    completed = run_history_export(linux, data_dir, path)
+    assert completed.returncode == 0
+    assert "正在导出历史" in completed.stderr and name in completed.stdout
+    assert "已复制 1 个对象，缺失 1 个对象" in completed.stdout
+    with ZipFile(path) as archive:
+        bundle = BundleReader(archive)
+        bundle.verify()
+        assert bundle.manifest.counts["artifacts"] == bundle.manifest.counts["missing_objects"] == 1
+        assert [obj.model_dump() for obj in bundle.manifest.missing_objects] == [
+            {"task_id": task_id, "name": name},
+        ]
+        assert f"objects/artifacts/{ids['artifact']}" not in archive.namelist()
+
+    counts = await import_history(windows, target, path)
+    assert counts["artifacts"] == counts["objects"] == 1
+    assert await target.list(f"tasks/{task_id}/") == []
+    async with windows.connect() as conn:
+        assert await conn.scalar(select(db.artifacts.c.id)) == ids["artifact"]
+
+    settings = Settings(_env_file=None, data_dir=tmp_path / "windows", guest_view="local", guest_tenant="eval")
+    monkeypatch.setattr("sca.api.app.get_settings", lambda: settings)
+    app = create_app(
+        store=Store(make_sessionmaker(windows), objects=target),
+        orchestrator=SimpleNamespace(), object_store=target,
+        authenticator=StaticTokenAuthenticator({"fixture": "eval:admin", "other": "other:viewer"}),
+    )
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+        reason = "文件缺失（源机器上已清理）"
+        auth = {"Authorization": "Bearer fixture"}
+        assert (await client.get("/portal")).status_code == 200
+        root = f"/v1/tasks/{task_id}/artifacts"
+        for headers in ({}, auth):
+            response = await client.get(root, headers=headers)
+            assert response.status_code == 200
+            artifact, = response.json()
+            assert artifact["name"] == name and artifact["missing_reason"] == reason
+            download = await client.get(f"{root}/{name}", headers=headers)
+            assert download.status_code == 410
+            assert download.json() == {"error": {"code": "artifact_missing", "message": reason}}
+        library = await client.get(f"/v1/projects/{ids['project']}/library", headers=auth)
+        assert library.json()["artifacts"][0]["missing_reason"] == reason
+        assert (await client.get(f"{root}/{name}", headers={"Authorization": "Bearer other"})).status_code == 404
+
+
+@pytest.mark.parametrize("source_revision", ["0023"])
+async def test_history_export_reports_source_upgrade_in_chinese(history_databases, tmp_path):
+    source, _ = history_databases
+    path = tmp_path / "history.zip"
+    completed = run_history_export(source, tmp_path, path)
+    assert completed.returncode == 1 and not path.exists()
+    assert "源库版本 0023，需先升级到 0024" in completed.stderr
+    assert "Traceback" not in completed.stderr
 
 
 async def test_history_filters_keep_older_dependencies(history_databases, tmp_path):

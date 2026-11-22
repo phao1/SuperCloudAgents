@@ -14,7 +14,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, ValidationErro
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.types import Float
 
-from sca.history.catalog import ARTIFACTS, TABLES, TASKS, TENANTS, HistoryTable
+from sca.history.catalog import ARTIFACTS, CHAMPIONS, TABLES, TASKS, TENANTS, HistoryTable
 
 BLOCK_SIZE = 1024 * 1024
 Row = dict[str, Any]
@@ -31,6 +31,13 @@ class Member(BaseModel):
     sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 
 
+class MissingObject(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    task_id: UUID
+    name: str
+
+
 class Manifest(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
 
@@ -39,6 +46,7 @@ class Manifest(BaseModel):
     created_at: AwareDatetime
     counts: dict[str, Annotated[int, Field(ge=0)]]
     files: dict[str, Member]
+    missing_objects: list[MissingObject] = Field(default_factory=list)
 
 
 def object_member(entry: HistoryTable, row: Row) -> str | None:
@@ -92,7 +100,12 @@ def decode_row(entry: HistoryTable, line: bytes) -> Row:
 
     try:
         row = json.loads(line)
-        if not isinstance(row, dict) or set(row) != set(entry.columns.split()):
+        if not isinstance(row, dict):
+            raise TypeError
+        # History bundles written before backend-aware transfer omitted this field.
+        if entry is CHAMPIONS and row.setdefault("agent_backend", "opencode") not in ("opencode", "dsh"):
+            raise ValueError
+        if set(row) != set(entry.columns.split()):
             raise ValueError
         return {name: typed(name, value) for name, value in row.items()}
     except (ArithmeticError, TypeError, ValueError) as exc:
@@ -149,8 +162,14 @@ class BundleReader:
             raise HistoryError("Invalid history manifest") from exc
         if set(names) != self.manifest.files.keys() | {"manifest.json"}:
             raise HistoryError("ZIP members differ from the history manifest")
-        if self.manifest.counts.keys() != {entry.name for entry in TABLES} | {"objects"}:
+        counts = self.manifest.counts
+        if counts.keys() - {"missing_objects"} != {entry.name for entry in TABLES} | {"objects"}:
             raise HistoryError("Unexpected history table counts")
+        self._missing = {(item.task_id, item.name) for item in self.manifest.missing_objects}
+        if len(self._missing) != len(self.manifest.missing_objects) or len(self._missing) != counts.get(
+            "missing_objects", 0,
+        ):
+            raise HistoryError("Invalid missing object count or duplicate references")
 
     def verify(self) -> None:
         tables = {entry.member for entry in TABLES}
@@ -158,11 +177,12 @@ class BundleReader:
         if not tables <= self.manifest.files.keys() or len(objects) != self.manifest.counts["objects"]:
             raise HistoryError("History ZIP has missing table files or an invalid object count")
         unreferenced = objects.copy()
+        missing = self._missing.copy()
         tenants: set[str] = set()
         for entry in TABLES:
             with self.zip.open(entry.member) as file:
-                self._verify_table(entry, file, tenants, unreferenced)
-        if unreferenced:
+                self._verify_table(entry, file, tenants, unreferenced, missing)
+        if unreferenced or missing:
             raise HistoryError("History ZIP contains unreferenced objects")
         for name in objects:
             with self.zip.open(name) as file:
@@ -170,6 +190,7 @@ class BundleReader:
 
     def _verify_table(
         self, entry: HistoryTable, file: BinaryIO, tenants: set[str], unreferenced: set[str],
+        missing: set[tuple[UUID, str]],
     ) -> None:
         digest = hashlib.sha256()
         size = count = 0
@@ -182,7 +203,14 @@ class BundleReader:
                 tenants.add(row["id"])
             elif row["tenant_id"] not in tenants:
                 raise HistoryError(f"Unknown tenant in {entry.member}")
-            if (name := object_member(entry, row)) is not None:
+            name = object_member(entry, row)
+            if name is None:
+                continue
+            if entry is ARTIFACTS and (key := (row["task_id"], row["name"])) in self._missing:
+                if key not in missing or name in self.manifest.files:
+                    raise HistoryError("Missing artifact is also present or referenced twice")
+                missing.remove(key)
+            else:
                 if name not in unreferenced:
                     raise HistoryError("History object is missing or referenced twice")
                 unreferenced.remove(name)

@@ -197,6 +197,9 @@ const assert=require('node:assert/strict');
 const destination=process.argv[2];
 const guest=destination==='guest'||destination==='evolution';
 const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
+const missingReason='文件缺失（源机器上已清理）';
+const artifacts=destination==='task'?['changes.patch','verify.log','report.md']
+  .map(name=>({name,missing_reason:missingReason})):[];
 const project={id:'project-id',name:'默认项目',status:'active',group_counts:{resolved:1030}};
 const candidate={id:'candidate',generation:1,decision:'pending',reason:'awaiting approval',overlay:{}};
 const evolution={id:'evo-id',status:'awaiting_approval',config:{suite:'fixture',agent_version:'fake',model:'fake'},
@@ -278,6 +281,7 @@ global.fetch=async (path,request)=>{
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
     [taskPath]:task,
     [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}}],
+    [taskPath+'/artifacts']:artifacts,
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
@@ -383,6 +387,14 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await startup;
     assert.equal($('task-picker').disabled,true);
     assert.equal(eventCursor,1);
+    assert.equal($('patch').textContent,missingReason);
+    assert.equal($('task-missing-artifacts-panel').hidden,false);
+    assert.equal($('task-missing-artifacts').children[0].textContent,'verify.log · '+missingReason);
+    task.kind='analysis';
+    await updateTask();
+    assert.equal($('analysis-report-panel').hidden,false);
+    assert.equal($('analysis-rendered').children[0].textContent,missingReason);
+    assert(!calls.some(path=>path.startsWith(taskPath+'/artifacts/')));
   }
   assert.equal($('error').textContent,'');
 })().finally(()=>clearTimeout(deadline)).catch(error=>{console.error(error);process.exitCode=1});

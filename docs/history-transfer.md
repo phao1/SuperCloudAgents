@@ -30,6 +30,16 @@ S3 部署使用 `SCA_OBJECT_STORE=s3`，并在当前环境提供 Worker 使用�
 候选、冠军谱系和数据库中可查到的同租户 DAG 关系。
 若任务正在重写同名制品，命令可能提示制品已更改，可在该轮发布后重试。
 
+源对象存储中已清理的制品会保留数据库记录，导出会跳过文件内容。ZIP 内的 `manifest.json`
+在 `missing_objects` 中逐项记录 `task_id` 和 `name`，总数见 `counts.missing_objects`。
+导出期间标准错误显示进度，标准输出在完成后列出各表行数、复制和缺失的对象数、缺失文件示例
+以及 ZIP 大小。只有制品文件缺失时，命令返回 `0`。要求制品齐全时使用 `--strict`，遇到缺失
+即中止并返回非零。对象存储访问失败或任务的事件归档缺失时也会中止。
+
+```bash
+.venv/bin/python -m sca.history export --strict --out "$PWD/sca-history.zip"
+```
+
 ## Windows 导入
 
 将 ZIP 复制到 Windows 的 SCA 源码目录。运行本机 Postgres，在 PowerShell 中使用目标 Portal
@@ -46,7 +56,8 @@ $env:SCA_DATABASE_URL = [System.Net.NetworkCredential]::new('', $DbUrl).Password
 & .\.venv\Scripts\python.exe -m sca.history import .\sca-history.zip
 ```
 
-两端数据库至少应用迁移 `0024`。目标数据库的 Alembic 历史须包含归档记录的版本。导入校验
+导出支持源库 `0024` 和 `0025`。`0024` 的历史冠军归属 OpenCode，`0025` 会保留每个冠军的
+Agent 后端。更早的源库会收到升级提示。目标数据库的 Alembic 历史须包含归档记录的版本。导入校验
 清单中的文件 SHA-256 和记录数，并在同一数据库中互斥执行。任务、项目、消息、评测、演进以及
 冠军的 ID 会保留。任务事件保留原任务内序号，数据库内部流水号由目标库分配。
 
@@ -69,9 +80,15 @@ $Tasks
 $TaskId = ($Tasks | Select-Object -First 1).id
 Invoke-RestMethod "$Api/v1/tasks/$TaskId/dag" -Headers $Headers
 Invoke-RestMethod "$Api/v1/tasks/$TaskId/messages" -Headers $Headers
+Invoke-RestMethod "$Api/v1/tasks/$TaskId/artifacts" -Headers $Headers
 Invoke-RestMethod "$Api/v1/evals/runs" -Headers $Headers
 Invoke-RestMethod "$Api/v1/evolutions" -Headers $Headers
 ```
+
+导入的任务详情及项目「线程产物」会把源库缺失的文件标为「文件缺失（源机器上已清理）」。
+制品列表的 `missing_reason` 字段提供同一提示。直接请求
+`GET /v1/tasks/{task_id}/artifacts/{name}` 下载这些文件时，接口返回 HTTP `410`，错误码为
+`artifact_missing`。
 
 归档包含历史展示所需的数据和已发布制品。租户凭证与成员、计费与支付记录、LiteLLM 数据库、
 演进定时计划、冠军灰度配置、任务输入和运行检查点由目标实例独立管理。导出会过滤凭据字段并

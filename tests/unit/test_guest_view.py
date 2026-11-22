@@ -17,7 +17,15 @@ from sca.api.authz import GuestPrincipal, authorize
 from sca.api.guest_history import history_dag
 from sca.config import Settings
 from sca.core.errors import AuthError, NotFoundError
-from sca.core.models import Artifact, Event, Principal, Task, TaskMessage, TaskState
+from sca.core.models import (
+    HISTORY_MISSING_ARTIFACT_URI,
+    Artifact,
+    Event,
+    Principal,
+    Task,
+    TaskMessage,
+    TaskState,
+)
 from sca.core.task_dag import DAGEdge, DAGNode, TaskDAG
 from sca.evolve.solidify import SOLIDIFY_KIND
 from sca.storage.local import LocalObjectStore, key_for
@@ -200,6 +208,23 @@ async def test_guest_history_and_credential_fields(demo_api):
     assert (await client.get(root, headers=auth)).json()["idempotency_key"] == "fixture-retry"
     assert "fixture-patch" in (await client.get(artifacts[0]["uri"], headers=auth)).text
     assert (await client.get("/v1/evolutions", headers={"Authorization": "Bearer viewer"})).status_code == 403
+
+
+async def test_missing_artifact_is_visible_without_bypassing_guest_download_rules(demo_api):
+    client, store, task_id, _ = demo_api
+    artifacts = store.list_artifacts.return_value
+    artifacts[:] = [a.model_copy(update={"uri": HISTORY_MISSING_ARTIFACT_URI}) for a in artifacts]
+    path = f"/v1/tasks/{task_id}/artifacts"
+    reason = "文件缺失（源机器上已清理）"
+    for headers in ({}, {"Authorization": "Bearer fixture"}):
+        response = await client.get(path, headers=headers)
+        assert response.status_code == 200
+        assert response.json()[0]["missing_reason"] == reason
+        gone = await client.get(path + "/changes.patch", headers=headers)
+        assert gone.status_code == 410
+        assert gone.json() == {"error": {"code": "artifact_missing", "message": reason}}
+    assert [item["name"] for item in (await client.get(path)).json()] == ["changes.patch"]
+    assert (await client.get(path + "/changes.bundle")).status_code == 403
 
 
 async def test_guest_evolution_dag_champions_and_write_permissions(demo_api, monkeypatch):

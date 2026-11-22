@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import datetime
 
-from sqlalchemy import Select, Table, and_, cast, func, or_, select, union
+from sqlalchemy import Select, Table, and_, cast, func, literal, or_, select, union
 from sqlalchemy.sql import ColumnElement
 from sqlalchemy.sql.selectable import CTE, FromClause
 from sqlalchemy.types import Text
@@ -57,7 +57,7 @@ CANDIDATES = HistoryTable(
 )
 CHAMPIONS = HistoryTable(
     db.champions, "id tenant_id agent_version model overlay overlay_sha256 candidate_id "
-    "metrics parent_champion_id created_at active",
+    "metrics parent_champion_id created_at active agent_backend",
     (("candidate_id", db.evolution_candidates, False),),
 )
 EVOLUTION_EVENTS = HistoryTable(
@@ -96,9 +96,12 @@ def _same_tenant(left: FromClause, right: FromClause, key: str = "id") -> Column
 
 
 class Snapshot:
-    def __init__(self, tenants: tuple[str, ...], since: datetime | None) -> None:
+    def __init__(
+        self, tenants: tuple[str, ...], since: datetime | None, *, champion_backend: bool,
+    ) -> None:
         self.tenants = tenants
         self.since = since
+        self.champion_backend = champion_backend
         self.owners: dict[Table, CTE] = {
             table: _ids(table, self._tenant(table.c.tenant_id)).cte()
             for table in (db.tasks, db.eval_runs, db.evolutions, db.champions)
@@ -245,11 +248,16 @@ class Snapshot:
             func.coalesce(t.membership_required, True).label("membership_required"),
         ).select_from(ids.outerjoin(db.tenants, t.id == ids.c.id)).order_by(ids.c.id)
 
-    def rows(self, entry: HistoryTable) -> Select:
+    def rows(self, entry: HistoryTable, *, artifact_objects: bool = False) -> Select:
         table = entry.table
         if entry is TENANTS:
             return self._tenant_rows()
-        stmt = select(*(table.c[name] for name in entry.columns.split()))
+        stmt = select(*(
+            literal("opencode").label(name)
+            if entry is CHAMPIONS and name == "agent_backend" and not self.champion_backend
+            else table.c[name]
+            for name in entry.columns.split()
+        ))
         if table in self.owners:
             owner = self.owners[table]
             stmt = stmt.join(owner, _same_tenant(table, owner))
@@ -261,9 +269,9 @@ class Snapshot:
                 stmt = stmt.outerjoin(parent, _same_tenant(table, parent, key)).where(
                     or_(table.c[key].is_(None), parent.c.id.is_not(None)),
                 )
-        if entry is ARTIFACTS:
+        if entry is ARTIFACTS and artifact_objects:
             stmt = stmt.join(db.tasks, _same_tenant(table, db.tasks, "task_id")).add_columns(
-                db.tasks.c.result["history_imported"].label("imported_task"),
+                table.c.uri, db.tasks.c.result["history_imported"].label("imported_task"),
             )
         if self.since is not None and entry is PROJECTS:
             selected = self.owners[db.tasks]
