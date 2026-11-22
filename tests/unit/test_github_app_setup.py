@@ -3,8 +3,10 @@ from __future__ import annotations
 import html
 import importlib.util
 import json
+import os
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -33,6 +35,20 @@ def test_manifest(tmp_path, capsys):
     assert 'action="https://github.com/settings/apps/new"' in document
     assert "document.forms[0].submit()" in document
     assert "manifest=%7B" in capsys.readouterr().out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Creating this symlink requires Developer Mode")
+def test_save_without_nofollow_preserves_link_target(tmp_path, monkeypatch):
+    monkeypatch.setattr(setup, "os", SimpleNamespace(fdopen=os.fdopen, replace=os.replace))
+    original = tmp_path / "outside"
+    original.write_text("original")
+    directory = tmp_path / "app"
+    setup.save(directory, "target.json", "fixture")
+    assert (directory / "target.json").read_text() == "fixture"
+    (directory / "private-key.pem").symlink_to(original)
+    with pytest.raises(ValueError, match="links or junctions"):
+        setup.save(directory, "private-key.pem", "replacement")
+    assert original.read_text() == "original"
 
 
 async def test_convert(tmp_path, capsys):
@@ -65,10 +81,12 @@ async def test_convert(tmp_path, capsys):
         "client_id": "client",
     }
     assert (directory / "private-key.pem").read_text() == "test-private-key"
-    assert directory.stat().st_mode & 0o777 == 0o700
     assert not (directory / "installation_id").exists()
+    if os.name != "nt":
+        assert directory.stat().st_mode & 0o777 == 0o700
     for path in directory.iterdir():
-        assert path.stat().st_mode & 0o777 == 0o600
+        if os.name != "nt":
+            assert path.stat().st_mode & 0o777 == 0o600
         assert "discard-me" not in path.read_text()
     assert "test-private-key" not in capsys.readouterr().out
 
@@ -110,7 +128,8 @@ async def test_status_selects_target_installation(tmp_path, monkeypatch, capsys)
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
         await setup.status(http, tmp_path)
     assert (tmp_path / "installation_id").read_text() == "7"
-    assert (tmp_path / "installation_id").stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert (tmp_path / "installation_id").stat().st_mode & 0o777 == 0o600
     installations.append({"id": 8})
     # Multiple installations granting the target must not silently select one.
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:

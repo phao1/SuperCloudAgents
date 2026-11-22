@@ -262,6 +262,30 @@ async def test_guest_evolution_dag_champions_and_write_permissions(demo_api, mon
         assert (await client.request(method, path, json={}, headers=viewer)).status_code == 403, (method, path)
 
 
+async def test_guest_dsh_champion_detail_redacts_overlay(demo_api, monkeypatch):
+    client, store, _, _ = demo_api
+    champion_id = str(uuid4())
+    champion = {
+        "id": champion_id, "agent_backend": "dsh", "created_by": "owner@example.org",
+        "overlay": {"tool_guidance": "Ask owner@example.org", "api_key": "fixture-key"},
+    }
+    store.get_champion = AsyncMock(return_value=champion)
+    builds = AsyncMock()
+    monkeypatch.setattr("sca.api.agents.builds_list", builds)
+    path = f"/v1/champions/{champion_id}"
+
+    guest = await client.get(path)
+    assert guest.status_code == 200
+    assert guest.json() == {
+        "id": champion_id, "agent_backend": "dsh", "solidify_builds": [],
+        "overlay": {"tool_guidance": "Ask [redacted]"},
+    }
+    admin = await client.get(path, headers={"Authorization": "Bearer fixture"})
+    assert admin.status_code == 200
+    assert admin.json() == {**champion, "solidify_builds": []}
+    builds.assert_not_awaited()
+
+
 async def test_guest_dag_and_message_history(demo_api):
     client, store, task_id, other_id = demo_api
     task = await store.get_task(task_id, "eval")

@@ -135,3 +135,9 @@ Remove-Variable token, headers
 - 使用源码模式烟测时，在当前 PowerShell 中提供 `PORTAL_TOKEN`，然后运行
   `.\.venv\Scripts\python.exe scripts/source_smoke.py`。烟测使用 `fake` 后端，
   检查 Portal HTML、文件补丁和验证结果，无需模型密钥。
+
+### 源码模式持续集成
+
+在 GitHub Actions 的 **Source mode** 工作流中选择 **Run workflow**，可在 Windows、macOS 和
+Ubuntu 上验证源码启动。依赖安装成功后，即使单测失败也会运行烟测。运行失败时，在该次运行的
+**Artifacts** 下载对应系统的 `source-smoke-<系统>`，查看经过脱敏的服务日志。

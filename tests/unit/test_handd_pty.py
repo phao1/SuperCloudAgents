@@ -70,7 +70,7 @@ time.sleep(30)
     await asyncio.sleep(.4)
     assert not target.exists()
     assert not handd.pending
-    assert [event.exit_code async for event in handd.exec(["/bin/true"])] == [0]
+    assert [event.exit_code async for event in handd.exec([sys.executable, "-c", "pass"])] == [0]
 
 
 async def test_pty_timeout_and_spawn_error(handd):
@@ -81,7 +81,7 @@ async def test_pty_timeout_and_spawn_error(handd):
             assert await job.receive() == {"id": job.id, "exit": 124, "timed_out": True}
         async with handd.open_pty(["/does-not-exist"]) as job:
             assert await job.receive() == {"id": job.id, "exit": 127, "timed_out": False}
-        async with handd.open_pty(["/bin/true"], rows=0) as job:
+        async with handd.open_pty([sys.executable, "-c", "pass"], rows=0) as job:
             assert await job.receive() == {"id": job.id, "exit": 127, "timed_out": False}
 
 

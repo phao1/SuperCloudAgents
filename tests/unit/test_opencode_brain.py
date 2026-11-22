@@ -1,10 +1,13 @@
 import json
+import sys
 from pathlib import Path
 
 import pytest
 
 from sca.agents.opencode_brain import OpenCodeBrainBackend
 from sca.core.models import AgentContext
+
+CLEANUP_COMMAND = [sys.executable, "-c", "pass"]
 
 
 def backend(tmp_path: Path) -> OpenCodeBrainBackend:
@@ -14,7 +17,7 @@ def backend(tmp_path: Path) -> OpenCodeBrainBackend:
                                  gateway_url="http://localhost/v1")
     agent.settings = agent.settings.model_copy(update={"opencode_brain_pool": False})
     agent.materialize = lambda version: tmp_path
-    agent.cleanup_command = lambda container, marker: ["/bin/true"]
+    agent.cleanup_command = lambda container, marker: CLEANUP_COMMAND
     return agent
 
 
@@ -205,10 +208,11 @@ async def test_cancel_runs_remote_cleanup(tmp_path, pooled):
     cleanup = AsyncMock()
 
     async def spawn(*args, **kwargs):
-        if args[0] == '/bin/true':
+        is_cleanup = list(args) == CLEANUP_COMMAND
+        if is_cleanup:
             await cleanup(*args)
         proc = await original(*args, **kwargs)
-        if args[0] != '/bin/true':
+        if not is_cleanup:
             ready.set()
         return proc
 

@@ -1,5 +1,6 @@
 """Evolution API authorization, queueing, approval and rollback using fakes."""
 
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
@@ -57,7 +58,7 @@ async def harness(tmp_path, monkeypatch):
         yield http, store, temporal, handle, current, candidate_id
 
 
-async def test_start_creates_row_before_workflow(harness):
+async def test_start_creates_row_before_workflow(harness, tmp_path):
     http, store, temporal, _, _, _ = harness
 
     async def start(*args, **kwargs):
@@ -65,7 +66,7 @@ async def test_start_creates_row_before_workflow(harness):
         payload = args[1]
         assert payload['suite_hash'] == 'h'
         assert UUID(payload['id'])
-        assert payload['config']['suite'].endswith('/suite')
+        assert Path(payload['config']['suite']) == (tmp_path / 'suite').resolve()
         assert payload['config']['agent_backend'] == 'opencode'
 
     temporal.start_workflow.side_effect = start

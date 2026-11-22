@@ -7,7 +7,6 @@ import base64
 import contextlib
 import json
 import re
-import shutil
 from collections.abc import Iterable
 from pathlib import PurePosixPath
 
@@ -18,6 +17,7 @@ from sca.codegraph.index import CodeIndex, analyze_impact
 from sca.codegraph.repository import index_commit
 from sca.core.errors import WorkspaceError
 from sca.core.models import EventType
+from sca.host import remove_tree
 from sca.kernel.interjection import with_guidance
 from sca.kinds.coding.activities import CodingActivities, TurnInput
 from sca.kinds.coding.prompts import planning_prompt
@@ -241,4 +241,5 @@ class PlanningActivities:
             if sandbox_id:
                 with contextlib.suppress(Exception):
                     await asyncio.shield(acts.sandbox.destroy(sandbox_id))
-            await asyncio.to_thread(shutil.rmtree, child._task_dir(inp.task_id), True)
+            with contextlib.suppress(OSError):
+                await asyncio.to_thread(remove_tree, child._task_dir(inp.task_id))

@@ -1,4 +1,6 @@
+import asyncio
 import itertools
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -10,13 +12,16 @@ from sca.gateway.litellm import LiteLLMGateway
 async def test_settle_and_revoke(mode, monkeypatch):
     import sca.gateway.litellm as module
 
-    original_timeout = module.asyncio.timeout
-    monkeypatch.setattr(module.asyncio, "timeout", lambda _: original_timeout(0.04))
-    original_sleep = module.asyncio.sleep
-    monkeypatch.setattr(module.asyncio, "sleep", lambda _: original_sleep(0.001))
     spends = itertools.chain([0.1, 0.2], itertools.repeat(0.3))
     deleted = []
     polls = []
+
+    async def poll_delay(_):
+        if mode == "empty" or (mode == "timeout" and len(polls) == 3):
+            raise TimeoutError
+        await asyncio.sleep(0)
+
+    monkeypatch.setattr(module, "asyncio", SimpleNamespace(timeout=asyncio.timeout, sleep=poll_delay))
 
     def handle(request):
         if request.url.path == "/key/delete":
@@ -47,7 +52,7 @@ async def test_settle_and_revoke(mode, monkeypatch):
             # two changes, then the value has to hold for SETTLE_POLLS more polls
             assert len(polls) == 3 + LiteLLMGateway.SETTLE_POLLS
         elif mode == "timeout":
-            assert spend > 0 and not final
+            assert (spend, final) == (0.03, False)
         else:
             assert (spend, final) == (None, False)
     finally:

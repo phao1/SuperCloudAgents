@@ -1,1 +1,8 @@
 *.sh text eol=lf
+*.patch text eol=lf
+/tests/**/fixtures/** text=auto eol=lf
+/evals/** text=auto eol=lf
+
+# These cases verify the original CRLF bytes.
+/evals/opencode-evolve-hard/cases/registry-byte-*/repo/app.py -text !eol
+/evals/opencode-evolve-hard/cases/registry-byte-*/repo/archive/registry.py -text !eol
