@@ -289,7 +289,9 @@ up() {
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
     for ((i=0; i<60; i++)); do
-        owned api && owned worker || fail '进程启动失败，请查看 .data/run/ 日志。'
+        if ! owned api || ! owned worker; then
+            fail '进程启动失败，请查看 .data/run/ 日志。'
+        fi
         if request /healthz >/dev/null 2>&1; then ready=1; break; fi
         run sleep 2
     done

@@ -486,7 +486,7 @@ async def _champion(request: Request, user: Principal, champion_id: UUID) -> dic
 async def champion_detail(champion_id: UUID, request: Request, user: HistoryReader) -> dict:
     champion = await _champion(request, user, champion_id)
     if champion.get("agent_backend") == "dsh":
-        return {**champion, "solidify_builds": []}
+        return history_payload(user, {**champion, "solidify_builds": []})
     builds = [build for build in await builds_list(user)
               if build.get("labels", {}).get("kind") == SOLIDIFY_KIND
               and build["labels"].get("champion_id") == str(champion_id)]

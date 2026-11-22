@@ -100,7 +100,7 @@ class CodexBackend:
             placeholder = home / "auth.json"
             if not placeholder.exists():
                 placeholder.touch()
-            if placeholder.stat().st_uid != os.getuid():
+            if hasattr(os, "getuid") and placeholder.stat().st_uid != os.getuid():
                 raise AgentTurnError("Codex auth placeholder must be owned by the current user")
             mounts.append(Mount(source=str(self.auth_file), target=f"{ctx.agent_home}/auth.json"))
         return SandboxAdditions(mounts=mounts, env={"CODEX_HOME": ctx.agent_home})

@@ -22,6 +22,9 @@ jobs:
       PIP_DISABLE_PIP_VERSION_CHECK: '1'
       HOMEBREW_NO_AUTO_UPDATE: '1'
     steps:
+      - name: Disable Git line ending conversion
+        shell: bash
+        run: git config --global core.autocrlf false
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
@@ -46,9 +49,9 @@ jobs:
           echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
 
       - name: Install SCA with test dependencies
+        id: install
         shell: bash
         run: |
-          git config --global core.autocrlf false
           python -m venv .venv
           sca_python=.venv/bin/python
           if [[ "$RUNNER_OS" == Windows ]]; then sca_python=.venv/Scripts/python.exe; fi
@@ -79,7 +82,7 @@ jobs:
           PY
 
       - name: Smoke test Windows source mode
-        if: runner.os == 'Windows'
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && runner.os == 'Windows' }}
         shell: powershell
         run: |
           $env:PORTAL_TOKEN = [Guid]::NewGuid().ToString('N')
@@ -89,7 +92,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Windows source smoke failed' }
 
       - name: Smoke test POSIX source mode
-        if: runner.os != 'Windows'
+        if: ${{ !cancelled() && steps.install.outcome == 'success' && runner.os != 'Windows' }}
         shell: bash
         run: |
           export PORTAL_TOKEN=$("$SCA_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')
@@ -106,3 +109,33 @@ jobs:
       - name: Stop POSIX source services
         if: always() && runner.os != 'Windows'
         run: bash scripts/portal_source.sh down
+
+      - name: Collect source service logs
+        id: smoke-logs
+        if: failure() && steps.install.outcome == 'success'
+        shell: bash
+        run: |
+          "$SCA_PYTHON" - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          from sca.secrets import redact
+
+          output = Path(os.environ["RUNNER_TEMP"]) / "source-smoke-logs"
+          output.mkdir(exist_ok=True)
+          # The smoke generates hex credentials for the Portal, gateway and PostgreSQL.
+          token = re.compile(r"(?i)dev-token|(?:sk-)?(?:[0-9a-f]{64}|[0-9a-f]{32})")
+          for name in ("api", "worker", "postgres", "temporal", "litellm", "setup", "migrations", "dsh"):
+              log = Path(".data/run") / f"{name}.log"
+              if not log.is_symlink() and log.is_file():
+                  content = log.read_text(encoding="utf-8", errors="replace")
+                  (output / log.name).write_text(token.sub("[redacted]", redact(content)), encoding="utf-8")
+          PY
+
+      - name: Upload source service logs
+        if: failure() && steps.smoke-logs.outcome == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-smoke-${{ matrix.os }}
+          path: ${{ runner.temp }}/source-smoke-logs/*.log

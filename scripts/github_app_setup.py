@@ -9,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import tempfile
 from pathlib import Path
 from urllib.parse import quote, urlencode
 
@@ -22,8 +23,21 @@ HEADERS = {"Accept": "application/vnd.github+json"}
 
 def save(directory: Path, name: str, value: str) -> None:
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / name
+    if not hasattr(os, "O_NOFOLLOW"):
+        if any(p.is_symlink() or p.is_junction() for p in (directory, path)):
+            raise ValueError("GitHub App files must not use links or junctions")
+        # Replace the directory entry without opening an existing file through a link.
+        fd, temporary = tempfile.mkstemp(dir=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(value)
+            os.replace(temporary, path)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
+        return
     directory.chmod(0o700)
-    fd = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
     with os.fdopen(fd, "w") as stream:
         os.fchmod(stream.fileno(), 0o600)
         stream.write(value)

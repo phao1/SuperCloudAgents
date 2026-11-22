@@ -9,13 +9,15 @@ from sca.core.errors import NotFoundError
 
 
 def key_for(task_id: str | UUID, name: str) -> str:
-    if not name or Path(name).is_absolute() or ".." in Path(name).parts:
+    path = Path(name)
+    if not name or path.anchor or ".." in path.parts:
         raise ValueError("Invalid artifact name")
     return f"tasks/{UUID(str(task_id))}/{name}"
 
 
 def validate_key(key: str) -> None:
-    if not key or Path(key).is_absolute() or ".." in Path(key).parts or not Path(key).parts:
+    path = Path(key)
+    if not path.parts or path.anchor or ".." in path.parts:
         raise ValueError("Object key must be a relative path inside the store")
 
 

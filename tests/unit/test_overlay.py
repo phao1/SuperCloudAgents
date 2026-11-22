@@ -1,4 +1,5 @@
 import os
+import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -60,6 +61,7 @@ def test_bad_task_name():
         volume_name(Path("/tasks/bad:name"))
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="OverlayFS snapshots use Linux extended attributes")
 def test_snapshot_keeps_ignored_files_and_opaque_value(tmp_path):
     import base64
     import io
@@ -127,6 +129,7 @@ async def test_helper_cleans_named_container_on_failure(tmp_path, monkeypatch):
     assert run.call_args_list[1].args == ("docker", "rm", "-f", name)
 
 
+@pytest.mark.skipif(sys.platform != "linux", reason="OverlayFS snapshots use Linux extended attributes")
 async def test_snapshot_restore_round_trip_with_fake_lifecycle(tmp_path, monkeypatch):
     import shutil
 

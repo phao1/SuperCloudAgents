@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import shutil
 from contextlib import suppress
 from dataclasses import asdict, replace
 from decimal import Decimal
@@ -14,6 +13,7 @@ from temporalio.exceptions import ApplicationError
 
 from sca.core.errors import InvalidTaskError, WorkspaceError
 from sca.core.models import AgentContext, Event, EventType, Task
+from sca.host import remove_tree
 from sca.kernel.activities import StepInput, VerifyResult, _non_retryable
 from sca.kernel.kind import ExecutionSpec
 from sca.kinds.coding.activities import CodingActivities
@@ -301,7 +301,7 @@ class BestOfActivities:
         with suppress(FileNotFoundError):
             (directory / SNAPSHOT_PIN).rmdir()
         for path in (directory / "sub").glob("best-of-[1-5]"):
-            await asyncio.to_thread(shutil.rmtree, path)
+            await asyncio.to_thread(remove_tree, path)
 
     @activity.defn(name="coding.best_of_subtask_cleanup")
     async def cleanup_subtask(self, inp: SubtaskAttempts) -> None:

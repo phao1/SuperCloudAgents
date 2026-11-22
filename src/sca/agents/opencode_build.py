@@ -76,6 +76,7 @@ def build_command(
     settings: Settings, source: Path, version: str, *, mount_dependencies: bool = True
 ) -> list[str]:
     validate_version(version)
+    user = f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "1000:1000"
     return [
         settings.docker_bin,
         "run",
@@ -87,7 +88,7 @@ def build_command(
         f"--memory-swap={settings.opencode_build_memory}",
         "--cpus=2",
         "-u",
-        f"{os.getuid()}:{os.getgid()}",
+        user,
         "-e",
         "HOME=/tmp",
         "-e",

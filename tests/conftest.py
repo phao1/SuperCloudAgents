@@ -44,8 +44,6 @@ _POSIX_UNIT_CASES = {
         "test_k8s_restricted_egress_uses_tls_proxy",
     },
     "test_eval_splits.py": {"test_suite_readme_symlink_is_rejected"},
-    "test_github_app_setup.py": {"test_convert", "test_convert_failure_does_not_save",
-                                 "test_status_selects_target_installation", "test_store_tenant_path"},
     "test_harvest.py": {"test_publication_rejects_split_edits_and_suite_symlinks"},
     "test_intents_adapters.py": {"test_no_path_escape", "test_context_refuses_symlink_and_preserves_hardlink"},
     "test_maintenance_workspaces.py": {"test_prune_workspace"},

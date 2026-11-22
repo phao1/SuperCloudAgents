@@ -1,3 +1,4 @@
+from pathlib import PureWindowsPath
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ from moto.server import ThreadedMotoServer
 from sca.config import Settings
 from sca.core.errors import NotFoundError
 from sca.core.interfaces import ObjectStore
+from sca.storage import local as local_store
 from sca.storage import make_object_store
 from sca.storage.local import LocalObjectStore
 from sca.storage.s3 import S3ObjectStore
@@ -75,6 +77,18 @@ async def test_invalid_keys(objects, key):
     if key:
         with pytest.raises(ValueError):
             await objects.list(key)
+
+
+def test_windows_object_keys_reject_anchors(monkeypatch):
+    monkeypatch.setattr(local_store, "Path", PureWindowsPath)
+    task_id = uuid4()
+    for key in ("/absolute", r"\absolute", r"C:relative", r"C:\absolute", r"\\host\share\item"):
+        with pytest.raises(ValueError):
+            local_store.validate_key(key)
+        with pytest.raises(ValueError):
+            local_store.key_for(task_id, key)
+    local_store.validate_key("nested/item")
+    assert local_store.key_for(task_id, "nested/item") == f"tasks/{task_id}/nested/item"
 
 
 async def test_local_symlink_escape(tmp_path):

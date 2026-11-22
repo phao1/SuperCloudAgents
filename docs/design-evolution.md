@@ -328,6 +328,12 @@ Portal「演进记录」按后端显示运行详情。单独跑开发集时，�
 OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 套件可用于 DSH。
 
 冠军按后端、版本和模型分别管理。使用 `GET /v1/champions?agent_backend=dsh` 查看冠军。
+访客模式开启时，可在本机直接读取 DSH 冠军详情。创建者、凭证字段和提示词里的敏感文本会脱敏。
+
+```bash
+curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
+```
+
 在 Portal 提交 DSH 任务时选择「冠军覆盖 → 使用当前冠军」，或在 `POST /v1/tasks` 的
 `spec` 中加入 `"agent_backend":"dsh","use_champion":true`。要配置灰度，在
 `PUT /v1/champions/rollouts` 的请求中加 `"agent_backend":"dsh"`。DSH 冠军即时可用，
