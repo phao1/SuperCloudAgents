@@ -15,10 +15,14 @@ winget install -e --id OpenJS.NodeJS.LTS
 安装后打开新的 PowerShell。DeepSeek Harness 需要 Node.js 24.9 或更新的 LTS。
 首次启动会创建 `.venv`，下载校验过的 Temporal CLI，并使用 npm 把 `@deepseek-ai/dsh`
 装入 `.data/tools/dsh`。可在 `.env` 中设置 `SCA_DSH_VERSION`，启动时会安装指定版本。
+升级后再次运行 `up` 会为已有的 DSH 安装补跑本地子进程和终端所需的 npm 脚本。
+源码模式仅运行 `@deepseek-ai/dsh-subprocess-local`、`koffi` 和 `node-pty` 的安装脚本。
 [DSH CLI 依赖](https://github.com/deepseek-ai/deepseek-harness/blob/dsh-v0.2.2-rc.5/apps/cli/package.json#L186-L188)
 
 启动脚本会复用现有的 PostgreSQL 工具，或者下载并校验 EDB 的 Windows x64 二进制包。
 它在 `.data/pg` 初始化独立的数据目录，优先使用本机 5432 端口，端口已被占用时使用空闲端口。
+脚本为当前 Windows 用户设置 PostgreSQL 数据目录和相关文件的权限，供 `pg_ctl` 以受限令牌启动。
+数据库仅监听 `127.0.0.1`，使用 SCRAM 密码认证。
 如果下载失败，可安装 PostgreSQL 并指定其工具目录。若提示缺少 VC++ 运行库，可安装对应的运行库。
 [PostgreSQL 官方 Windows 安装说明](https://www.postgresql.org/download/windows/)
 
@@ -30,10 +34,11 @@ winget install -e --id Microsoft.VCRedist.2015+.x64
 
 ## 首次启动与登录
 
-在仓库根目录运行。首次安装需要联网，可用普通用户启动。
+在仓库根目录运行。首次安装需要联网。普通用户和以管理员身份打开的 PowerShell 使用相同命令。
 
 ```powershell
 .\scripts\portal_source.ps1 up
+Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz'
 ```
 
 打开 <http://127.0.0.1:8000/portal>，点击右上角「登录」。初次启动生成的令牌保存在
@@ -108,6 +113,7 @@ Remove-Variable token, headers
 
 ```powershell
 .\scripts\portal_source.ps1 status
+.\scripts\portal_source.ps1 logs postgres
 .\scripts\portal_source.ps1 logs worker
 .\scripts\portal_source.ps1 down
 ```
@@ -124,8 +130,8 @@ Remove-Variable token, headers
   `$env:SCA_BASH = 'C:\Program Files\Git\bin\bash.exe'`。DSH 自带的 Windows 工具
   由 Harness 使用 PowerShell 执行，平台的 `sca-fake`、准备和验证脚本使用 Bash。
 - 端口 7233、4000 或 8000 被占用时，先停止占用端口的服务，再运行 `up`。
-  PostgreSQL 初始化失败时查看 `.data/run/postgres.log`，并确认工具版本与
-  `.data/pg/PG_VERSION` 匹配。
+  `logs postgres` 同时显示 `.data/run/postgres.log` 的初始化及 `pg_ctl` 输出和
+  `.data/run/postgres-server.log` 的数据库进程输出。工具版本需与 `.data/pg/PG_VERSION` 匹配。
 - 网关启动失败时查看 `.data/run/litellm.log`。若 Portal 提示密钥未配置，使用同一个
   登录令牌在「概览」保存密钥后重试。`restart-gateway` 可加载从 `.env` 手工更新的密钥。
 - 源码模式可选 OpenCode、Codex 或 Pi。用 `SCA_AGENT_BACKEND` 选择默认后端。

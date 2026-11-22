@@ -126,7 +126,8 @@ jobs:
           output.mkdir(exist_ok=True)
           # The smoke generates hex credentials for the Portal, gateway and PostgreSQL.
           token = re.compile(r"(?i)dev-token|(?:sk-)?(?:[0-9a-f]{64}|[0-9a-f]{32})")
-          for name in ("api", "worker", "postgres", "temporal", "litellm", "setup", "migrations", "dsh"):
+          for name in ("api", "worker", "postgres", "postgres-server", "temporal",
+                       "litellm", "setup", "migrations", "dsh"):
               log = Path(".data/run") / f"{name}.log"
               if not log.is_symlink() and log.is_file():
                   content = log.read_text(encoding="utf-8", errors="replace")

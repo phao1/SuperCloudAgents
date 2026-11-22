@@ -36,7 +36,7 @@ def smoke(client: httpx.Client, repo: Path, wait_s: float) -> UUID:
         raise ValueError("The Portal HTML did not load.")
     seed_repo(repo)
     response = client.post("/v1/tasks", json={"kind": "coding", "spec": {
-        "repo_url": str(repo),
+        "repo_url": repo.as_posix(),
         "base_ref": "main",
         "agent_backend": "fake",
         "instruction": "Update the fixture.\n\n```sca-fake\nprintf 'ready\\n' > result.txt\n```",
