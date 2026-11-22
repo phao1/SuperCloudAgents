@@ -1,5 +1,6 @@
 import json
 import re
+import runpy
 import shutil
 import subprocess
 from contextlib import contextmanager
@@ -181,9 +182,24 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("destination", ["guest", "projects", "task", "evolution"])
+@pytest.mark.parametrize("destination", ["guest", "projects", "task", "evolution", "archive"])
 def test_portal_route_bootstrap(tmp_path, destination):
-    source = (STATIC / "portal.html").read_text()
+    responses = {}
+    if destination == "archive":
+        responses = runpy.run_path("scripts/serve_portal_history.py")["archive_responses"]()
+        source = responses["/portal"][1].decode("utf-8")
+        parser = PortalAssets()
+        parser.feed(source)
+        refs = [ref for ref in parser.refs if ref.endswith((".js", ".css"))]
+        assert all(responses[ref][1] for ref in refs)
+        scripts = [responses[ref][1].decode("utf-8") for ref in refs if ref.endswith(".js")]
+    else:
+        source = (STATIC / "portal.html").read_text(encoding="utf-8")
+        assets = ["task-flow.js", "task-timeline.js", *(name for name in ASSETS if name != "task-dag.js")]
+        scripts = [
+            "const SCATaskDAG=fixtureDAG;",
+            *((STATIC / name).read_text(encoding="utf-8") for name in assets),
+        ]
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
     assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
@@ -192,10 +208,11 @@ def test_portal_route_bootstrap(tmp_path, destination):
     node = shutil.which("node") or Path.home() / ".local/bin/node"
     if not Path(node).exists():
         pytest.skip("Node is unavailable")
-    script = source.split("<script>", 1)[1].split("window.addEventListener('hashchange'", 1)[0]
+    script = source.split("<script>", 1)[1].split("</script>", 1)[0]
     harness = r'''
 const assert=require('node:assert/strict');
 const destination=process.argv[2];
+const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
 const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
 const missingReason='文件缺失（源机器上已清理）';
@@ -211,7 +228,7 @@ const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_ch
 const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
 const location={hash:{guest:'#/projects/private-project',projects:'#/projects',task:'#/tasks/'+task.id,
-  evolution:'#/evolutions'}[destination]};
+  evolution:'#/evolutions',archive:''}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
 const localStorage={getItem:key=>key==='sca-portal-token'&&!guest?'fixture-member':null};
 class Element {
@@ -219,16 +236,23 @@ class Element {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
     this.classList={add(){},toggle(){}};
     this.attributes=new Map();
+    this.selectors=new Map();
   }
+  get hash(){return this.href}
   get options(){return this.children}
   append(...nodes){this.children.push(...nodes)}
   prepend(...nodes){this.children.unshift(...nodes)}
   replaceChildren(...nodes){this.children=nodes}
   addEventListener(){}
+  focus(){}
   hasAttribute(name){return this.attributes.has(name)}
   setAttribute(name,value){this.attributes.set(name,value)}
   getAttribute(name){return this.attributes.get(name)}
-  querySelector(){return new Element()}
+  removeAttribute(name){this.attributes.delete(name)}
+  querySelector(selector){
+    if(!this.selectors.has(selector))this.selectors.set(selector,new Element());
+    return this.selectors.get(selector);
+  }
   querySelectorAll(){return []}
   reset(){}
 }
@@ -239,19 +263,29 @@ function element(id){
   if(!elements.has(id))elements.set(id,new Element(id));
   return elements.get(id);
 }
-const sections=['overview','projects-page','evaluation','trace','evolutions-page'].map(element);
+const sections=['overview','projects-page','evaluation','trace','evolutions-page','memories-page'].map(element);
+element('trace').after=node=>sections.push(node);
+element('task-run-workbench').hidden=false;
 element('evolution-dag-template').content={firstElementChild:{cloneNode:()=>element('evolution-dag')}};
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
+const links=['tasks','evals','memories','evolutions'].map(page=>Object.assign(new Element(),{href:'#/'+page}));
+links[0].after=link=>links.splice(1,0,link);
+const nav=new Element();
+nav.selectors.set('[href="#/tasks"]',links[0]);
+nav.querySelectorAll=()=>links;
 const document={
   getElementById:element,createElement:()=>new Element(),documentElement:new Element(),
   createElementNS:()=>new Element(),createTextNode:textContent=>({textContent}),
   addEventListener(){},
-  querySelectorAll:selector=>({'main > section':sections,'[data-access]':controls})[selector]||[],
+  querySelector:selector=>({'.sidebar .brand':element('brand'),'.sidebar nav':nav})[selector],
+  querySelectorAll:selector=>({'main > section':sections,'[data-access]':controls,'.sidebar nav a':links})[selector]||[],
 };
-const window={addEventListener(){}};
-const SCATaskTimeline={create:()=>({update:()=>null,selectedSeq:()=>null,includes:()=>true})};
+const window=globalThis;
+const listeners=new Map();
+window.addEventListener=(name,listener)=>listeners.set(name,listener);
+const setInterval=()=>assert.equal(archived,false);
 let graphsDestroyed=0;
-const SCATaskDAG=destination==='evolution'?{
+const fixtureDAG=['task','evolution'].includes(destination)?{
   projectEvolution:()=>null,
   create(panel, fetchGraph, options){
     if(panel.id==='evolution-dag')assert.equal(options.project,SCATaskDAG.projectEvolution);
@@ -272,10 +306,16 @@ const releaseProjects=destination==='projects'?block('/v1/projects'):null;
 const releaseTask=destination==='task'?block(taskPath):null;
 const releaseConfig=destination==='task'?block('/v1/portal/config'):null;
 const releaseRecent=destination==='task'?block('/v1/tasks?limit=100'):null;
-global.fetch=async (path,request)=>{
-  const auth=request.headers.Authorization;
-  if(['/v1/portal/whoami','/v1/projects'].includes(path))assert.equal(auth,'Bearer fixture-member');
+global.fetch=async (path,request={})=>{
+  const auth=request.headers?.Authorization;
   calls.push(path);
+  if(archived){
+    assert.equal(auth,undefined);
+    const pathname=path.split('?')[0];
+    assert(Object.hasOwn(config.archive,pathname),path);
+    return {ok:true,json:async()=>config.archive[pathname]};
+  }
+  if(['/v1/portal/whoami','/v1/projects'].includes(path))assert.equal(auth,'Bearer fixture-member');
   await blocked.get(path);
   const fixtures={
     '/v1/portal/whoami':{tenant_id:'eval',role:'member'},
@@ -298,11 +338,38 @@ global.fetch=async (path,request)=>{
 const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4000);
 (async()=>{
   const nextTick=()=>new Promise(setImmediate);
-  await route();
-  const startup=refresh();
+  const waitForStartup=async()=>{while(refreshing)await nextTick()};
   await nextTick();
-  if(destination==='guest'){
-    await startup;
+  if(archived){
+    assert.deepEqual(calls,['/portal/archive.json']);
+    assert.equal($('guest-view-banner').textContent,'只读归档 · 来自仓库中已发布的任务与评测记录');
+    assert.equal($('overview').hidden,false);
+    assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.hash),
+      ['#/tasks','#/history','#/evals','#/memories','#/evolutions']);
+
+    $('memory-status').value='active';
+    location.hash='#/memories';
+    await listeners.get('hashchange')();
+    const [memory]=config.archive['/v1/memories'];
+    const path='/v1/tasks/'+memory.source_task_id;
+    const source=walk($('memory-list')).find(node=>node.href);
+    assert.equal(source.href,'#/tasks/'+memory.source_task_id+'/events/'+memory.source_event_seq);
+    location.hash=source.href;
+    await listeners.get('hashchange')();
+    assert.equal($('trace').hidden,false);
+    assert.equal($('task-details').hidden,false);
+    assert.equal($('task-title').textContent,memory.source_task_id);
+    assert.equal(replaySeq,memory.source_event_seq);
+    assert.equal($('task-run-workbench').hidden,true);
+    assert.equal($('task-conversation').children.length,0);
+    const marks=$('swimlane').querySelector('.task-time-marks');
+    assert(marks.children.some(node=>/\+\d+\.\d{3} 秒/.test(node.getAttribute('aria-label'))));
+    $('trace-next').onclick();
+    assert(replaySeq>memory.source_event_seq);
+    assert.deepEqual(calls,['/portal/archive.json','/v1/memories?status=active','/v1/tasks?limit=100',
+      path,path+'/events?after=0',path+'/artifacts']);
+  }else if(destination==='guest'){
+    await waitForStartup();
     assert.deepEqual(calls,['/v1/portal/config','/v1/tasks?limit=100']);
     assert.equal(location.hash,'#/tasks');
     assert.equal($('trace').hidden,false);
@@ -326,7 +393,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await refresh();
     assert.equal(calls.filter(path=>path==='/v1/projects').length,1);
     releaseProjects();
-    await Promise.all([startup,duplicate]);
+    await Promise.all([waitForStartup(),duplicate]);
     assert.equal($('projects-home').hidden,false);
     const [card]=$('project-cards').children;
     assert.equal(card.children[0].children[0].children[0].textContent,'默认项目');
@@ -349,7 +416,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await refresh(true);
     assert.equal(calls.filter(path=>path==='/v1/projects').length,3);
   }else if(destination==='evolution'){
-    await startup;
+    await waitForStartup();
     assert.deepEqual(calls,['/v1/portal/config','/v1/evolutions']);
     assert.equal($('evolutions-page').hidden,false);
     assert.deepEqual($('evolution-nav').children.map(node=>node.href),['#/evolutions/runs','#/evolutions/champions']);
@@ -395,7 +462,11 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('task-picker').disabled,undefined);
     releaseConfig();
     releaseRecent();
-    await startup;
+    await waitForStartup();
+    assert.equal($('task-run-workbench').hidden,false);
+    assert.equal($('task-dag').hidden,false);
+    assert(calls.includes(taskPath+'/dag'));
+    assert(calls.includes(taskPath+'/conversation?limit=100'));
     assert.equal($('task-picker').disabled,true);
     assert.equal(eventCursor,1);
     assert.equal($('patch').textContent,missingReason);
@@ -410,13 +481,14 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
   assert.equal($('error').textContent,'');
 })().finally(()=>clearTimeout(deadline)).catch(error=>{console.error(error);process.exitCode=1});
 '''
-    config = json.dumps({"tenant": TENANT_PORTAL_CONFIG, "guest": GUEST_PORTAL_CONFIG})
-    assets = ["task-flow.js", *(name for name in ASSETS if name != "task-dag.js")]
+    config = json.dumps({
+        "tenant": TENANT_PORTAL_CONFIG, "guest": GUEST_PORTAL_CONFIG,
+        "archive": {
+            ref: json.loads(body) for ref, (kind, body) in responses.items() if kind == "application/json"
+        },
+    })
     path = tmp_path / "portal.cjs"
-    path.write_text("\n".join([
-        f"const config = {config};", harness, *((STATIC / name).read_text() for name in assets),
-        script, checks,
-    ]))
+    path.write_text("\n".join([f"const config = {config};", harness, *scripts, script, checks]), encoding="utf-8")
     subprocess.run([str(node), str(path), destination], check=True, timeout=10)
 
 

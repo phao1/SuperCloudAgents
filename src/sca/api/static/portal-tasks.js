@@ -394,7 +394,7 @@ const portalTasks = (() => {
     $('task-terminal-start').onclick = () => void startTerminal(task);
     $('task-terminal-stop').onclick = () => stopTerminal();
     if (terminal && finishedTask(task.state)) stopTerminal('任务已结束。');
-    renderConversation(task);
+    if (!archivePortal) renderConversation(task);
   }
 
   function renderConversation(task) {

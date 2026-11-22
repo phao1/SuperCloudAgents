@@ -674,7 +674,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <p id="task-terminal-status" class="status-text" role="status"></p>
           <pre id="task-terminal-output" class="portal-terminal" tabindex="0" aria-label="终端输出"></pre>
         </div>
-        <div class="portal-run-workbench">
+        <div id="task-run-workbench" class="portal-run-workbench">
         <section id="task-dag" class="panel task-dag" aria-labelledby="task-dag-title">
           <div class="panel-head">
             <h2 id="task-dag-title">执行图 DAG</h2>
@@ -1666,7 +1666,7 @@ function stopTaskStream(){
   taskStream=null;
 }
 function refreshTaskDag(id, fromStream=false){
-  if(!location.hash.startsWith('#/tasks'))return;
+  if(archivePortal||!location.hash.startsWith('#/tasks'))return;
   const panel=$('task-dag');
   panel.hidden=!portalUI.can('history')||typeof SCATaskDAG==='undefined';
   if(panel.hidden)return;
@@ -2955,6 +2955,7 @@ document.addEventListener('keydown',event=>{
   else if($('trace-workspace').hasAttribute('data-expanded'))setTraceFullscreen(false).catch(error);
 });
 if(archivePortal){
+  $('task-run-workbench').hidden=true;
   archivePortal.start().catch(error);
 }else{
   window.addEventListener('hashchange',()=>route().catch(error));

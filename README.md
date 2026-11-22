@@ -121,6 +121,20 @@ curl -fsS http://127.0.0.1:8000/v1/tasks
 从 Linux 服务器把任务、项目、评测和演进记录带到 Windows 源码实例时，使用
 [历史导出与导入](docs/history-transfer.md)。
 
+#### 查看仓库发布的归档
+
+在 Windows PowerShell 进入仓库根目录，用 Python 启动只读归档 Portal。
+
+```powershell
+py -3 scripts/serve_portal_history.py --port 8001
+# 在另一个 PowerShell 窗口核对归档状态
+Invoke-RestMethod http://127.0.0.1:8001/healthz
+```
+
+看到 `portal` 为 `archive` 且 `task_progress` 为 `true` 后，打开
+`http://127.0.0.1:8001/portal#/tasks` 回放任务，或在「共享记忆」点开来源事件。
+[归档说明](Milestone/history/README.md)
+
 ### Docker 演示环境
 
 在 Linux 或启用 Docker Desktop 的 macOS 上，准备 Docker Compose、
