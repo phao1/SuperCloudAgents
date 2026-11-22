@@ -3,7 +3,15 @@
 2026 年 11 月 19–20 日评测工作区记录（北京时间）。
 共 64 条任务、2,869 条执行事件，58 条成功、4 条失败、2 条取消。
 
-在 Windows 查看每条任务的完整执行时间线，请打开 [task-history.html](task-history.html)，在 GitHub 文件页选「Download raw file」，再用 Edge 或 Chrome 打开下载的文件。
+## Windows 查看历史
+
+在 PowerShell 进入仓库根目录，用本机 Python 3 启动历史回放。
+
+```powershell
+py -3 scripts/serve_portal_history.py
+```
+
+浏览器打开 <http://127.0.0.1:8000/portal>。如果 8000 被占用，可在命令末尾加 `--port 8001`。也可以下载 [task-history.html](task-history.html) 的原始文件，用 Edge 或 Chrome 直接打开。
 
 [复制给 Windows 上 Codex 的启动提示词](windows-start-prompt.md)
 
