@@ -6,6 +6,10 @@ import pytest
 
 from sca.sandbox.handd import DAEMON, MAX_PTY_OUTPUT, HanddClient, HanddProcess
 
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux", reason="handd runs inside Linux sandboxes only",
+)
+
 
 @pytest.fixture
 async def handd():
@@ -64,7 +68,7 @@ time.sleep(30)
     async with asyncio.timeout(5), handd.open_pty(
         [sys.executable, "-c", program, str(target)], timeout_s=4,
     ) as job:
-        await read_until(job, b"ready")
+        assert await read_until(job, b"ready\r\n") == b"ready\r\n"
         await job.close()
         assert (await job.receive())["exit"] == -9
     await asyncio.sleep(.4)

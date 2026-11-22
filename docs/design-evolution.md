@@ -277,8 +277,8 @@ Docker 任务可设置 `"image":"python:3.12"`，或选择与容器架构一致�
 启动和沙箱命令包装无需镜像自带 Python 或 Node.js。Alpine/musl 镜像会收到中文错误。
 Docker 启动脚本会准备 DSH 运行时，Worker 也会在首次需要时安装。版本化的运行时
 位于 `SCA_DATA_DIR/tools/docker-node`，以只读方式挂载。它使用官方 Node.js 24.22.3
-镜像安装指定的 npm 包和对应架构的原生依赖，清理未被容器使用的旧版本。单个 Agent 的运行时
-含共享的 Node.js，上限为 270 MB。
+镜像安装指定的 npm 包和对应架构的原生依赖，清理未被容器使用的旧版本。
+[运行时磁盘配置和旧镜像清理](../README.md#docker-运行时磁盘空间)。
 [Node.js 24 Linux 二进制要求](https://github.com/nodejs/node/blob/v24.22.3/BUILDING.md#official-binary-platforms-and-toolchains)
 
 DSH 在每轮通过 `headless --patch` 载入附加提示词。它保留内置系统提示、工具定义和权限策略，
@@ -362,6 +362,7 @@ curl -fsS "http://127.0.0.1:8000/v1/champions/$CHAMPION_ID"
 ### 验证
 
 模拟的 headless 进程和网关验证了提示词追加、续接、Token 用量和虚拟密钥费用。
+安装器单测模拟了 1,179 MB 的 DSH 安装，覆盖 DSH 与 Pi 的磁盘空间门槛及缓存复用。
 评测与演进测试覆盖多数用例出错、基线失效、候选拒绝和零费用门禁。启动测试验证迁移
 先于 API 和 Worker，迁移 `0025` 的 SQL 已离线检查。
 当前沙箱拒绝 Postgres 和 Temporal 套接字连接。真实服务、Docker 安装体积、Windows 实机
