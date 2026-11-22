@@ -29,9 +29,10 @@ from sca.agents.opencode_prompt import (
     read_source_prompt,
     version_commit,
 )
-from sca.api.authz import authorize
+from sca.api.authz import GuestPrincipal, authorize
 from sca.api.evals import RunRequest, enqueue_run, read_run, require_eval
-from sca.api.evolutions import Admin, client_for, scoped
+from sca.api.evolutions import Admin, HistoryReader, client_for, scoped
+from sca.api.guest_history import history_payload
 from sca.api.model_access import require_model
 from sca.config import Settings, get_settings
 from sca.core.errors import InvalidTaskError, NotFoundError
@@ -481,15 +482,19 @@ async def _champion(request: Request, user: Principal, champion_id: UUID) -> dic
     return champion
 
 
-@champions_router.get("/{champion_id}")
-async def champion_detail(champion_id: UUID, request: Request, user: Admin) -> dict:
+@champions_router.get("/{champion_id:uuid}")
+async def champion_detail(champion_id: UUID, request: Request, user: HistoryReader) -> dict:
     champion = await _champion(request, user, champion_id)
     if champion.get("agent_backend") == "dsh":
         return {**champion, "solidify_builds": []}
     builds = [build for build in await builds_list(user)
               if build.get("labels", {}).get("kind") == SOLIDIFY_KIND
               and build["labels"].get("champion_id") == str(champion_id)]
-    return {**champion, "solidify_builds": builds}
+    if isinstance(user, GuestPrincipal):
+        fields = ("id", "version", "created_at", "status", "regression_status",
+                  "overlay_eval_run_id", "solidified_eval_run_id")
+        builds = [{key: build[key] for key in fields if key in build} for build in builds]
+    return history_payload(user, {**champion, "solidify_builds": builds})
 
 
 @champions_router.post("/{champion_id}/solidify", status_code=202)

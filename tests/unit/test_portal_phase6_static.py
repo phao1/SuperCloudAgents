@@ -47,7 +47,7 @@ def test_phase6_portal_navigation_and_local_assets():
     parser.feed(source)
     parser.close()
     for route, title, role in (
-        ("submit", "提交任务", "member"), ("evolutions", "自动演进", "admin"),
+        ("submit", "提交任务", "member"), ("evolutions", "自动演进", "evolution-history"),
         ("tools", "工具与知识库", "tenant"), ("integrations", "集成", "admin"),
         ("team", "团队与用量", "admin"), ("platform", "平台管理", "platform"),
     ):
@@ -152,6 +152,9 @@ assert(!portalUI.can('tenant',{platform_admin:true}));
 const guest={tenant_id:'eval',role:'viewer',guest:true};
 assert(portalUI.can('history',guest));
 assert(portalUI.can('eval-history',guest));
+assert(portalUI.can('evolution-history',guest));
+assert(!portalUI.can('evolution-history',{...guest,tenant_id:'acme'}));
+assert(portalUI.can('evolution-history',{tenant_id:'acme',role:'admin'}));
 assert(['tenant','member','admin','eval','eval-admin','platform'].every(role=>!portalUI.can(role,guest)));
 assert.deepEqual(portalUI.backendChoices({agent_backends:['codex','dsh'],default_agent_backend:'dsh'}),
   [['','默认 · DeepSeek Harness'],['codex','Codex'],['dsh','DeepSeek Harness']]);
@@ -177,7 +180,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("destination", ["guest", "projects", "task"])
+@pytest.mark.parametrize("destination", ["guest", "projects", "task", "evolution"])
 def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
@@ -192,12 +195,20 @@ def test_portal_route_bootstrap(tmp_path, destination):
     harness = r'''
 const assert=require('node:assert/strict');
 const destination=process.argv[2];
+const guest=destination==='guest'||destination==='evolution';
 const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
 const project={id:'project-id',name:'默认项目',status:'active',group_counts:{resolved:1030}};
+const candidate={id:'candidate',generation:1,decision:'pending',reason:'awaiting approval',overlay:{}};
+const evolution={id:'evo-id',status:'awaiting_approval',config:{suite:'fixture',agent_version:'fake',model:'fake'},
+  candidates:[candidate],journal:[]};
+const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_champion_id:'previous',
+  agent_version:'fake',model:'fake',solidify_builds:[{version:'built',status:'succeeded',regression_status:'completed'}]};
 const taskPath='/v1/tasks/'+task.id;
-const location={hash:{guest:'#/projects/private-project',projects:'#/projects',task:'#/tasks/'+task.id}[destination]};
+const evolutionPath='/v1/evolutions/'+evolution.id;
+const location={hash:{guest:'#/projects/private-project',projects:'#/projects',task:'#/tasks/'+task.id,
+  evolution:'#/evolutions'}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
-const localStorage={getItem:key=>key==='sca-portal-token'&&destination!=='guest'?'fixture-member':null};
+const localStorage={getItem:key=>key==='sca-portal-token'&&!guest?'fixture-member':null};
 class Element {
   constructor(id) {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
@@ -215,20 +226,33 @@ class Element {
   querySelectorAll(){return []}
   reset(){}
 }
+const Node=Element;
+const walk=node=>[node,...(node.children||[]).flatMap(walk)];
 const elements=new Map();
 function element(id){
   if(!elements.has(id))elements.set(id,new Element(id));
   return elements.get(id);
 }
-const sections=['overview','projects-page','evaluation','trace'].map(element);
+const sections=['overview','projects-page','evaluation','trace','evolutions-page'].map(element);
+element('evolution-dag-template').content={firstElementChild:{cloneNode:()=>element('evolution-dag')}};
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
 const document={
   getElementById:element,createElement:()=>new Element(),documentElement:new Element(),
+  createElementNS:()=>new Element(),createTextNode:textContent=>({textContent}),
   addEventListener(){},
   querySelectorAll:selector=>({'main > section':sections,'[data-access]':controls})[selector]||[],
 };
 const window={addEventListener(){}};
 const SCATaskTimeline={create:()=>({update:()=>null,selectedSeq:()=>null,includes:()=>true})};
+let graphsDestroyed=0;
+const SCATaskDAG=destination==='evolution'?{
+  projectEvolution:()=>null,
+  create(panel, fetchGraph, options){
+    if(panel.id==='evolution-dag')assert.equal(options.project,SCATaskDAG.projectEvolution);
+    else assert.equal(panel.id,'task-dag');
+    return {refresh:fetchGraph,reset(){},destroy:()=>graphsDestroyed++};
+  },
+}:undefined;
 const calls=[];
 const blocked=new Map();
 function block(path){
@@ -254,6 +278,8 @@ global.fetch=async (path,request)=>{
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
     [taskPath]:task,
     [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}}],
+    '/v1/evolutions':[evolution],[evolutionPath]:evolution,
+    '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
   return {ok:true,json:async()=>fixtures[path]||[]};
 };
@@ -312,6 +338,35 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(!calls.includes('/v1/evals/runs?limit=200'));
     await refresh(true);
     assert.equal(calls.filter(path=>path==='/v1/projects').length,3);
+  }else if(destination==='evolution'){
+    await startup;
+    assert.deepEqual(calls,['/v1/portal/config','/v1/evolutions']);
+    assert.equal($('evolutions-page').hidden,false);
+    assert.deepEqual($('evolution-nav').children.map(node=>node.href),['#/evolutions/runs','#/evolutions/champions']);
+    const content=()=>walk($('evolution-content')).map(node=>node.textContent);
+    assert(!content().includes('开始演进'));
+    location.hash='#/evolutions/runs/'+evolution.id;
+    await route();
+    assert(walk($('evolution-content')).includes($('evolution-dag')));
+    assert(!['停止演进','批准','拒绝'].some(label=>content().includes(label)));
+    assert.equal(calls.at(-1),evolutionPath+'/dag');
+    await refresh();
+    assert.equal(calls.filter(path=>path===evolutionPath+'/dag').length,2);
+
+    location.hash='#/evolutions/champions/'+champion.id;
+    await route();
+    assert.equal(graphsDestroyed,1);
+    assert.equal(calls.at(-1),'/v1/champions/'+champion.id);
+    assert(content().some(label=>label.startsWith('built ·')));
+    assert(!['固化冠军','设置灰度','回滚到父冠军','设为默认版本'].some(label=>content().includes(label)));
+    location.hash='#/evolutions/schedules/private-schedule';
+    await route();
+    assert.equal(calls.at(-1),'/v1/evolutions');
+    assert(!calls.some(path=>path.startsWith('/v1/evolution-schedules')));
+    location.hash='#/tasks/'+task.id;
+    await route();
+    assert(calls.includes(taskPath+'/dag'));
+    assert.equal($('task-dag').hidden,false);
   }else{
     assert.deepEqual(new Set(calls),new Set([
       '/v1/portal/whoami',taskPath,taskPath+'/events?after=0',
@@ -370,6 +425,96 @@ def serve_portal(route, path):
         route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
         return True
     return False
+
+
+def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
+    evolution_id, eval_id, task_id, champion_id = "evolution-fixture", "eval-fixture", "task-fixture", "champion-fixture"
+    evolution_path = f"/v1/evolutions/{evolution_id}"
+    task_path = f"/v1/tasks/{task_id}"
+    candidate = {
+        "id": "candidate-fixture", "generation": 1, "decision": "pending", "reason": "awaiting approval",
+        "hypothesis": "Check boundaries", "overlay": {}, "static_check": {"valid": True},
+    }
+    row = {"id": evolution_id, "status": "awaiting_approval", "spent_usd": .01, "best_champion_id": champion_id,
+           "config": {"suite": "fixture", "agent_version": "fake", "model": "fake", "budget_usd": .1}}
+    champion = {"id": champion_id, "candidate_id": candidate["id"], "agent_version": "fake", "model": "fake",
+                "parent_champion_id": "previous", "active": True, "metrics": {}}
+    graph = {"nodes": [
+        {"id": "evolution", "kind": "evolution", "label": "演进", "status": "running"},
+        {"id": "evaluate", "kind": "eval_run", "label": "评测 · 开发集", "status": "running",
+         "score": .5, "cost_usd": .01, "meta": {"run_id": eval_id, "split": "dev"}},
+        {"id": "case", "kind": "case_task", "label": "boundary", "status": "queued",
+         "task_id": task_id, "meta": {"parent": "evaluate"}},
+    ], "edges": [
+        {"from": "evolution", "to": "evaluate", "kind": "sequence"},
+        {"from": "evaluate", "to": "case", "kind": "spawn"},
+    ]}
+    requests = []
+
+    def handle(route):
+        path = urlsplit(route.request.url).path
+        if serve_portal(route, path):
+            return
+        requests.append(path)
+        assert route.request.method == "GET"
+        fixtures = {
+            "/v1/portal/config": GUEST_PORTAL_CONFIG,
+            "/v1/evolutions": [row], evolution_path: {**row, "candidates": [candidate], "journal": []},
+            evolution_path + "/dag": graph,
+            "/v1/champions": [champion], f"/v1/champions/{champion_id}": {**champion, "solidify_builds": [{
+                "version": "fixture-solidified", "status": "succeeded", "regression_status": "completed",
+            }]},
+            f"/v1/evals/runs/{eval_id}": {"id": eval_id, "suite": "fixture", "status": "running",
+                                         "variant": {"repeat": 1}, "results": [], "result_count": 0},
+            task_path: {"id": task_id, "kind": "coding", "state": "SUCCEEDED", "spec": {}, "result": {}},
+            task_path + "/dag": {"nodes": [{"id": "task", "kind": "task", "label": "用例任务", "status": "succeeded",
+                                           "task_id": task_id}], "edges": []},
+        }
+        route.fulfill(json=fixtures.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page()
+        page.route("**/*", handle)
+        page.goto("http://portal.test/portal#/evolutions")
+        nav = page.locator('nav[aria-label="主导航"]')
+        nav.get_by_role("link", name="自动演进", exact=True).wait_for()
+        assert page.get_by_role("button", name="开始演进").count() == 0
+        assert page.locator("#evolution-nav").get_by_role("link").count() == 2
+        page.locator(f'#evolution-content a[href="#/evolutions/runs/{evolution_id}"]').click()
+        panel = page.locator("#evolution-dag")
+        evaluation = panel.locator('[data-node="evaluate"]')
+        evaluation.wait_for()
+        assert evaluation.get_attribute("aria-expanded") == "false"
+        assert "50%" in evaluation.get_attribute("aria-label")
+        assert panel.locator('[data-kind="case_task"]').count() == 0
+        for label in ("停止演进", "批准", "拒绝"):
+            assert page.get_by_role("button", name=label, exact=True).count() == 0
+
+        evaluation.press("Enter")
+        case = panel.locator('[data-node="case"]')
+        case.wait_for()
+        page.wait_for_function("!refreshing && !routeLoad")
+        graph["nodes"][2]["status"] = "running"
+        page.evaluate("refresh()")
+        panel.locator('[data-node="case"][data-status="running"]').wait_for()
+        assert evaluation.get_attribute("aria-expanded") == "true"
+        assert requests.count(evolution_path + "/dag") >= 2
+        panel.get_by_role("link", name="打开评测").click()
+        page.get_by_text("fixture / eval-fix", exact=True).wait_for()
+
+        page.goto(f"http://portal.test/portal#/evolutions/runs/{evolution_id}")
+        evaluation.press("Enter")
+        case.press("Enter")
+        panel.get_by_role("link", name="打开用例任务").click()
+        page.locator('#task-dag [data-kind="task"]').wait_for()
+
+        page.goto("http://portal.test/portal#/evolutions/champions")
+        page.locator(f'#evolution-content a[href="#/evolutions/champions/{champion_id}"]').click()
+        page.get_by_text("fixture-solidified", exact=False).wait_for()
+        for label in ("固化冠军", "回滚到父冠军", "设为默认版本"):
+            assert page.get_by_role("button", name=label, exact=True).count() == 0
+        assert page.get_by_role("link", name="设置灰度").count() == 0
+        assert not any(path.startswith("/v1/evolution-schedules") or "rollouts" in path for path in requests)
 
 
 @pytest.mark.parametrize("destination", ["projects", "task"])

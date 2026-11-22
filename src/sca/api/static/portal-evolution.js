@@ -136,7 +136,8 @@ const portalEvolution = (() => {
       const result = await data(runsPath, {...targetBody(form), ...configBody(form)});
       if (active(state)) location.hash = pageHref('runs', result.id);
     });
-    state.root.append(ui.panel('启动自动演进', form), ui.panel('演进记录', list));
+    if (ui.can('eval-admin')) state.root.append(ui.panel('启动自动演进', form));
+    state.root.append(ui.panel('演进记录', list));
     let signature;
     return async () => {
       const rows = await data(runsPath);
@@ -282,6 +283,7 @@ const portalEvolution = (() => {
 
   function mountRun(state) {
     const id = state.id, path = runsPath + '/' + enc(id);
+    const canManage = ui.can('eval-admin');
     const header = el('div', undefined, 'stack');
     const actions = ui.actions(evidenceLink('返回演进记录', pageHref('runs')));
     const message = notice(), plots = el('div', undefined, 'portal-charts'), baselineList = ui.scroll('各代冠军');
@@ -289,12 +291,17 @@ const portalEvolution = (() => {
     candidates.id = 'evolution-candidates';
     const legend = el('div', undefined, 'portal-chart-note');
     legend.append(el('span', '当代冠军'), el('span', '候选', 'candidate'));
-    state.root.append(ui.panel('演进详情', header, actions, message),
+    const panel = $('evolution-dag-template').content.firstElementChild.cloneNode(true);
+    state.dag = SCATaskDAG.create(panel, runId => data(runsPath + '/' + enc(runId) + '/dag'), {
+      project: SCATaskDAG.projectEvolution,
+    });
+    state.root.append(ui.panel('演进详情', header, actions, message), panel,
       ui.panel('每代开发集成绩', legend, plots, baselineList), ui.panel('候选与晋升决定', candidates));
     let signature, initial, parents;
     return async () => {
       const row = await data(path);
       if (!active(state)) return;
+      state.dag.refresh(id, true);
       const nextSignature = JSON.stringify([row.status, row.spent_usd, row.best_champion_id,
         row.candidates.map(c => [c.id, c.decision, c.reason, c.dev_run_id, c.holdout_run_id]),
         row.journal.filter(entry => entry.type === 'evaluation').map(entry => [entry.id, entry.status])]);
@@ -316,7 +323,7 @@ const portalEvolution = (() => {
         el('p', stateLabel(row.status) + ' · 已用 ' + ui.cost(row.spent_usd) + ' / ' + ui.cost(config.budget_usd)),
         el('small', id + ' · ' + ui.date(row.created_at)));
       actions.replaceChildren(evidenceLink('返回演进记录', pageHref('runs')));
-      if (state.polling) actions.append(ui.action('停止演进', async () => {
+      if (canManage && state.polling) actions.append(ui.action('停止演进', async () => {
         if (!confirm('确认停止这次演进？')) return;
         await data(path + '/stop', {});
         ui.setMessage(message, '已发送停止请求。');
@@ -351,7 +358,8 @@ const portalEvolution = (() => {
           detail.open = opened.has(candidate.id);
           const operations = el('div', undefined, 'stack');
           operations.append(detail);
-          if (row.status === 'awaiting_approval' && candidate.decision === 'pending' && candidate.reason === 'awaiting approval') {
+          if (canManage && row.status === 'awaiting_approval' && candidate.decision === 'pending'
+              && candidate.reason === 'awaiting approval') {
             operations.append(ui.actions(...[['approve', '批准'], ['reject', '拒绝']].map(([action, label]) =>
               ui.action(label, async () => {
                 await data(path + '/' + action, {candidate_id: candidate.id});
@@ -457,16 +465,18 @@ const portalEvolution = (() => {
 
   function mountChampion(state) {
     const id = state.id, path = championsPath + '/' + enc(id), message = notice();
+    const canManage = ui.can('eval-admin');
     const summary = el('div', undefined, 'stack'), builds = ui.scroll('固化构建');
-    const form = ui.form([ui.field('构建备注（可选）', 'notes', {maxLength: 2000})], '固化冠军', async form => {
+    const form = canManage && ui.form([ui.field('构建备注（可选）', 'notes', {maxLength: 2000})], '固化冠军', async form => {
       await data(path + '/solidify', {notes: ui.value(form, 'notes') || null});
       form.reset();
       ui.setMessage(message, '已提交固化构建。');
       await refresh(state);
     });
     const buildPanel = ui.panel('固化构建与等价评测', builds);
-    form.hidden = buildPanel.hidden = true;
-    state.root.append(ui.panel('冠军详情', summary, form, message), buildPanel);
+    if (form) form.hidden = true;
+    buildPanel.hidden = true;
+    state.root.append(ui.panel('冠军详情', summary, ...(form ? [form] : []), message), buildPanel);
     let signature;
     const results = new Map();
     return async () => {
@@ -479,7 +489,7 @@ const portalEvolution = (() => {
       if (signature === nextSignature) return;
       signature = nextSignature;
       const runtime = row.agent_backend === 'dsh';
-      form.hidden = runtime || !row.candidate_id;
+      if (form) form.hidden = runtime || !row.candidate_id;
       buildPanel.hidden = runtime;
       summary.replaceChildren(
         el('h3', targetLabel(row)),
@@ -487,8 +497,8 @@ const portalEvolution = (() => {
         el('small', '开发集 · ' + metricLine(row.metrics?.dev) + ' | 留出集 · ' + metricLine(row.metrics?.holdout)),
         ui.actions(evidenceLink('返回冠军谱系', pageHref('champions')),
           row.parent_champion_id && detailLink('champions', row.parent_champion_id, '查看父冠军'),
-          evidenceLink('设置灰度', pageHref('rollouts', row.id)),
-          row.active && row.parent_champion_id && ui.action('回滚到父冠军', async () => {
+          canManage && evidenceLink('设置灰度', pageHref('rollouts', row.id)),
+          canManage && row.active && row.parent_champion_id && ui.action('回滚到父冠军', async () => {
             if (!confirm('确认回滚到父冠军？现有灰度比例会移交给父冠军。')) return;
             const parent = await data(path + '/rollback', {});
             if (active(state)) location.hash = pageHref('champions', parent.id);
@@ -513,7 +523,7 @@ const portalEvolution = (() => {
           stateLabel(build.status) + (build.error ? ' · ' + build.error : ''),
           build.regression_status ? stateLabel(build.regression_status) : '等待构建',
           evidence,
-          build.status === 'succeeded' && build.regression_status === 'completed' ? ui.action('设为默认版本', async () => {
+          canManage && build.status === 'succeeded' && build.regression_status === 'completed' ? ui.action('设为默认版本', async () => {
             if (!confirm('确认将 ' + build.version + ' 设为默认 OpenCode 版本？')) return;
             await data('/agents/opencode/versions/' + enc(build.version) + '/default', {});
             ui.setMessage(message, '平台默认版本已更新。');
@@ -621,8 +631,10 @@ const portalEvolution = (() => {
 
   function load(parts) {
     const evalAdmin = ui.can('eval-admin');
-    const visible = evalAdmin ? ['runs', 'schedules', 'champions', 'rollouts', 'harvest'] : ['rollouts', 'harvest'];
-    const tab = visible.includes(parts[0]) ? parts[0] : visible[0], id = parts[1] ? decodeURIComponent(parts[1]) : '';
+    const visible = evalAdmin ? ['runs', 'schedules', 'champions', 'rollouts', 'harvest']
+      : portalIdentity.guest ? ['runs', 'champions'] : ['rollouts', 'harvest'];
+    const tab = visible.includes(parts[0]) ? parts[0] : visible[0];
+    const id = parts[0] === tab && parts[1] ? decodeURIComponent(parts[1]) : '';
     const root = $('evolution-content');
     const titles = {runs: '演进记录', schedules: '定期计划', champions: '冠军谱系与固化', rollouts: '租户灰度', harvest: '采集候选'};
     $('evolution-nav').replaceChildren(...visible.map(key => {
@@ -632,6 +644,7 @@ const portalEvolution = (() => {
       return link;
     }));
     if (view?.tab !== tab || view?.id !== id || view?.identity !== portalIdentity) {
+      view?.dag?.destroy();
       const state = {root, tab, id, identity: portalIdentity, polling: tab === 'runs'};
       view = state;
       root.replaceChildren();
@@ -649,8 +662,10 @@ const portalEvolution = (() => {
   }
 
   function reset() {
+    if (!view) return;
+    view.dag?.destroy();
+    view.root.replaceChildren();
     view = null;
-    $('evolution-content').replaceChildren();
   }
 
   return {load, poll, reset, lineChanges, generations, equivalence};
