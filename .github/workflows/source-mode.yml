@@ -88,8 +88,10 @@ jobs:
           $env:PORTAL_TOKEN = [Guid]::NewGuid().ToString('N')
           & .\scripts\portal_source.ps1 up
           if ($LASTEXITCODE -ne 0) { throw 'Windows source startup failed' }
-          & .\.venv\Scripts\python.exe scripts/source_smoke.py
+          $taskId = & .\.venv\Scripts\python.exe scripts/source_smoke.py --task-id-only
           if ($LASTEXITCODE -ne 0) { throw 'Windows source smoke failed' }
+          & .\.venv\Scripts\python.exe scripts/source_smoke.py --check-history $taskId
+          if ($LASTEXITCODE -ne 0) { throw 'Windows source history smoke failed' }
 
       - name: Smoke test POSIX source mode
         if: ${{ !cancelled() && steps.install.outcome == 'success' && runner.os != 'Windows' }}
@@ -97,7 +99,8 @@ jobs:
         run: |
           export PORTAL_TOKEN=$("$SCA_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')
           bash scripts/portal_source.sh up
-          "$SCA_PYTHON" scripts/source_smoke.py
+          task_id=$("$SCA_PYTHON" scripts/source_smoke.py --task-id-only)
+          "$SCA_PYTHON" scripts/source_smoke.py --check-history "$task_id"
 
       - name: Stop Windows source services
         if: always() && runner.os == 'Windows'
@@ -126,12 +129,14 @@ jobs:
           output.mkdir(exist_ok=True)
           # The smoke generates hex credentials for the Portal, gateway and PostgreSQL.
           token = re.compile(r"(?i)dev-token|(?:sk-)?(?:[0-9a-f]{64}|[0-9a-f]{32})")
+          db_url = re.compile(r"(?i)\bpostgres(?:ql)?(?:\+[\w.-]+)?://[^\s'\"<>]+")
           for name in ("api", "worker", "postgres", "postgres-server", "temporal",
                        "litellm", "setup", "migrations", "dsh"):
               log = Path(".data/run") / f"{name}.log"
               if not log.is_symlink() and log.is_file():
                   content = log.read_text(encoding="utf-8", errors="replace")
-                  (output / log.name).write_text(token.sub("[redacted]", redact(content)), encoding="utf-8")
+                  sanitized = token.sub("[redacted]", redact(db_url.sub("[redacted]", content)))
+                  (output / log.name).write_text(sanitized, encoding="utf-8")
           PY
 
       - name: Upload source service logs

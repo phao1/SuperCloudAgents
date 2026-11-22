@@ -289,26 +289,9 @@ DSH 在每轮通过 `headless --patch` 载入附加提示词。它保留内置�
 
 ### 最小试跑
 
-在已配置的 `SCA_EVAL_SUITES_DIR` 下准备一个包含少量用例的套件 `dsh-smoke`。下例从内置
-`opencode-evolve` 复制两个开发用例和一个留出用例到独立目录。在启动 API 和 Worker 的环境中
-设置同一个 `SCA_EVAL_SUITES_DIR`。
-
-```powershell
-$root = ".data/eval-suites"
-$suite = "$root/dsh-smoke"
-New-Item -ItemType Directory -Force "$suite/cases" | Out-Null
-@'
-name: dsh-smoke
-kind: coding
-defaults:
-  max_fix_attempts: 0
-  turn_timeout_s: 240
-'@ | Set-Content -Encoding utf8 "$suite/suite.yaml"
-foreach ($case in "interval-union", "unicode-offsets", "lazy-zip-strict") {
-  Copy-Item -Recurse -Force "evals/opencode-evolve/cases/$case" "$suite/cases"
-}
-$env:SCA_EVAL_SUITES_DIR = (Resolve-Path $root).Path
-```
+使用仓库已提交的 `evals/dsh-smoke` 套件，内含两个开发用例和一个留出用例。
+套件根目录默认为 `evals`。如果自定义了 `SCA_EVAL_SUITES_DIR`，请在 API 和 Worker
+上使用同一个包含 `dsh-smoke` 的套件根目录。
 
 用 `eval` 租户管理员令牌提交一代、两个候选、每题一次、串行的演进。先评测开发集，有候选
 通过开发集门禁才评测留出集。下例把编码评测开支限制在 0.20 美元，每题最多 0.02 美元。
@@ -399,6 +382,10 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" \
 ```
 
 ### 验证
+
+在 GitHub Actions 的 **Source mode** 工作流中选择 **Run workflow**，可在 Windows、macOS
+和 Ubuntu 上验证源码模式。烟测提交 `fake` 任务后，通过各平台的源码启动脚本导出 ZIP 并重新导入，
+确认新增记录为 0，再用 `GET /v1/tasks` 核对原任务。手工操作示例见 [历史导出与导入](history-transfer.md)。
 
 模拟的 headless 进程和网关验证了提示词追加、续接、Token 用量和虚拟密钥费用。
 安装器单测模拟了 1,179 MB 的 DSH 安装，覆盖 DSH 与 Pi 的磁盘空间门槛及缓存复用。

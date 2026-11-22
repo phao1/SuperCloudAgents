@@ -198,6 +198,7 @@ def test_gateway_starts_with_and_without_a_model_key(demo, mode):
         assert selected.read_text().strip() == expected
 
 
+@POSIX_ONLY
 @pytest.mark.parametrize("mode", ["docker", "source"])
 @pytest.mark.parametrize("migration_status", ["0", "1"])
 def test_up_migrates_before_starting_api_and_worker(demo, monkeypatch, mode, migration_status):
