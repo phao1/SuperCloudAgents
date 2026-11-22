@@ -168,6 +168,44 @@ def test_windows_configuration_persists_token_and_defaults_to_dsh(tmp_path, caps
     assert capsys.readouterr() == ("", "")
 
 
+@pytest.mark.parametrize("migration_fails", [False, True])
+def test_windows_up_migrates_before_starting_api_and_worker(tmp_path, monkeypatch, migration_fails):
+    from sca import host
+
+    stack = portal_source.WindowsSource(tmp_path)
+    starts = []
+    env = {"SCA_TEMPORAL_ADDRESS": "127.0.0.1:7233", "SCA_SANDBOX_DRIVER": "local"}
+    monkeypatch.setattr(host, "host_executable", lambda name: tmp_path / name)
+    monkeypatch.setattr(host, "windows_bash", lambda: tmp_path / "bash.exe")
+    monkeypatch.setattr(portal_source.subprocess, "check_output", lambda *args, **kwargs: "v24.22.3")
+    for step in ("install_binaries", "install_dsh", "prepare_gateway"):
+        monkeypatch.setattr(portal_source, step, lambda *args, **kwargs: None)
+    monkeypatch.setattr(stack, "set_configuration", lambda: {"SCA_AGENT_BACKEND": "fake"})
+    monkeypatch.setattr(stack, "environment", lambda config: env)
+    monkeypatch.setattr(stack, "start_postgres", lambda: starts.append("postgres"))
+    monkeypatch.setattr(stack, "start_gateway", lambda env: starts.append("gateway"))
+    monkeypatch.setattr(stack, "start", lambda name, *args: starts.append(name))
+    monkeypatch.setattr(stack, "wait", lambda *args: None)
+    monkeypatch.setattr(stack, "owned", lambda service: 1)
+    stack.data.mkdir()
+
+    def migration(argv, log, **kwargs):
+        assert argv == [stack.python, "-m", "alembic", "upgrade", "head"]
+        assert kwargs["env"] == env and log.name == "migrations.log"
+        starts.append("migration")
+        if migration_fails:
+            raise ValueError("fixture migration error")
+
+    monkeypatch.setattr(portal_source, "run_logged", migration)
+    if migration_fails:
+        with pytest.raises(ValueError, match="fixture migration error"):
+            stack.up()
+        assert starts == ["postgres", "migration"]
+    else:
+        stack.up()
+        assert starts == ["postgres", "migration", "temporal", "gateway", "worker", "api"]
+
+
 def test_settings_default_dsh_for_windows_local_only(monkeypatch):
     from sca import config
 

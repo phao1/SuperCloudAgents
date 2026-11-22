@@ -277,6 +277,11 @@ PY
 }
 up() {
     load_env
+    run "$PY" -m alembic upgrade head
+    if [[ $SCA_RUNTIME_MODE == docker ]]; then
+        run "$PY" -m sca.agents.docker_node ||
+            echo 'DeepSeek Harness 运行时暂未就绪，运行 dsh 任务时将重试。' >&2
+    fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         if [[ ! -f "$STRIPE_SIM_MARKER" ]] && { owned api || owned worker; }; then
             fail '请先运行 down，再以 Stripe 模拟模式启动 Portal。'
@@ -383,7 +388,6 @@ setup_docker() {
     save_mode docker
     load_env
     start_docker_services
-    run .venv/bin/alembic upgrade head
     run "$SCA_DOCKER_BIN" build -t sca-sandbox:latest deploy/sandbox
     run "$SCA_DOCKER_BIN" build -f deploy/pi/sandbox.Dockerfile -t sca-sandbox-pi:latest deploy/pi
     run "$SCA_DOCKER_BIN" build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/dsh

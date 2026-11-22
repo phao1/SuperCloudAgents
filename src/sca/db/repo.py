@@ -2567,11 +2567,11 @@ class Store:
             "config": evolutions.c.config.concat({"reason": reason}),
         })
 
-    # Model provider errors
+    # Evaluation case errors
 
     async def _eval_result_rows(self, session: AsyncSession, run_id: str) -> list[dict]:
         from sca.db.schema import eval_results
-        from sca.eval.trajectory import overall_passed
+        from sca.eval.trajectory import is_errored, overall_passed
 
         # A case stopped by an account error has nullable scores and a failure on its task.
         result = eval_results.c
@@ -2581,8 +2581,13 @@ class Store:
                     & result.acceptance_passed.is_(None)).where(
             result.run_id == task_uuid(run_id), result.tenant_id == "eval",
         ).order_by(result.case_id, result.repeat))).mappings()
-        return [{**row, "passed": None if row["infrastructure_error"] else overall_passed(dict(row))}
-                for row in rows]
+        results = []
+        for row in rows:
+            result_row = dict(row)
+            passed = None if is_errored(result_row) else overall_passed(result_row)
+            status = "errored" if passed is None else ("passed" if passed else "failed")
+            results.append({**result_row, "passed": passed, "status": status})
+        return results
 
     # Task interjection
 
@@ -2972,7 +2977,7 @@ class Store:
             run_ids = [run["id"] for run in runs]
             results = (await session.execute(select(
                 r.run_id, r.case_id, r.repeat, r.task_id, r.acceptance_passed, r.trajectory_passed,
-                r.cost_usd, r.duration_s, r.tokens,
+                r.cost_usd, r.duration_s, r.tokens, r.verification_passed,
             ).join(tasks, (t.id == r.task_id) & (t.tenant_id == tenant)).where(
                 r.tenant_id == tenant, r.run_id.in_(run_ids),
             ).order_by(r.run_id, r.case_id, r.repeat))).mappings().all()

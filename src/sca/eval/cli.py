@@ -13,6 +13,7 @@ from sca.db.engine import make_engine, make_sessionmaker
 from sca.db.repo import Store
 from sca.eval.compare import compare, markdown
 from sca.eval.suites import load_suite
+from sca.eval.trajectory import is_errored
 from sca.eval.workflow import EvalRunWorkflow
 
 app = typer.Typer(no_args_is_help=True)
@@ -21,7 +22,8 @@ app = typer.Typer(no_args_is_help=True)
 async def read_run(run_id: str) -> dict:
     engine = make_engine(get_settings().database_url)
     try:
-        return await Store(make_sessionmaker(engine)).get_eval_run(run_id)
+        run = await Store(make_sessionmaker(engine)).get_eval_run(run_id)
+        return {**run, "errored": sum(is_errored(row) for row in run["results"])}
     finally:
         await engine.dispose()
 
@@ -97,7 +99,9 @@ def gate(suite: Path, baseline: str = typer.Option(...), min_pass_rate_delta: fl
         before, after = await asyncio.gather(read_run(baseline), read_run(run_id))
         result = compare(before, after)
         typer.echo(markdown(result))
-        if before["status"] != "completed" or after["status"] != "completed":
+        if (before["status"] != "completed" or after["status"] != "completed"
+                or any(result["errored"].values())
+                or not all("pass_rate" in result[side] for side in ("A", "B"))):
             return False
         return result["B"]["pass_rate"]["mean"] - result["A"]["pass_rate"]["mean"] >= min_pass_rate_delta
     if not asyncio.run(check()):

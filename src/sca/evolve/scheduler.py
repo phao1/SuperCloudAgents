@@ -23,7 +23,7 @@ with workflow.unsafe.imports_passed_through():
     from sca.config import Settings
     from sca.db.repo import Store
     from sca.eval.suites import load_suite, select_cases
-    from sca.eval.trajectory import overall_passed
+    from sca.eval.trajectory import is_errored, overall_passed
     from sca.evolve.champions import PLATFORM_TENANT
     from sca.evolve.models import EvolutionConfig
     from sca.gateway.configuration import model_configured
@@ -38,7 +38,10 @@ def schedule_workflow_id(schedule_id: str | UUID) -> str:
 def should_evolve(current: dict, previous: dict | None, *, threshold: float, always: bool) -> bool:
     if current["status"] != "completed" or not current["results"]:
         return False
-    outcomes = {(row["case_id"], row["repeat"]): overall_passed(row) for row in current["results"]}
+    outcomes = {(row["case_id"], row["repeat"]): overall_passed(row) for row in current["results"]
+                if not is_errored(row)}
+    if not outcomes:
+        return False
     if always or sum(outcomes.values()) / len(outcomes) < threshold:
         return True
     return bool(previous and previous["status"] == "completed" and any(

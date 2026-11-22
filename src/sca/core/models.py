@@ -242,6 +242,9 @@ class AgentContext(BaseModel):
     model_base_url: str | None = None
     model_api_key: str | None = None
 
+    # Mounted Docker runtimes for Node agents
+    image: str | None = None
+
 
 class SandboxAdditions(BaseModel):
     """Extra mounts/env an agent backend needs the sandbox to be created with."""

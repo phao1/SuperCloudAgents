@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 from sca.core.models import TERMINAL_STATES, TaskState
 from sca.core.task_dag import DAGEdge, EdgeKind
-from sca.eval.trajectory import overall_passed
+from sca.eval.trajectory import is_errored, overall_passed
 
 Status = Literal["queued", "running", "succeeded", "failed", "stopped"]
 Kind = Literal["evolution", "generation", "candidate", "eval_run", "case_task", "promotion", "champion"]
@@ -141,7 +141,7 @@ def _case_node(run_id: UUID, task: dict, result: dict | None = None) -> Evolutio
     if result:
         name, repeat = result["case_id"], result["repeat"]
         cost = float(result["cost_usd"])
-        if result["acceptance_passed"] is not None or not task.get("model_provider_error"):
+        if not is_errored(result):
             score = float(overall_passed(result))
             if status == "succeeded" and score == 0:
                 status = "failed"

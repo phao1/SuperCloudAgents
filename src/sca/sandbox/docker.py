@@ -9,7 +9,13 @@ from pathlib import Path
 
 from sca.core.errors import SandboxError
 from sca.core.models import ExecEvent, ExecOutput, SandboxSpec
-from sca.sandbox._exec import stream_exec
+from sca.sandbox._exec import (
+    NODE_EXECUTABLE,
+    NODE_RUNTIME_DIR,
+    NODE_RUNTIME_LABEL,
+    NODE_SCRIPT,
+    stream_exec,
+)
 from sca.sandbox._transfer import transfer
 from sca.sandbox.egress import CA_ENV, CA_TARGET, SQUID_IMAGE, SQUID_PORT, render_squid_conf
 from sca.sandbox.handd import DAEMON, HanddClient
@@ -48,6 +54,7 @@ class DockerSandboxProvider:
         self._handd_clients: dict[str, HanddClient] = {}
         self._handd_gates: dict[str, asyncio.Lock] = {}
         self._handd_users: dict[str, int] = {}
+        self._node_exec: dict[str, bool] = {}
 
     async def ensure_egress(self) -> str:
         """Make sure the internal network and the egress proxy exist. Returns the proxy URL."""
@@ -129,10 +136,11 @@ class DockerSandboxProvider:
 
     async def create(self, name: str, spec: SandboxSpec) -> str:
         sandbox_id = f"sca-{name}"
+        node_runtime = any(mount.target == NODE_RUNTIME_DIR and mount.read_only for mount in spec.mounts)
         code, out, err = await self._cli(
             "inspect", "--format", "{{.State.Running}}", sandbox_id, check=False
         )
-        if not code and out.strip() == "true":
+        if not code and out.strip() == "true" and node_runtime == await self._uses_node(sandbox_id):
             return sandbox_id
         if code and "no such" not in err.lower():
             raise SandboxError(err)
@@ -173,6 +181,8 @@ class DockerSandboxProvider:
             args += ["--runtime", spec.runtime]
         for key, value in spec.labels.items():
             args += ["--label", f"{key}={value}"]
+        if node_runtime:
+            args += ["--label", f"{NODE_RUNTIME_LABEL}=1"]
         for key, value in env.items():
             args += ["--env", f"{key}={value}"]
         for mount in spec.mounts:
@@ -193,7 +203,30 @@ class DockerSandboxProvider:
                 source.mkdir(parents=True)
             args += ["--volume", f"{source}:{mount.target}" + (":ro" if mount.read_only else "")]
         await self._cli(*args, spec.image, "sleep", "infinity")
+        if node_runtime:
+            probe, _, _ = await self._cli(
+                "exec", sandbox_id, NODE_EXECUTABLE, "-e",
+                "process.exit(process.report.getReport().header.glibcVersionRuntime ? 0 : 1)",
+                check=False,
+            )
+            if probe:
+                await self.destroy(sandbox_id)
+                raise SandboxError(
+                    "DSH/Pi Docker 运行时需要与宿主架构一致的 glibc 镜像及 libstdc++。"
+                    "Alpine/musl 镜像无法运行，请使用 Debian 或 Ubuntu。"
+                )
+        self._node_exec[sandbox_id] = node_runtime
         return sandbox_id
+
+    async def _uses_node(self, sandbox_id: str) -> bool:
+        if sandbox_id not in self._node_exec:
+            code, output, _ = await self._cli(
+                "inspect", "--format", '{{index .Config.Labels "' + NODE_RUNTIME_LABEL + '"}}',
+                sandbox_id, check=False,
+            )
+            if not code:
+                self._node_exec[sandbox_id] = output.strip() == "1"
+        return self._node_exec.get(sandbox_id, False)
 
     async def runtime_id(self, sandbox_id: str) -> str:
         _, identity, _ = await self._cli("inspect", "--format", "{{.Id}}", sandbox_id)
@@ -218,6 +251,7 @@ class DockerSandboxProvider:
         code, _, err = await self._cli("rm", "-f", sandbox_id, check=False)
         if code and "no such" not in err.lower():
             raise SandboxError(err)
+        self._node_exec.pop(sandbox_id, None)
 
     def _use_lock(self, sandbox_id: str) -> asyncio.Lock:
         return self._use_locks.setdefault(sandbox_id, asyncio.Lock())
@@ -248,16 +282,18 @@ class DockerSandboxProvider:
         stdin: bytes | None = None,
         timeout_s: float | None = None,
     ) -> AsyncIterator[ExecEvent]:
+        interpreter = ("python3", "-c")
+
         def command(wrapper: str, marker: str) -> list[str]:
             args = [self.docker_bin, "exec", "-i"]
             if workdir:
                 args += ["--workdir", workdir]
             for key, value in (env or {}).items():
                 args += ["--env", f"{key}={value}"]
-            return [*args, sandbox_id, "python3", "-c", wrapper, marker, *argv]
+            return [*args, sandbox_id, *interpreter, wrapper, *(["--"] if node else []), marker, *argv]
 
         async def cleanup(script: str, marker: str) -> None:
-            await self._cli("exec", sandbox_id, "python3", "-c", script, marker, check=False)
+            await self._cli("exec", sandbox_id, *interpreter, script, marker, check=False)
 
         @asynccontextmanager
         async def lease():
@@ -283,9 +319,15 @@ class DockerSandboxProvider:
                     if not self._handd_users[sandbox_id]:
                         self._use_lock(sandbox_id).release()
 
+        node = False
+
         async def run() -> AsyncIterator[ExecEvent]:
+            nonlocal interpreter, node
             async with lease():
-                if self._handd_enabled:
+                node = await self._uses_node(sandbox_id)
+                if node:
+                    interpreter = NODE_SCRIPT
+                if self._handd_enabled and not node:
                     client = self._handd_clients.get(sandbox_id)
                     if client is None:
                         client = HanddClient([self.docker_bin, "exec", "-i", sandbox_id,
@@ -311,7 +353,7 @@ class DockerSandboxProvider:
                 for attempt in range(2):
                     buffered: list[ExecEvent] = []
                     paused = False
-                    stream = stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s)
+                    stream = stream_exec(command, cleanup, stdin=stdin, timeout_s=timeout_s, node=node)
                     try:
                         async for event in stream:
                             if (isinstance(event, ExecOutput) and event.stream == "stderr"

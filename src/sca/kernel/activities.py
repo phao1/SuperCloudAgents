@@ -40,6 +40,7 @@ from sca.core.models import (
     AgentOverlay,
     EventType,
     ExecExit,
+    Mount,
     SandboxSpec,
     Task,
     TaskState,
@@ -301,6 +302,7 @@ class KernelActivities:
             agent_version=version,
             agent_overlay=overlay,
             model=model,
+            image=getattr(spec, "image", None),
         )
 
     # OpenCode platform default
@@ -758,6 +760,7 @@ class KernelActivities:
         ctx = self._agent_ctx(task_id, spec, champion)
         await self._resolve_opencode_version(ctx, backend, task_id)
         additions = backend.sandbox_additions(ctx)
+        runtime_mounts = await self._docker_node_mounts(backend, spec.image)
         cache_mounts, cache_env = [], {}
         if self.settings.pip_cache and self.settings.state_transport == "mount":
             # Per tenant: a shared writable cache would let one tenant plant a package that
@@ -770,6 +773,7 @@ class KernelActivities:
             mounts=[
                 *self.transport.mounts(self._task_dir(task_id)),
                 *additions.mounts,
+                *runtime_mounts,
                 *cache_mounts,
             ],
             env={**cache_env, **additions.env},
@@ -1229,12 +1233,14 @@ class KernelActivities:
             await clean.prepare(str(source.mirror), commit)
             await asyncio.to_thread(extract_acceptance, archive, clean.workspace,
                                     self.settings.max_upload_mb * 1024 * 1024)
+            backend = self._backend(spec)
+            runtime_mounts = await self._docker_node_mounts(backend, spec.image, node_only=True)
             sandbox_spec = SandboxSpec(
                 image=spec.image or self.settings.sandbox_image,
-                mounts=self.transport.mounts(clean.task_dir),
+                mounts=[*self.transport.mounts(clean.task_dir), *runtime_mounts],
                 cpus=self.settings.sandbox_cpus,
                 memory_mb=self.settings.sandbox_memory_mb,
-                network=getattr(self._backend(spec), "sandbox_network", self.settings.sandbox_network),
+                network=getattr(backend, "sandbox_network", self.settings.sandbox_network),
                 runtime=self.settings.sandbox_runtime,
                 labels={"sca.task_id": task_id, "sca.acceptance": "true"},
             )
@@ -1251,6 +1257,15 @@ class KernelActivities:
         passed = code.exit_code == 0
         await self.store.complete_acceptance(task_id, passed, code.exit_code, tail(output))
         return passed
+
+    # Mounted Docker runtimes for Node agents
+
+    async def _docker_node_mounts(
+        self, backend: AgentBackend, image: str | None, *, node_only: bool = False,
+    ) -> list[Mount]:
+        if image and (runtime := getattr(backend, "docker_runtime", None)) is not None:
+            return await runtime.mounts(node_only=node_only)
+        return []
 
     # Evolution productization and DeepSeek Harness evolution
 

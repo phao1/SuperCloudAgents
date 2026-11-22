@@ -23,7 +23,7 @@ from sca.db.schema import eval_runs
 from sca.eval.compare import compare
 from sca.eval.rescore import rescore_run
 from sca.eval.suites import Split, case_metadata, load_suite, matches_suite_hash, select_cases
-from sca.eval.trajectory import overall_passed
+from sca.eval.trajectory import is_errored, overall_passed
 from sca.eval.workflow import EvalRunWorkflow
 from sca.kernel.prompts import EvaluationSettings, validate_prompt_version
 
@@ -80,11 +80,12 @@ async def read_run(request: Request, run_id: UUID) -> dict:
 
 def summary(run: dict) -> dict:
     rows = run["results"]
-    scored = [row for row in rows if not row.get("infrastructure_error")]
+    scored = [row for row in rows if not is_errored(row)]
     return {**{k: v for k, v in run.items() if k != "results"},
             "passed": sum(overall_passed(row) for row in scored),
             "failed": sum(not overall_passed(row) for row in scored),
-            "infrastructure_errors": len(rows) - len(scored),
+            "errored": len(rows) - len(scored),
+            "infrastructure_errors": sum(bool(row.get("infrastructure_error")) for row in rows),
             "result_count": len(rows), "cost_usd": sum(row["cost_usd"] for row in rows)}
 
 

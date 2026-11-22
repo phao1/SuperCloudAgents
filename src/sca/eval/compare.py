@@ -4,7 +4,7 @@ from collections import defaultdict
 from math import comb
 from statistics import mean
 
-from sca.eval.trajectory import overall_passed
+from sca.eval.trajectory import is_errored, overall_passed
 
 
 def sign_test(wins: int, losses: int) -> float | None:
@@ -17,7 +17,7 @@ def sign_test(wins: int, losses: int) -> float | None:
 def summarize(rows: list[dict]) -> dict:
     repeats = defaultdict(list)
     for row in rows:
-        if not row.get("infrastructure_error"):
+        if not is_errored(row):
             repeats[row["repeat"]].append({**row, "passed": overall_passed(row)})
     metrics = {"pass_rate": "passed", "acceptance_pass_rate": "acceptance_passed", "turns": "turns",
                "cost_usd": "cost_usd", "duration_s": "duration_s", "tokens": "tokens"}
@@ -32,7 +32,7 @@ def compare(a: dict, b: dict) -> dict:
         raise ValueError("cannot pair runs with different suite contents")
     cases_seen = {row["case_id"] for run in (a, b) for row in run["results"]}
     excluded = {(row["case_id"], row["repeat"]) for run in (a, b) for row in run["results"]
-                if row.get("infrastructure_error")}
+                if is_errored(row)}
     grouped = []
     for run in (a, b):
         cases = defaultdict(list)
@@ -49,6 +49,8 @@ def compare(a: dict, b: dict) -> dict:
             losses += rates[1] < rates[0]
     p = sign_test(wins, losses)
     return {"A": summarize(a["results"]), "B": summarize(b["results"]), "cases": table,
+            "errored": {side: sum(is_errored(row) for row in run["results"])
+                        for side, run in (("A", a), ("B", b))},
             "infrastructure_errors": {side: sum(bool(row.get("infrastructure_error")) for row in run["results"])
                                       for side, run in (("A", a), ("B", b))},
             "B_wins": wins, "A_wins": losses, "p_value": p,
@@ -67,8 +69,8 @@ def markdown(report: dict) -> str:
     lines += ["", "| Case | A pass rate | B pass rate |", "|---|---:|---:|"]
     for case in report["cases"]:
         lines.append(f"| {case['case']} | {case['A']} | {case['B']} |")
-    errors = report.get("infrastructure_errors", {})
+    errors = report.get("errored", report.get("infrastructure_errors", {}))
     if any(errors.values()):
-        lines += ["", f"Infrastructure errors omitted from scoring (A: {errors['A']}, B: {errors['B']})."]
+        lines += ["", f"Errored cases omitted from scoring (A: {errors['A']}, B: {errors['B']})."]
     lines += ["", report["conclusion"] + f"; paired sign test p={report['p_value']}."]
     return "\n".join(lines)

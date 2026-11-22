@@ -1,7 +1,7 @@
 """Re-score stored events using the current reviewed suite rules; no agent execution."""
 
 from sca.db.repo import Store
-from sca.eval.trajectory import evaluate
+from sca.eval.trajectory import evaluate, is_errored
 
 
 async def task_events(store: Store, task_id: str) -> list[dict]:
@@ -19,6 +19,8 @@ async def rescore_run(store: Store, run: dict, suite: dict) -> None:
         raise ValueError("Suite no longer contains all recorded cases")
     scored = []
     for row in run["results"]:
+        if is_errored(row):
+            continue
         passed, findings = evaluate(await task_events(store, str(row["task_id"])), checks[row["case_id"]])
         scored.append((row, passed, findings))
     for row, passed, findings in scored:

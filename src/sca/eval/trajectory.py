@@ -17,6 +17,13 @@ def overall_passed(row: dict) -> bool:
     return row.get("acceptance_passed") is True and row.get("trajectory_passed") is not False
 
 
+def is_errored(row: dict) -> bool:
+    # Nullable scores already encode infrastructure failures in stored evaluation results.
+    return bool(row.get("infrastructure_error") or row.get("status") == "errored"
+                or ("acceptance_passed" in row and row["acceptance_passed"] is None
+                    and row.get("verification_passed") is None))
+
+
 def path_of(inputs: dict) -> str:
     path = inputs.get("path", inputs.get("filePath", ""))
     return str(PurePosixPath(str(path)).relative_to("/workspace")) if str(path).startswith("/workspace/") else str(path)

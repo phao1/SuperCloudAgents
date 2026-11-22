@@ -15,10 +15,10 @@ from sca.core.interfaces import ModelGateway
 from sca.core.model_provider import ModelProviderError
 from sca.db.repo import Store
 from sca.eval.activities import load_activity_suite
-from sca.eval.errors import suite_changed
+from sca.eval.errors import invalid_eval_input, suite_changed
 from sca.eval.suites import matches_suite_hash
-from sca.eval.trajectory import overall_passed
-from sca.evolve.checks import overlay_hash, static_check
+from sca.eval.trajectory import is_errored, overall_passed
+from sca.evolve.checks import measured_cost, overlay_hash, static_check
 from sca.evolve.models import Proposal
 from sca.orchestration.provider_errors import account_failure
 
@@ -164,7 +164,7 @@ class EvolutionActivities:
             raise ValueError('reflection requires dev evidence')
         evidence = []
         for row in run['results']:
-            if overall_passed(row) and not row.get('trajectory_findings'):
+            if is_errored(row) or (overall_passed(row) and not row.get('trajectory_findings')):
                 continue
             item = {k: row.get(k) for k in ('case_id', 'trajectory_findings', 'turns', 'cost_usd')}
             # Read only bounded command/acceptance tails; never include full agent messages.
@@ -269,6 +269,9 @@ class EvolutionActivities:
     @activity.defn(name='evolve_promote')
     async def promote(self, request: dict) -> dict:
         c, cfg = request['candidate'], request['config']
+        # An activity queued by a pre-upgrade workflow must also have measured holdout spend.
+        if not measured_cost((c.get('holdout_metrics') or {}).get('cost_usd', 0)):
+            raise invalid_eval_input('候选留出集缺少有效的实测费用，无法晋升')
         store = self.scoped(request)
         percent = request.get('auto_rollout_percent')
         row = await store.activate_champion(request['champion_id'], {

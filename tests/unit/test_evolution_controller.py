@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 import pytest
-from temporalio.exceptions import ActivityError, RetryState
+from temporalio.exceptions import ActivityError, ApplicationError, RetryState
 
 from sca.core.model_provider import ModelProviderError
 from sca.evolve.models import EvolutionConfig
@@ -18,6 +18,9 @@ from sca.orchestration.provider_errors import account_failure
     ('stop', 'stopped', 0), ('invalid', 'patience_exhausted', 0),
     ('eval_failed', 'failed', 0), ('legacy_eval_failed', 'budget_exhausted', 0),
     ('provider_eval_failed', 'failed', 0), ('provider_propose_failed', 'failed', 0),
+    ('baseline_holdout_failed', 'failed', 0), ('candidate_dev_failed', 'completed', 0),
+    ('candidate_holdout_failed', 'completed', 0), ('zero_dev', 'completed', 0),
+    ('zero_holdout', 'completed', 0), ('activity_failed', 'failed', 0),
 ])
 async def test_controller(monkeypatch, mode, expected, promotions):
     from sca.evolve import workflow as module
@@ -30,33 +33,51 @@ async def test_controller(monkeypatch, mode, expected, promotions):
                           patience=2, budget_usd=.1 if mode == 'budget' else 10,
                           require_approval=mode in ('approve', 'reject', 'stop')).model_dump()
 
+    def activity_error(name):
+        return ActivityError('Activity failed', scheduled_event_id=1, started_event_id=2,
+                             identity='test', activity_type=name, activity_id='1',
+                             retry_state=RetryState.NON_RETRYABLE_FAILURE)
+
     async def execute(name, request, **kwargs):
         match name:
             case 'evolve_initialize':
+                if mode == 'activity_failed':
+                    raise activity_error(name) from ApplicationError(
+                        'fixture database diagnostic', type='UndefinedColumnError',
+                    )
                 return {'id': None, 'candidate_id': None, 'overlay': {}}
             case 'evolve_prepare_run':
                 requests[request['run_id']] = request
                 return {'id': request['run_id']}
             case 'evolve_read_run':
                 item = requests[request['run_id']]
+                candidate = bool(item['overlay'])
+                split = item['split']
                 if mode in ('eval_failed', 'legacy_eval_failed'):
                     return {'id': request['run_id'], 'status': 'failed', 'reason': 'Suite changed',
                             'results': []}
                 if mode == 'provider_eval_failed':
                     return {'id': request['run_id'], 'status': 'failed', 'reason': provider.reason,
                             'results': [{'infrastructure_error': provider.payload(), 'cost_usd': .01, 'turns': 1}]}
-                passed = bool(item['overlay'])
+                if ((mode == 'baseline_holdout_failed' and split == 'holdout' and not candidate)
+                        or (mode == f'candidate_{split}_failed' and candidate)):
+                    return {'id': request['run_id'], 'status': 'failed', 'reason': '评测执行错误（1/1）',
+                            'results': [{'acceptance_passed': None, 'cost_usd': .01, 'turns': 0}]}
+                passed, cost = candidate, .1
                 if mode in ('rejection', 'patience') and item['split'] == 'holdout':
-                    passed = not bool(item['overlay'])
+                    passed = not candidate
+                if mode == 'zero_dev':
+                    passed, cost = False, 0
+                elif mode == 'zero_holdout':
+                    passed = True
+                    cost = 0 if split == 'holdout' else (.05 if candidate else .1)
                 return {'id': request['run_id'], 'suite_hash': 'h', 'status': 'completed',
                         'results': [{'case_id': 'c', 'repeat': 0, 'acceptance_passed': passed,
                                      'verification_passed': True, 'trajectory_passed': True,
-                                     'cost_usd': .1, 'turns': 1}]}
+                                     'cost_usd': cost, 'turns': 1}]}
             case 'evolve_propose':
                 if mode == 'provider_propose_failed':
-                    raise ActivityError('Activity failed', scheduled_event_id=1, started_event_id=2,
-                                        identity='test', activity_type=name, activity_id='1',
-                                        retry_state=RetryState.NON_RETRYABLE_FAILURE) from account_failure(provider)
+                    raise activity_error(name) from account_failure(provider)
                 return [{'hypothesis': 'h', 'overlay': {'tool_guidance': 'g'},
                          'overlay_sha256': 'h', 'diagnosis': {},
                          'static_check': {'valid': mode != 'invalid'}}]
@@ -107,6 +128,21 @@ async def test_controller(monkeypatch, mode, expected, promotions):
     if mode == 'provider_propose_failed':
         assert statuses[-1]['reason'] == provider.reason
         assert len(requests) == 1 and not candidates
+    if mode == 'activity_failed':
+        assert statuses[-1]['reason'] == '演进活动执行失败（evolve_initialize，UndefinedColumnError）'
+        assert not requests
+    if mode == 'baseline_holdout_failed':
+        assert len(requests) == 3
+        assert '评测执行错误' in statuses[-1]['reason']
+    if mode in ('candidate_dev_failed', 'candidate_holdout_failed'):
+        [candidate] = candidates.values()
+        split = mode.split('_')[1]
+        assert candidate['decision'] == 'rejected'
+        assert candidate[f'{split}_run_id'] in candidate['reason']
+        assert '评测执行错误' in candidate['reason']
+        assert len(requests) == (2 if split == 'dev' else 4)
+    if mode in ('zero_dev', 'zero_holdout'):
+        assert len(requests) == (2 if mode == 'zero_dev' else 4)
     if mode in ('patience', 'invalid'):
         assert len(candidates) == 2
         assert sum(r['split'] == 'dev' and not r['overlay'] for r in requests.values()) == 1

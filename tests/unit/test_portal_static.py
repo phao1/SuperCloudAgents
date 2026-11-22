@@ -105,6 +105,10 @@ assert(nodes.get('overview-provider-error').hidden&&nodes.get('task-provider-err
 const infra={infrastructure_error:{kind:'billing'},acceptance_passed:null};
 assert.equal(resultLabel(infra),'⚠ 基础设施错误 · 模型服务账户余额不足');
 assert.equal(dimensions([infra]).rate,'—');
+const errored={status:'errored',acceptance_passed:null,verification_passed:null};
+assert.equal(resultLabel(errored),'⚠ 用例执行错误');
+assert.equal(dimensions([errored]).rate,'—');
+assert.equal(dimensions([errored,{acceptance_passed:true,verification_passed:true}]).verification,'100%');
 assert.equal(terminalLines('clone\r\nprogress 1%\rprogress 100%\r\nend'), 'clone\nprogress 100%\nend');
 assert.equal(terminalLines('long progress\rdone\r'), 'done');
 assert.equal(uniqueDiagnostics([{title:'rule',note:'case · 第 1 次'},{title:'rule',note:'case · 第 1 次 · evidence'},{title:'rule',note:'case · 第 2 次'},{title:'other',note:'case · 第 1 次'}]).length,3);
