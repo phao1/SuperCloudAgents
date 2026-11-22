@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import sys
 from datetime import timedelta
 from pathlib import Path
 from typing import cast
@@ -91,14 +92,7 @@ def make_agent_backend(settings: Settings) -> AgentBackend:
         )
     # DeepSeek Harness
     if settings.agent_backend == "dsh":
-        from sca.agents.dsh import DshBackend
-
-        protocol = settings.dsh_gateway_protocol
-        if protocol == "auto":
-            # The optional limiter supports Chat Completions with bearer authentication.
-            protocol = "openai" if settings.gateway_limiter else "messages"
-        return DshBackend(settings.default_model, settings.dsh_version,
-                          settings.dsh_sandbox_image, protocol=protocol)
+        return _make_dsh_backend(settings)
     raise ValueError(f"unknown agent backend: {settings.agent_backend}")
 
 
@@ -283,7 +277,8 @@ async def main() -> None:
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
     assert main_task is not None
-    loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
+    if sys.platform != "win32":
+        loop.add_signal_handler(signal.SIGTERM, main_task.cancel)
     try:
         await ensure_evolution_scheduler(client, settings)
         await (await build_worker(client, settings)).run()
@@ -291,7 +286,8 @@ async def main() -> None:
         try:
             await BrainPool.close_all()
         finally:
-            loop.remove_signal_handler(signal.SIGTERM)
+            if sys.platform != "win32":
+                loop.remove_signal_handler(signal.SIGTERM)
 
 
 # Local source mode
@@ -300,6 +296,7 @@ def _make_local_agent_backend(settings: Settings) -> AgentBackend:
     from sca.agents.local import host_agent_binary, unavailable_source_backend
     from sca.agents.opencode import OpenCodeBackend
     from sca.agents.pi import PiBackend
+    from sca.host import host_executable
 
     name = settings.agent_backend
     binary = host_agent_binary(settings, name)
@@ -311,8 +308,32 @@ def _make_local_agent_backend(settings: Settings) -> AgentBackend:
     if name == "codex":
         return CodexBackend(binary.parent, None if settings.model_gateway_url else settings.codex_auth_file,
                             settings.default_model, executable=str(binary))
+    if name == "dsh":
+        return _make_dsh_backend(settings, executable=binary)
+    node = None
+    if sys.platform == "win32" and binary.suffix.lower() != ".exe":
+        node = host_executable("node.exe")
     return PiBackend(settings.default_model, settings.pi_version, settings.pi_sandbox_image,
-                     executable=str(binary))
+                     executable=str(binary), node_executable=str(node) if node else None)
+
+
+# Native DeepSeek Harness
+def _make_dsh_backend(settings: Settings, executable: Path | None = None) -> AgentBackend:
+    from sca.agents.dsh import DshBackend
+    from sca.host import host_executable
+
+    protocol = settings.dsh_gateway_protocol
+    if protocol == "auto":
+        # The optional limiter supports Chat Completions with bearer authentication.
+        protocol = "openai" if settings.gateway_limiter else "messages"
+    node = None
+    if executable is not None and sys.platform == "win32":
+        node = host_executable("node.exe")
+        if node is None:
+            raise FileNotFoundError("找不到 Node.js，请运行 winget install -e --id OpenJS.NodeJS.LTS")
+    return DshBackend(settings.default_model, settings.dsh_version, settings.dsh_sandbox_image,
+                      protocol=protocol, executable=str(executable) if executable else None,
+                      node_executable=str(node) if node else None)
 
 
 if __name__ == "__main__":

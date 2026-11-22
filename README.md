@@ -71,7 +71,7 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 ### Portal 快速启动
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
-用启动时生成的令牌登录。
+用首次启动时生成的令牌登录。源码模式将令牌保存在 `.data/portal.env`，终端显示保存位置。
 
 ```bash
 # Docker 模式，首次安装并启动
@@ -88,6 +88,8 @@ bash scripts/portal_demo.sh down
 也可设置 `SCA_RUNTIME_MODE=docker` 或 `SCA_RUNTIME_MODE=source`。
 省略两种设置时，脚本优先使用可用的 Docker，否则会提示并进入源码模式。
 源码模式的系统依赖和 API 示例见 [运维文档](docs/operations.md#源码模式)。
+Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
+[Windows 源码模式指南](docs/windows.md)
 
 | 能力 | Docker 模式 | 源码模式 |
 | --- | --- | --- |
@@ -204,7 +206,7 @@ for the acceptance checklist, API and Portal entry points, and live smoke comman
 | `opencode` | 沙箱内运行 OpenCode |
 | `opencode-brain` | 沙箱外运行 OpenCode，工具在沙箱内执行 |
 | `pi` | 使用 `sca-sandbox-pi:latest` 运行 Pi |
-| `dsh` | 使用 `sca-sandbox-dsh:latest` 运行 DeepSeek Harness `0.2.2-rc.5` |
+| `dsh` | Docker 使用 `sca-sandbox-dsh:latest`，源码模式使用项目本地安装的 DeepSeek Harness |
 | `fake` | 使用脚本化 Agent 验证任务流程 |
 
 #### 使用 DeepSeek Harness

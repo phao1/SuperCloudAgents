@@ -6,6 +6,7 @@ import hashlib
 import os
 import shutil
 import stat
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -17,8 +18,9 @@ from sca.workspace.cache import RepoCache, _normalise
 async def command(*argv: str) -> str:
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-        env={"PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
-             "GIT_CONFIG_GLOBAL": "/dev/null"},
+        env={**({"SystemRoot": os.environ["SystemRoot"]} if sys.platform == "win32" else {}),
+             "PATH": os.environ.get("PATH", ""), "GIT_CONFIG_NOSYSTEM": "1",
+             "GIT_CONFIG_GLOBAL": os.devnull},
     )
     try:
         async with asyncio.timeout(300):
@@ -29,19 +31,31 @@ async def command(*argv: str) -> str:
         await proc.wait()
         raise
     if proc.returncode:
-        tail = err[-400:].decode(errors="replace").strip()
+        tail = err[-400:].decode("utf-8", errors="replace").strip()
         raise WorkspaceError(f"Workspace command failed: {argv[0]}" + (f": {tail}" if tail else ""))
-    return out.decode().strip()
+    return out.decode("utf-8", errors="replace").strip()
 
 
 async def disk_bytes(path: Path) -> int:
+    if sys.platform == "win32":
+        return await asyncio.to_thread(
+            lambda: sum(item.stat().st_size for item in path.rglob("*")
+                        if item.is_file() and not item.is_symlink()),
+        )
     return int((await command("du", "-s", "-B1", "--", str(path))).split()[0])
+
+
+async def copy_tree(source: Path, target: Path) -> None:
+    if sys.platform == "win32":
+        await asyncio.to_thread(shutil.copytree, source, target, symlinks=True)
+    else:
+        await command("cp", "-a", "--reflink=auto", "--", str(source), str(target))
 
 
 def permissions(root: Path, writable: bool) -> None:
     for directory, dirs, files in os.walk(root, followlinks=False):
         for path in [Path(directory), *(Path(directory) / n for n in dirs + files)]:
-            if path.is_symlink():
+            if path.is_symlink() or path.is_junction():
                 continue
             mode = stat.S_IMODE(path.stat().st_mode)
             path.chmod(mode | stat.S_IWUSR if writable else mode & ~0o222)
@@ -71,7 +85,8 @@ class LayerStore:
                 try:
                     checkout = temporary / "tree"
                     await command("git", "-c", "core.hooksPath=/dev/null", "clone",
-                                  "--no-local", "--no-checkout", "--", str(mirror), str(checkout))
+                                  "--no-local", "--no-checkout", "-c", "core.autocrlf=false",
+                                  "--", str(mirror), str(checkout))
                     await command("git", "-c", "core.hooksPath=/dev/null", "-C", str(checkout),
                                   "checkout", "--detach", commit)
                     if not overlay:
@@ -87,12 +102,12 @@ class LayerStore:
             refs.mkdir(exist_ok=True)
             owner = str(target.resolve())
             pin = refs / hashlib.sha256(owner.encode()).hexdigest()
-            pin.write_text(owner)
+            pin.write_text(owner, encoding="utf-8")
             try:
                 if overlay:
                     target.mkdir(parents=True, exist_ok=True)
                 else:
-                    await command("cp", "-a", "--reflink=auto", "--", str(layer), str(target))
+                    await copy_tree(layer, target)
                     await asyncio.to_thread(permissions, target, True)
             except BaseException:
                 pin.unlink(missing_ok=True)
@@ -102,7 +117,7 @@ class LayerStore:
                 raise
             marker = target.parent / f"{target.name}.layer"
             temporary_marker = marker.with_suffix(".layer.tmp")
-            temporary_marker.write_text(key)
+            temporary_marker.write_text(key, encoding="utf-8")
             temporary_marker.replace(marker)
             layer.touch()
         return key
@@ -117,11 +132,11 @@ class LayerStore:
                 live = 0
                 if refs.exists():
                     for pin in refs.iterdir():
-                        target = Path(pin.read_text())
+                        target = Path(pin.read_text(encoding="utf-8"))
                         marker = target.parent / f"{target.name}.layer"
                         if ((target.name == "overlay" and not target.exists())
                                 or (target.exists() and marker.is_file()
-                                    and marker.read_text() == layer.name)):
+                                    and marker.read_text(encoding="utf-8") == layer.name)):
                             live += 1
                         else:
                             pin.unlink()

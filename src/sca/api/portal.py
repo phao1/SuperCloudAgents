@@ -3,6 +3,7 @@
 import asyncio
 import os
 import re
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -241,4 +242,6 @@ def _restart_gateway_command(config: str | None) -> list[str]:
     if not config or (os.environ.get("SCA_RUNTIME_MODE") != "source" and not os.environ.get("SCA_DOCKER_BIN")):
         return []
     root = Path(config).parent
+    if sys.platform == "win32" and os.environ.get("SCA_RUNTIME_MODE") == "source":
+        return [sys.executable, str(root / "scripts/portal_source.py"), "restart-gateway"]
     return ["bash", str(root / "scripts/portal_demo.sh"), "restart-gateway"]

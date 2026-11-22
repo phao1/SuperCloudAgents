@@ -31,10 +31,15 @@ async def submit(
     user: Annotated[Principal, Depends(authorize("submit"))],
     idempotency_key: str | None = Header(None),
 ) -> Task:
-    require_model()
+    settings = getattr(request.app.state, "settings", None)
+    local = getattr(settings, "sandbox_driver", None) == "local"
+    # The local demo administrator can verify the stack before configuring a provider.
+    scripted = (local and body.spec.get("agent_backend") == "fake"
+                and user.tenant_id == "eval" and user.role == "admin" and not user.scopes)
+    if not scripted:
+        require_model()
     kind = get(body.kind)
     store = request.app.state.store.for_tenant(user.tenant_id)
-    settings = getattr(request.app.state, "settings", None)
 
     def parse(values: dict) -> BaseModel:
         try:
@@ -48,7 +53,7 @@ async def submit(
 
     def validate(values: dict) -> dict:
         spec = parse(values)
-        if getattr(settings, "sandbox_driver", None) == "local":
+        if local:
             from sca.agents.local import host_agent_binary, unavailable_source_backend
 
             backend = spec.agent_backend or settings.agent_backend
@@ -71,6 +76,9 @@ async def submit(
         project_id=body.project_id,
         validate_spec=validate,
     )
+    if scripted and (task.spec.get("agent_backend") or settings.agent_backend) != "fake":
+        # The submission may be an idempotent replay of a model-backed task.
+        require_model()
     if created:
         request.app.state.metrics.created.inc()
         trace_id = current_trace_id()

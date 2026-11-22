@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -9,7 +10,7 @@ from typing import Any, Literal
 
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError, SandboxError
-from sca.core.interfaces import SandboxProvider
+from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import (
     AgentContext,
     AgentEvent,
@@ -214,7 +215,7 @@ class _RunEvents:
         name, inputs = call
         data.update(name=name, input=inputs)
         args = _object(inputs)
-        if name == "bash" and isinstance(command := args.get("command"), str):
+        if name in ("bash", "pwsh") and isinstance(command := args.get("command"), str):
             # The projected result carries a tool status, with no numeric shell exit code.
             return AgentEvent(type="command", data={**data, "command": command, "exit_code": None})
         if name in ("edit", "write") and status == "completed" and isinstance(path := args.get("file_path"), str):
@@ -252,14 +253,18 @@ class DshBackend:
     state_transport = "mount"
 
     def __init__(self, default_model: str, version: str = DSH_VERSION,
-                 sandbox_image: str = "sca-sandbox-dsh:latest", *, protocol: GatewayProtocol = "messages",
-                 executable: str = "dsh", python_executable: str = "python3") -> None:
+                 sandbox_image: str = "sca-sandbox-dsh:latest", *,
+                 protocol: GatewayProtocol = "messages", executable: str | None = None,
+                 node_executable: str | None = None, python_executable: str | None = None) -> None:
         self.default_model = default_model
         self.version = version
-        self.sandbox_image = sandbox_image
+        self.sandbox_image = sandbox_image if executable is None else None
         self.protocol = protocol
         self.executable = executable
-        self.python_executable = python_executable
+        self.node_executable = node_executable
+        self.python_executable = python_executable or (sys.executable if executable is not None else "python3")
+        if executable is not None:
+            self.state_transport = "sync"
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         env = {"HOME": ctx.agent_home, "DSH_HOME": f"{ctx.agent_home}/dsh"}
@@ -277,7 +282,8 @@ class DshBackend:
         if not ctx.model_base_url or not key:
             raise AgentTurnError("DSH requires model_base_url and model_api_key")
         if ctx.agent_version and ctx.agent_version != self.version:
-            raise AgentTurnError("DSH version is not installed in the sandbox image")
+            scope = "on the host" if self.executable is not None else "in the sandbox image"
+            raise AgentTurnError(f"DSH version is not installed {scope}")
         if session_id is not None and (not _valid_session(session_id) or key in session_id):
             raise AgentTurnError("Invalid DSH session ID")
         base_url = ctx.model_base_url.rstrip("/")
@@ -285,9 +291,12 @@ class DshBackend:
             base_url += "/v1"
         patch = f"{ctx.agent_home}/sca-dsh.patch.yml"
         guidance = _overlay_guidance(ctx.agent_overlay)
+        command = [self.executable or "dsh"]
+        if self.node_executable is not None:
+            command.insert(0, self.node_executable)
         # Only the launcher path before -- is mapped by the local sandbox.
         argv = [self.python_executable, "-c", LAUNCH, patch, OVERLAY_FILENAME, OVERLAY_MODULE if guidance else "",
-                "--", self.executable, "--profile", "headless", "--patch", patch,
+                "--", *command, "--profile", "headless", "--patch", patch,
                 "--json", "--permission-mode", "workspace-write", "--approval-policy", "never"]
         if session_id is not None:
             argv.extend(["--session-id", session_id])
@@ -302,20 +311,22 @@ class DshBackend:
         result = None
         stderr = ""
         try:
-            async for output in sandbox.exec(sandbox_id, argv, workdir=ctx.workdir, env=env,
-                                             stdin=stdin, timeout_s=timeout_s):
-                if isinstance(output, ExecExit):
-                    result = output
-                    continue
-                if output.stream == "stderr":
-                    stderr = tail(f"{stderr}\n{_redact(output.text, key)}".lstrip("\n"))
-                    continue
-                try:
-                    raw = _redact(_object(json.loads(output.text)), key)
-                except (ValueError, RecursionError):
-                    continue
-                if event := run.consume(raw):
-                    yield event
+            stream = sandbox.exec(sandbox_id, argv, workdir=ctx.workdir, env=env,
+                                  stdin=stdin, timeout_s=timeout_s)
+            async with closing_stream(stream):
+                async for output in stream:
+                    if isinstance(output, ExecExit):
+                        result = output
+                        continue
+                    if output.stream == "stderr":
+                        stderr = tail(f"{stderr}\n{_redact(output.text, key)}".lstrip("\n"))
+                        continue
+                    try:
+                        raw = _redact(_object(json.loads(output.text)), key)
+                    except (ValueError, RecursionError):
+                        continue
+                    if event := run.consume(raw):
+                        yield event
         except SandboxError as exc:
             result = None
             stderr = tail(f"{stderr}\n{_redact(str(exc), key)}".lstrip("\n"))

@@ -80,7 +80,7 @@ def write_context(workspace: Path, bundle: IntentBundle) -> None:
     root = workspace
     for part in (".sca", "context"):
         root = root / part
-        if root.is_symlink():
+        if root.is_symlink() or root.is_junction():
             raise ValueError("symlinked context directory")
         root.mkdir(exist_ok=True)
     import os

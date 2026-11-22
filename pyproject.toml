@@ -11,7 +11,9 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
   "fastapi>=0.115",
-  "uvicorn[standard]>=0.30",
+  "uvicorn[standard]>=0.30; sys_platform != 'win32'",
+  "uvicorn>=0.30; sys_platform == 'win32'",
+  "pywin32>=306; sys_platform == 'win32'",  # Job Objects for local commands
   "pydantic>=2.9",
   "pydantic-settings>=2.5",
   "sqlalchemy[asyncio]>=2.0",

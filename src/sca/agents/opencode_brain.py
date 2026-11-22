@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import fcntl
 import json
 import os
 import re
@@ -27,6 +26,7 @@ from sca.config import Settings, get_settings
 from sca.core.errors import AgentTurnError, SandboxError
 from sca.core.interfaces import SandboxProvider, unpause_sandbox
 from sca.core.models import AgentContext, AgentEvent, SandboxAdditions
+from sca.host import lock_file
 from sca.sandbox.handd import (
     CHUNK,
     DAEMON,
@@ -308,8 +308,8 @@ class OpenCodeBrainBackend:
         root = settings.data_dir.resolve() / "opencode/brain-src"
         root.mkdir(parents=True, exist_ok=True)
         destination = root / version
-        with (root / "source.lock").open("a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with (root / "source.lock").open("a+b") as lock:
+            lock_file(lock)
             for old in root.glob("2.3.0-sca.*"):
                 if old.is_dir() and not (versions / old.name / "meta.json").is_file():
                     shutil.rmtree(old)

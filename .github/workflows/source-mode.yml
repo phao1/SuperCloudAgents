@@ -1,0 +1,108 @@
+name: Source mode
+
+on:
+  push:
+    branches: [evolve, 'supercloudagent*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    env:
+      PYTHONPATH: ${{ github.workspace }}/src
+      PYTHONUTF8: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Prepare Linux PostgreSQL
+        if: runner.os == 'Linux'
+        run: |
+          if ! compgen -G '/usr/lib/postgresql/*/bin/initdb' > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y postgresql
+          fi
+      - name: Prepare macOS PostgreSQL and GNU tools
+        if: runner.os == 'macOS'
+        run: |
+          brew install postgresql@16 coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Install SCA with test dependencies
+        shell: bash
+        run: |
+          git config --global core.autocrlf false
+          python -m venv .venv
+          sca_python=.venv/bin/python
+          if [[ "$RUNNER_OS" == Windows ]]; then sca_python=.venv/Scripts/python.exe; fi
+          echo "SCA_PYTHON=$sca_python" >> "$GITHUB_ENV"
+          "$sca_python" -m pip install -q -e '.[dev]'
+
+      - name: Run unit tests
+        shell: bash
+        run: |
+          "$SCA_PYTHON" - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from pathlib import Path
+          from sca.host import remove_tree
+
+          temp = Path.cwd() / ".pytest-tmp"
+          try:
+              subprocess.run([sys.executable, "-m", "pytest", "tests/unit", "-q",
+                              f"--basetemp={temp}", "-p", "no:cacheprovider"],
+                             check=True, timeout=540)
+          finally:
+              if temp.exists():
+                  if os.name != "nt":
+                      for folder, _, _ in os.walk(temp):
+                          Path(folder).chmod(0o700)
+                  remove_tree(temp)
+          PY
+
+      - name: Smoke test Windows source mode
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:PORTAL_TOKEN = [Guid]::NewGuid().ToString('N')
+          & .\scripts\portal_source.ps1 up
+          if ($LASTEXITCODE -ne 0) { throw 'Windows source startup failed' }
+          & .\.venv\Scripts\python.exe scripts/source_smoke.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows source smoke failed' }
+
+      - name: Smoke test POSIX source mode
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          export PORTAL_TOKEN=$("$SCA_PYTHON" -c 'import secrets; print(secrets.token_hex(32))')
+          bash scripts/portal_source.sh up
+          "$SCA_PYTHON" scripts/source_smoke.py
+
+      - name: Stop Windows source services
+        if: always() && runner.os == 'Windows'
+        shell: powershell
+        run: |
+          .\scripts\portal_source.ps1 down
+          if ($LASTEXITCODE -ne 0) { throw 'Windows source shutdown failed' }
+
+      - name: Stop POSIX source services
+        if: always() && runner.os != 'Windows'
+        run: bash scripts/portal_source.sh down

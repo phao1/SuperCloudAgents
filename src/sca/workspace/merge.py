@@ -57,8 +57,8 @@ async def merge_subtasks(
         )
         out, err = await proc.communicate()
         if proc.returncode and not (conflict_ok and proc.returncode == 1):
-            raise WorkspaceError(err.decode(errors="replace"))
-        return proc.returncode or 0, out.decode(errors="replace")
+            raise WorkspaceError(err.decode("utf-8", errors="replace"))
+        return proc.returncode or 0, out.decode("utf-8", errors="replace")
 
     current = base
     await git("update-ref", f"refs/heads/{branch}", current)
