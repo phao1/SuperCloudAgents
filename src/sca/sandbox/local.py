@@ -84,6 +84,21 @@ def _kill_group(proc: asyncio.subprocess.Process) -> None:
             os.killpg(proc.pid, signal.SIGKILL)
 
 
+def _stop_process(proc: asyncio.subprocess.Process) -> None:
+    _kill_group(proc)
+    if sys.platform != "win32":
+        # A pending wait() needs pipe disconnection even after the group leader has exited.
+        # Process only exposes the stdin transport directly.
+        assert proc.stdin is not None
+        stdin = proc.stdin.transport
+        if stdin.get_write_buffer_size():
+            stdin.abort()
+        else:
+            stdin.close()
+        for fd in (1, 2):
+            proc._transport.get_pipe_transport(fd).close()
+
+
 class LocalSandboxProvider:
     def __init__(self, root: Path) -> None:
         self.root = root.resolve()
@@ -209,8 +224,11 @@ class LocalSandboxProvider:
             active.add(proc)
 
             async def cleanup(kill: bool) -> None:
-                # Also reap children left behind by a command that exited successfully.
-                _kill_group(proc)
+                if kill:
+                    _stop_process(proc)
+                else:
+                    # Also terminate children that closed their pipes before the command exited.
+                    _kill_group(proc)
                 await proc.wait()
 
             try:
@@ -231,7 +249,7 @@ class LocalSandboxProvider:
         directory = self._directory(sandbox_id)
         active = self._processes.pop(sandbox_id, ())
         for proc in active:
-            _kill_group(proc)
+            _stop_process(proc)
         await asyncio.gather(*(proc.wait() for proc in active))
         with suppress(FileNotFoundError):
             await asyncio.to_thread(remove_tree, directory)

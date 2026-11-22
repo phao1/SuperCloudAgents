@@ -29,6 +29,7 @@ LITELLM_VERSION = "1.110.2"
 OPENCODE_VERSION = "2.3.0"
 OPENCODE_COMMIT = "a6b15d33daf6ab7d35569f6d711fdb630b9f04e7"
 OPENCODE_REPO = "https://github.com/anomalyco/opencode"
+DSH_NATIVE_PACKAGES = ("@deepseek-ai/dsh-subprocess-local", "koffi", "node-pty")
 
 # Published SHA-256 digests from the GitHub release assets for the two tags.
 TEMPORAL_DIGESTS = {
@@ -184,7 +185,10 @@ def install_dsh(data: Path) -> None:
     from sca.host import host_executable
 
     settings = Settings(data_dir=data, sandbox_driver="local")
-    if installed_dsh(settings):
+    prefix = dsh_install_dir(settings)
+    stamp = prefix / ".sca-native-scripts"
+    if (installed_dsh(settings) and stamp.is_file()
+            and stamp.read_text(encoding="utf-8").strip() == settings.dsh_version):
         return
     npm = host_executable("npm.cmd" if sys.platform == "win32" else "npm")
     if npm is None:
@@ -193,7 +197,6 @@ def install_dsh(data: Path) -> None:
     if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?(?:\+[a-zA-Z0-9.-]+)?",
                         settings.dsh_version):
         raise ValueError("SCA_DSH_VERSION 必须是明确的 npm 版本号。")
-    prefix = dsh_install_dir(settings)
     prefix.mkdir(parents=True, exist_ok=True)
     print("安装本机 DeepSeek Harness…", flush=True)
     command: list[str | Path] = [npm]
@@ -206,13 +209,23 @@ def install_dsh(data: Path) -> None:
         command = [node, entry]
     env = {k: v for k, v in os.environ.items()
            if not k.startswith("SCA_") and k not in ("PORTAL_TOKEN", "DEEPSEEK_API_KEY", "LITELLM_MASTER_KEY")}
+    manifest = prefix / "package.json"
+    metadata = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {"private": True}
+    metadata["allowScripts"] = {**dict.fromkeys(DSH_NATIVE_PACKAGES, True),
+                                "@google/genai": False, "protobufjs": False}
+    manifest.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    stamp.unlink(missing_ok=True)
+    log = data / "run" / "dsh.log"
+    # A targeted rebuild also limits script execution on npm versions that ignore allowScripts.
     run_logged(
         [*command, "install", "--prefix", prefix, "--omit=dev", "--no-audit", "--no-fund",
-         "--save-exact", f"{DSH_PACKAGE}@{settings.dsh_version}"],
-        data / "run" / "dsh.log", env=env,
+         "--ignore-scripts", "--save-exact", f"{DSH_PACKAGE}@{settings.dsh_version}"], log, env=env,
     )
+    run_logged([*command, "rebuild", "--prefix", prefix, "--foreground-scripts", *DSH_NATIVE_PACKAGES],
+               log, env=env)
     if not installed_dsh(settings):
         raise ValueError("DeepSeek Harness 安装不完整，请查看 .data/run/dsh.log。")
+    stamp.write_text(settings.dsh_version + "\n", encoding="utf-8")
 
 
 def gateway_env(venv: Path, env: dict[str, str]) -> dict[str, str]:
@@ -307,6 +320,27 @@ def install_postgres(tools: Path) -> Path:
 
 def pg_tools_present(bin_dir: Path) -> bool:
     return all((bin_dir / f"{name}.exe").is_file() for name in ("initdb", "pg_ctl", "postgres", "psql"))
+
+
+def windows_user_sid() -> str:
+    import win32api
+    import win32con
+    import win32security
+
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
+    try:
+        sid, _ = win32security.GetTokenInformation(token, win32security.TokenUser)
+        return win32security.ConvertSidToStringSid(sid)
+    finally:
+        token.Close()
+
+
+def grant_postgres_access(directory: Path, password_file: Path, server_log: Path, log: Path) -> None:
+    # The restricted PostgreSQL token retains the user SID and disables the Administrators SID.
+    sid = windows_user_sid()
+    icacls = Path(os.environ["SystemRoot"]) / "System32" / "icacls.exe"
+    for path, flags in ((directory, "(OI)(CI)"), (password_file, ""), (server_log, "")):
+        run_logged([icacls, path, "/grant", f"*{sid}:{flags}F", "/Q"], log, timeout=30)
 
 
 def process_identity(pid: int) -> str | None:
@@ -447,12 +481,9 @@ class WindowsSource:
     def start_postgres(self) -> None:
         bin_dir = self.find_postgres(download=True)
         log = self.runtime / "postgres.log"
-        if not (self.pg / "PG_VERSION").is_file():
-            if not self.pg_password.is_file():
-                write_password(self.pg_password)
-            run_logged([bin_dir / "initdb.exe", "-D", self.pg, "-U", "sca",
-                        "--auth=scram-sha-256", "--encoding=UTF8", "--no-locale",
-                        "--pwfile", self.pg_password], log, timeout=120)
+        initialized = (self.pg / "PG_VERSION").is_file()
+        if not initialized and not self.pg_password.is_file():
+            write_password(self.pg_password)
         if not self.pg_password.is_file():
             raise ValueError("本机 PostgreSQL 密码文件缺失，请恢复 .data/pg-password。")
         pid_file = self.pg / "postmaster.pid"
@@ -462,11 +493,20 @@ class WindowsSource:
             check=False, timeout=10,
         ).returncode == 0
         if not running:
+            self.pg.mkdir(exist_ok=True)
+            # pg_ctl's restricted cmd.exe opens -l itself. Keep that file free of launcher handles.
+            server_log = self.runtime / "postgres-server.log"
+            server_log.touch(exist_ok=True)
+            grant_postgres_access(self.pg, self.pg_password, server_log, log)
+            if not initialized:
+                run_logged([bin_dir / "initdb.exe", "-D", self.pg, "-U", "sca",
+                            "--auth=scram-sha-256", "--encoding=UTF8", "--no-locale",
+                            "--pwfile", self.pg_password], log, timeout=120)
             keep_port = self.pg_port.is_file() and any(self.owned(s) for s in ("api", "worker", "litellm"))
             port = select_port(int(self.pg_port.read_text(encoding="utf-8")) if keep_port else 5432,
                                strict=keep_port)
-            run_logged([*ctl, "-l", log, "-w", "-t", "60", "-o", f"-h 127.0.0.1 -p {port}",
-                        "start"], log, timeout=80)
+            run_logged([*ctl, "-l", server_log, "-w", "-t", "60", "-o", f"-h 127.0.0.1 -p {port}",
+                        "start"], log, cwd=self.pg, timeout=80)
         self.pg_bin.write_text(str(bin_dir), encoding="utf-8")
         pid, _, _, port, *_ = pid_file.read_text(encoding="utf-8", errors="replace").splitlines()
         self.remember("postgres", int(pid))
@@ -620,11 +660,13 @@ class WindowsSource:
     def logs(self, service: str | None) -> None:
         names = (service,) if service else SERVICES
         for name in names:
-            path = self.runtime / f"{name}.log"
-            if path.is_file():
-                with path.open(encoding="utf-8", errors="replace") as stream:
-                    print(f"== {name} ==")
-                    print("".join(deque(stream, maxlen=100)), end="")
+            logs = (name, "postgres-server") if name == "postgres" else (name,)
+            for log in logs:
+                path = self.runtime / f"{log}.log"
+                if path.is_file():
+                    with path.open(encoding="utf-8", errors="replace") as stream:
+                        print(f"== {log} ==")
+                        print("".join(deque(stream, maxlen=100)), end="")
 
 
 def manage_windows(command: str, service: str | None = None) -> None:

@@ -97,12 +97,16 @@ def dsh_fixture(settings: Settings) -> Path:
     return executable(package / "lib" / "bin.js" if sys.platform == "win32" else modules / ".bin/dsh")
 
 
-def test_dsh_installs_requested_version_once(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cached", [False, True])
+def test_dsh_installs_requested_version_once(tmp_path, monkeypatch, cached):
     from sca import host
 
     data = tmp_path / ".data"
     monkeypatch.setenv("SCA_DSH_VERSION", "0.2.2-rc.10")
     settings = source_settings(data, dsh_version="0.2.2-rc.10")
+    prefix = dsh_install_dir(settings)
+    if cached:
+        dsh_fixture(settings)
     npm = tmp_path / "npm.cmd"
     executable(tmp_path / "node_modules/npm/bin/npm-cli.js")
     monkeypatch.setattr(host, "host_executable", lambda name: npm if name.startswith("npm") else tmp_path / "node")
@@ -110,14 +114,24 @@ def test_dsh_installs_requested_version_once(tmp_path, monkeypatch):
 
     def install(command, log, **kwargs):
         calls.append(command)
-        assert command[command.index("--prefix") + 1] == dsh_install_dir(settings)
-        assert command[-1] == "@deepseek-ai/dsh@0.2.2-rc.10"
-        dsh_fixture(settings)
+        assert command[command.index("--prefix") + 1] == prefix
+        if "install" in command:
+            assert "--ignore-scripts" in command
+            assert command[-1] == "@deepseek-ai/dsh@0.2.2-rc.10"
+            dsh_fixture(settings)
+        else:
+            assert "rebuild" in command
+            assert command[-3:] == ["@deepseek-ai/dsh-subprocess-local", "koffi", "node-pty"]
+            assert json.loads((prefix / "package.json").read_text(encoding="utf-8"))["allowScripts"] == {
+                "@deepseek-ai/dsh-subprocess-local": True, "koffi": True, "node-pty": True,
+                "@google/genai": False, "protobufjs": False,
+            }
 
     monkeypatch.setattr(portal_source, "run_logged", install)
     portal_source.install_dsh(data)
     portal_source.install_dsh(data)
-    assert len(calls) == 1
+    first, second = calls
+    assert "install" in first and "rebuild" in second
     assert installed_dsh(settings) is not None
     assert installed_dsh(settings.model_copy(update={"dsh_version": "0.2.2"})) is None
 
@@ -150,6 +164,55 @@ def test_postgres_portable_archive_is_verified(tmp_path, monkeypatch):
     tools = portal_source.install_postgres(tmp_path)
     assert portal_source.pg_tools_present(tools)
     assert (tools.parent / "share/postgresql.conf.sample").is_file()
+
+
+@pytest.mark.parametrize("initialized", [False, True])
+def test_windows_postgres_grants_access_and_uses_a_dedicated_server_log(tmp_path, monkeypatch, initialized):
+    stack = portal_source.WindowsSource(tmp_path / "repo with spaces")
+    stack.runtime.mkdir(parents=True)
+    bin_dir = tmp_path / "PostgreSQL Tools" / "bin"
+    server_log = stack.runtime / "postgres-server.log"
+    if initialized:
+        stack.pg.mkdir()
+        (stack.pg / "PG_VERSION").write_text("17\n", encoding="utf-8")
+        portal_source.write_password(stack.pg_password)
+    monkeypatch.setenv("SystemRoot", str(tmp_path / "Windows"))
+    sid = portal_source.windows_user_sid() if sys.platform == "win32" else "S-1-5-21-123-456-789-1001"
+    monkeypatch.setattr(portal_source, "windows_user_sid", lambda: sid)
+    monkeypatch.setattr(portal_source, "select_port", lambda port, strict: 55432)
+    monkeypatch.setattr(stack, "find_postgres", lambda *, download: bin_dir)
+    monkeypatch.setattr(stack, "remember", lambda name, pid: None)
+    calls = []
+
+    def run(argv, log, **kwargs):
+        program = Path(argv[0]).stem
+        calls.append(program)
+        assert log == stack.runtime / "postgres.log"
+        if program == "icacls":
+            path, acl = {
+                1: (stack.pg, "(OI)(CI)F"),
+                2: (stack.pg_password, "F"),
+                3: (server_log, "F"),
+            }[len(calls)]
+            assert path.exists()
+            assert argv[1:] == [path, "/grant", f"*{sid}:{acl}", "/Q"]
+        elif program == "initdb":
+            assert "--auth=scram-sha-256" in argv
+            assert argv[argv.index("--pwfile") + 1] == stack.pg_password
+        elif program == "pg_ctl":
+            assert argv[argv.index("-l") + 1] == server_log
+            assert argv[argv.index("-o") + 1] == "-h 127.0.0.1 -p 55432"
+            assert "-w" in argv and kwargs["cwd"] == stack.pg
+            (stack.pg / "postmaster.pid").write_text("123\ndata\n0\n55432\n", encoding="utf-8")
+        elif program == "psql":
+            assert argv[argv.index("-p") + 1] == "55432"
+            assert "CREATE DATABASE sca" in kwargs["input_text"]
+            assert "CREATE DATABASE litellm" in kwargs["input_text"]
+
+    monkeypatch.setattr(portal_source, "run_logged", run)
+    stack.start_postgres()
+    assert calls == ["icacls"] * 3 + ([] if initialized else ["initdb"]) + ["pg_ctl", "psql"]
+    assert stack.pg_port.read_text(encoding="utf-8").strip() == "55432"
 
 
 def test_windows_configuration_persists_token_and_defaults_to_dsh(tmp_path, capsys, monkeypatch):
@@ -208,6 +271,7 @@ def test_source_smoke_uses_fake_and_checks_patch(tmp_path):
                 spec = json.loads(request.content)["spec"]
                 assert spec["agent_backend"] == "fake" and "sca-fake" in spec["instruction"]
                 assert spec["auto_finish"] and spec["verify_command"] == "grep -qx ready result.txt"
+                assert spec["repo_url"] == (tmp_path / "repo with spaces").as_posix()
                 assert (Path(spec["repo_url"]) / "result.txt").read_bytes() == b"before\n"
                 return httpx.Response(201, json={"id": str(task_id)})
             case path if path == task:

@@ -1,8 +1,10 @@
 import asyncio
 import io
+import os
+import signal
 import sys
 import tarfile
-from contextlib import aclosing
+from contextlib import aclosing, suppress
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,7 @@ from sca.workspace.transport import SyncTransport
 
 @pytest.fixture
 async def sandbox(tmp_path: Path):
-    provider = LocalSandboxProvider(tmp_path / "sandboxes")
+    provider = LocalSandboxProvider(tmp_path / "local sandboxes")
     await provider.create("task-1", SandboxSpec(
         image="unused-image", env={"EXPLICIT": "original"}, labels={"sca.task_id": "1"},
     ))
@@ -84,6 +86,32 @@ async def test_destroy_and_generator_close_stop_active_commands(sandbox):
     assert not (sandbox.root / "task-1").exists()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Exercises POSIX process groups and pipes")
+@pytest.mark.parametrize("action", ["close", "destroy"])
+async def test_posix_cleanup_closes_pipes_even_if_a_descendant_keeps_them_open(sandbox, action):
+    program = """
+import subprocess, sys, time
+
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'],
+                         start_new_session=True)
+print(child.pid, flush=True)
+time.sleep(30)
+"""
+    child_pid = None
+    try:
+        async with asyncio.timeout(5), aclosing(sandbox.exec(
+            "task-1", [sys.executable, "-c", program], stdin=b"x" * 1024**2,
+        )) as command:
+            child_pid = int((await anext(command)).text)
+            if action == "destroy":
+                await sandbox.destroy("task-1")
+                assert await anext(command) == ExecExit(exit_code=-signal.SIGKILL)
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(child_pid, signal.SIGKILL)
+
+
 async def test_durable_names_and_file_transfer(sandbox, tmp_path):
     assert await sandbox.create("task-1", SandboxSpec(image="ignored")) == "task-1"
     restarted = LocalSandboxProvider(sandbox.root)
@@ -143,8 +171,9 @@ print(child.pid, flush=True)
 
 
 async def test_local_workspace_checkpoint_uses_git_bundle(sandbox, best_of_repo, tmp_path):
-    workspace = GitWorkspace(tmp_path / "task-state", "sca/checkpoint")
-    before = await workspace.prepare(str(best_of_repo.task_dir), "main")
+    repo = best_of_repo.task_dir.rename(tmp_path / "repo with spaces")
+    workspace = GitWorkspace(tmp_path / "task state", "sca/checkpoint")
+    before = await workspace.prepare(repo.as_posix(), "main")
     assert (await workspace._git("-C", str(workspace.workspace), "config", "--local",
                                  "core.autocrlf")).strip() == "false"
     transport = SyncTransport(sandbox)
