@@ -25,6 +25,8 @@ from sca.eval.suites import (
     select_cases,
 )
 from sca.eval.trajectory import evaluate
+from sca.gateway.configuration import local_default_model
+from sca.gateway.model_providers import read_registry
 from sca.host import remove_tree
 from sca.orchestration.provider_errors import account_failure
 
@@ -89,10 +91,16 @@ class EvalActivities:
             "created_by": "cli", "status": "running",
         })
         await self.store.start_eval_run(request["id"])
-        return {"cases": [{**case, "kind": suite.get("kind", "coding"),
-                           "suite_hash": suite["hash"],
-                           "spec": {**suite.get("defaults", {}), **case["spec"]}}
-                          for case in cases]}
+        models = read_registry(self.settings.data_dir).models
+        default = local_default_model(self.settings.data_dir, self.settings.default_model)
+        variant_model = request.get("variant", {}).get("model")
+        plan = []
+        for case in cases:
+            spec = {**suite.get("defaults", {}), **case["spec"]}
+            model = models.get(variant_model or spec.get("model") or default)
+            plan.append({**case, "kind": suite.get("kind", "coding"), "suite_hash": suite["hash"],
+                         "spec": spec, **({"model_unpriced": True} if model and model.unpriced else {})})
+        return {"cases": plan}
 
     async def git(self, directory: Path, *args: str) -> None:
         proc = await asyncio.create_subprocess_exec(

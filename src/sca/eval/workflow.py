@@ -43,15 +43,25 @@ class EvalRunWorkflow:
         spent = 0
         collected = errored = 0
         pending = [(case, repeat) for repeat in range(request["repeat"]) for case in plan["cases"]]
+        case_budget = round(request["case_budget"] * 1e6)
+        budget = round(request["budget"] * 1e6)
         while pending:
             batch = []
-            for _ in range(min(request["concurrency"], len(pending))):
-                if spent + round(request["case_budget"] * 1e6) * (len(batch) + 1) > round(request["budget"] * 1e6):
+            deferred = []
+            reserved = 0
+            for index, (case, repeat) in enumerate(pending):
+                if len(batch) == request["concurrency"]:
+                    deferred.extend(pending[index:])
                     break
-                case, repeat = pending.pop(0)
+                if not case.get("model_unpriced"):
+                    if spent + reserved + case_budget > budget:
+                        deferred.append((case, repeat))
+                        continue
+                    reserved += case_budget
                 batch.append({**request, "case": case, "iteration": repeat})
             if not batch:
                 break
+            pending = deferred
             tasks = await asyncio.gather(*[
                 workflow.execute_activity("eval_submit", item, **options) for item in batch])
             active = dict(zip(tasks, batch, strict=True))

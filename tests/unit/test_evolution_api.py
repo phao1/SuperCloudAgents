@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from sca.api.authz import ForbiddenError
 from sca.api.evolutions import router
 from sca.core.models import Principal
+from sca.gateway.model_providers import ProviderInput, ProviderRegistry
 
 
 @pytest.fixture
@@ -21,7 +22,8 @@ async def harness(tmp_path, monkeypatch):
 
     suite = tmp_path / 'suite'
     suite.mkdir()
-    settings = SimpleNamespace(eval_suites_dir=tmp_path, task_queue='q', dsh_version='0.2.2-rc.5')
+    settings = SimpleNamespace(data_dir=tmp_path, eval_suites_dir=tmp_path, task_queue='q',
+                               dsh_version='0.2.2-rc.5')
     monkeypatch.setattr(evolutions, 'get_settings', lambda: settings)
 
     async def inline(function, *args):
@@ -75,6 +77,27 @@ async def test_start_creates_row_before_workflow(harness, tmp_path):
     assert response.json()['status'] == 'queued'
     assert (await http.get('/v1/evolutions')).status_code == 200
     assert (await http.get('/v1/champions')).status_code == 200
+
+
+async def test_unpriced_evolution_uses_local_default_and_explicit_proposer(harness, tmp_path, monkeypatch):
+    http, store, temporal, _, _, _ = harness
+    env = tmp_path / 'fixture.env'
+    env.touch()
+    monkeypatch.setenv('SCA_PORTAL_LOCAL_CONFIG', str(env))
+    monkeypatch.setattr('sca.config.get_settings', lambda: SimpleNamespace(data_dir=tmp_path))
+    ProviderRegistry().with_provider(uuid4(), ProviderInput(
+        name='Local', type='openai-compatible', base_url='http://localhost:11434/v1',
+        models=[{'name': 'local-eval', 'upstream_model': 'coding'},
+                {'name': 'local-proposer', 'upstream_model': 'reflection'}],
+    )).save(tmp_path)
+    response = await http.post('/v1/evolutions', json={
+        'suite': 'suite', 'agent_backend': 'dsh', 'evolve_model': 'local-proposer',
+    })
+    assert response.status_code == 201
+    config = store.create_evolution.call_args.args[0]['config']
+    assert config['model'] == 'local-eval' and config['model_unpriced'] is True
+    assert config['evolve_model'] == 'local-proposer'
+    assert temporal.start_workflow.call_args.args[1]['config'] == config
 
 
 @pytest.mark.parametrize('version', [None, '0.2.2-rc.5'])

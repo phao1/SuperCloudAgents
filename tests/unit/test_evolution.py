@@ -101,6 +101,27 @@ def test_errored_or_zero_cost_runs_cannot_win_quality_gate():
     assert not gate(baseline, candidate)
 
 
+def test_unpriced_evolution_gates_on_measured_total_tokens():
+    def local(tokens, passes=(True, True)):
+        evaluated = run(passes, cost=0)
+        evaluated['variant'] = {'model_unpriced': True}
+        for result in evaluated['results']:
+            result['tokens'] = tokens
+        return evaluated
+
+    baseline, efficient, slower, missing = local(100), local(85), local(101), local(0)
+    assert metrics(baseline)['tokens'] == 200
+    assert select_best([slower, missing, efficient]) == efficient
+    assert dev_basis(baseline, efficient) == 'efficiency'
+    assert dev_basis(baseline, missing) is None
+    assert dev_basis(local(100, (True, False)), baseline) == 'quality'
+    assert gate(baseline, efficient, 0) and not gate(baseline, slower, 0)
+    assert gate(baseline, slower, .25) and not gate(baseline, missing)
+    assert not gate(baseline, run((True, True), cost=.1))
+    efficient['results'][0]['acceptance_passed'] = None
+    assert not gate(baseline, efficient)
+
+
 def test_policy_cannot_be_removed_and_hash_matches_agent():
     from sca.core.models import AgentOverlay
 

@@ -18,7 +18,8 @@ from sca.evolve.scheduler import schedule_workflow_id
 
 @pytest.fixture
 async def api(tmp_path, monkeypatch):
-    settings = SimpleNamespace(eval_suites_dir=tmp_path, task_queue="queue", dsh_version="0.2.2-rc.5")
+    settings = SimpleNamespace(data_dir=tmp_path, eval_suites_dir=tmp_path, task_queue="queue",
+                               dsh_version="0.2.2-rc.5")
     monkeypatch.setattr(evolutions, "get_settings", lambda: settings)
     monkeypatch.setattr(harvest, "get_settings", lambda: settings)
     (tmp_path / "suite").mkdir()

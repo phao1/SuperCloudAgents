@@ -57,7 +57,7 @@ class EvolutionWorkflow:
 
     async def evaluate(self, overlay: dict, split: str) -> dict | None:
         remaining = round(self.config['budget_usd'] - self.spent, 9)
-        if self.stopped or remaining < self.config['case_budget']:
+        if self.stopped or (not self.config.get('model_unpriced') and remaining < self.config['case_budget']):
             return None
         run_id = str(workflow.uuid4())
         payload = await self.act('prepare_run', {'run_id': run_id, 'overlay': overlay,
@@ -72,6 +72,10 @@ class EvolutionWorkflow:
         if run['status'] != 'failed' or not self.enforce_eval_integrity:
             await self.act('status', {'status': 'running', 'spent_usd': self.spent})
         return run
+
+    def budget_exhausted(self) -> bool:
+        return (not self.config.get('model_unpriced')
+                and self.config['budget_usd'] - self.spent < self.config['case_budget'])
 
     def evaluation_failure(self, run: dict | None, *, candidate: bool = False) -> str | None:
         if not self.enforce_eval_integrity or run is None:
@@ -95,7 +99,7 @@ class EvolutionWorkflow:
                 if self.stopped:
                     status = 'stopped'
                     break
-                if self.config['budget_usd'] - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 dev_run = dev_run or await self.evaluate(champion['overlay'], 'dev')
@@ -107,7 +111,7 @@ class EvolutionWorkflow:
                 if not dev_run or dev_run['status'] != 'completed':
                     status = 'budget_exhausted'
                     break
-                if self.config['budget_usd'] - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 proposals = await self.act('propose', {'overlay': champion['overlay'],
@@ -180,7 +184,7 @@ class EvolutionWorkflow:
                 if self.stopped:
                     status = 'stopped'
                     break
-                if self.config['budget_usd'] - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 if stale >= self.config['patience']:

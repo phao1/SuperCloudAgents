@@ -292,6 +292,18 @@ def serve_gateway(config: str) -> None:
     # Compose's env_file takes precedence for provider keys, then sets DATABASE_URL explicitly.
     load_dotenv(".env", override=True, encoding="utf-8")
     os.environ["DATABASE_URL"] = database_url
+    # The gateway has its own venv. Load provider credentials without importing the SCA app.
+    config_path = Path(config)
+    if config_path.name == "litellm.generated.yaml":
+        try:
+            registry = json.loads(config_path.with_name("model-providers.json").read_bytes())
+            keys = registry["keys"]
+            if not isinstance(keys, dict) or any(not re.fullmatch(r"SCA_UPSTREAM_[0-9A-F]{32}", name)
+                                                 for name in keys):
+                raise ValueError("invalid provider environment")
+            os.environ.update(keys)
+        except (OSError, ValueError, KeyError, TypeError):
+            raise ValueError("无法读取本机模型接入密钥") from None
     from litellm.proxy.proxy_cli import run_server
 
     run_server(args=["--config", config, "--host", "127.0.0.1",
@@ -609,12 +621,14 @@ class WindowsSource:
         raise ValueError(f"{name} 启动超时，请查看 .data/run/{name}.log。")
 
     def start_gateway(self, env: dict[str, str], seconds: int = 300) -> None:
-        from sca.gateway.configuration import model_configured
+        from sca.gateway.configuration import deepseek_configured
+        from sca.gateway.model_providers import gateway_config, read_registry
 
         venv = self.data / "litellm-venv"
-        name = "config.yaml" if model_configured(self.dotenv) else "history.yaml"
+        config = gateway_config(self.root, self.data, read_registry(self.data),
+                                deepseek=deepseek_configured(self.dotenv), docker=False)
         self.start("litellm", [venv_bin(venv, "python"), Path(__file__).resolve(), "gateway",
-                               self.root / "deploy" / "litellm" / name], gateway_env(venv, env), 4000)
+                               config], gateway_env(venv, env), 4000)
         self.wait("litellm", lambda: http_ready("http://127.0.0.1:4000/health/readiness"), seconds)
 
     def up(self) -> None:

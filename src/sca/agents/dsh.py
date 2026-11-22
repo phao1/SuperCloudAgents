@@ -120,10 +120,11 @@ def _overlay_guidance(overlay: AgentOverlay | None) -> str:
 
 
 def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *,
-                 max_output_tokens: int = DSH_DEFAULT_MAX_OUTPUT_TOKENS, guidance: str = "") -> str:
+                 max_output_tokens: int = DSH_DEFAULT_MAX_OUTPUT_TOKENS, guidance: str = "",
+                 registered: bool = False, context_window: int | None = None) -> str:
     disabled = ["tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http",
                 "llm-deepseek-account", "session-title-llm"]
-    if protocol == "messages":
+    if protocol == "messages" and not registered:
         provider = "deepseek-official"
         disabled.append("llm-pi-ai")
         # An explicit base URL in the last overlay overrides prior profile settings.
@@ -136,12 +137,18 @@ def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *,
         compat: dict[str, str | bool] = {
             "maxTokensField": "max_tokens", "supportsStore": False, "supportsDeveloperRole": False,
         }
-        if model.startswith("deepseek-"):
+        if not registered and model.startswith("deepseek-"):
             compat["thinkingFormat"] = "deepseek"
+        catalog = {"id": model, "maxTokens": max_output_tokens}
+        if context_window is not None:
+            max_output_tokens = min(max_output_tokens, max(1, context_window // 4))
+            catalog.update(contextWindow=context_window, maxTokens=max_output_tokens)
+        # Pi's Messages client adds /v1/messages to the route's base URL.
+        route_url = base_url.rstrip("/").removesuffix("/v1") if protocol == "messages" else base_url
         adapter = {"id": "llm-pi-ai", "config": {"providers": {provider: {
-            "baseURL": base_url, "api": "openai-completions", "apiKeyEnv": KEY_ENV,
-            # The adapter uses an explicit per-model cap as the request default.
-            "models": [{"id": model, "maxTokens": max_output_tokens}], "compat": compat,
+            "baseURL": route_url, "apiKeyEnv": KEY_ENV, "models": [catalog],
+            **({"api": "anthropic-messages", "cacheRetention": "none"} if protocol == "messages"
+               else {"api": "openai-completions", "compat": compat}),
         }}}}
     rows = [
         *({"id": name, "disabled": True} for name in disabled),
@@ -364,7 +371,8 @@ class DshBackend:
                "DSH_PERMISSION_MODE": "workspace-write", "DSH_TELEMETRY_MODE": "DISABLED",
                KEY_ENV: key, "DEEPSEEK_BASE_URL": base_url}
         config = render_patch(base_url, ctx.model or self.default_model, self.protocol,
-                              max_output_tokens=self.max_output_tokens, guidance=guidance)
+                              max_output_tokens=self.max_output_tokens, guidance=guidance,
+                              registered=ctx.model_registered, context_window=ctx.model_context_window)
         stdin = config.encode("ascii") + b"\n" + prompt.encode()
 
         run = _RunEvents(session_id)

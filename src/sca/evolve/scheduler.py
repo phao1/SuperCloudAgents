@@ -27,6 +27,7 @@ with workflow.unsafe.imports_passed_through():
     from sca.evolve.champions import PLATFORM_TENANT
     from sca.evolve.models import EvolutionConfig
     from sca.gateway.configuration import model_configured
+    from sca.gateway.model_providers import read_registry
 
 SCHEDULER_ID = "sca-evolution-scheduler"
 
@@ -132,12 +133,16 @@ class EvolutionSchedulerActivities:
             **schedule["config"], suite=str(path), agent_version=schedule["agent_version"],
             model=schedule["model"], agent_backend=schedule.get("agent_backend", "opencode"),
         )
+        values = config.model_dump()
+        model = read_registry(self.settings.data_dir).models.get(config.model)
+        if model and model.unpriced:
+            values['model_unpriced'] = True
         champion = await self.store.get_active_champion(
             schedule["agent_version"], config.model, agent_backend=config.agent_backend,
         )
         return {
             "schedule_id": request["schedule_id"], "tenant_id": PLATFORM_TENANT,
-            "created_by": f"schedule:{request['schedule_id']}", "config": config.model_dump(),
+            "created_by": f"schedule:{request['schedule_id']}", "config": values,
             "suite_hash": suite["hash"], "overlay": champion["overlay"] if champion else {},
             "champion_id": str(champion["id"]) if champion else None,
             "previous_run_id": str(schedule["last_eval_run_id"]) if schedule["last_eval_run_id"] else None,

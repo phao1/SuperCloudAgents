@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 import sys
+from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -17,18 +18,27 @@ from sqlalchemy import func, select
 from temporalio.service import RPCError
 
 from sca.admission.order import tenant_slot_limit
-from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_PATH, PROMPT_SUITE
+from sca.agents.opencode_prompt import PROMPT_PATH, PROMPT_SUITE
 from sca.api.authz import ForbiddenError, GuestPrincipal, authorize, platform_admin_store, principal
 from sca.api.evals import can_rescore
 from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
 from sca.db.schema import plans, tasks, tenants, usage_daily
-from sca.gateway.configuration import model_configured
+from sca.gateway.configuration import model_configured, prefer_model
 from sca.gateway.health import ProviderHealth
+from sca.gateway.model_providers import read_registry
 
 router = APIRouter()
-_key_lock = asyncio.Lock()
+model_config_lock = asyncio.Lock()
+
+
+async def model_admin(request: Request,
+                      user: Annotated[Principal, Depends(authorize('quota'))]) -> list[str]:
+    command = _restart_gateway_command(os.environ.get('SCA_PORTAL_LOCAL_CONFIG'))
+    if user.tenant_id != 'eval' or not command or not _local_client(request):
+        raise HTTPException(403, '请使用本机 eval 管理员令牌配置模型')
+    return command
 
 
 class ProviderKey(BaseModel):
@@ -36,34 +46,39 @@ class ProviderKey(BaseModel):
 
 
 @router.post('/v1/portal/provider-key')
-async def set_provider_key(body: ProviderKey, request: Request,
-                           user: Annotated[Principal, Depends(authorize('quota'))]) -> dict:
+async def set_provider_key(body: ProviderKey, command: Annotated[list[str], Depends(model_admin)]) -> dict:
     """Configure the local demo gateway; this capability is opt-in and administrator-only."""
     config = os.environ.get('SCA_PORTAL_LOCAL_CONFIG')
-    command = _restart_gateway_command(config)
-    if not command or not request.client or request.client.host not in ('127.0.0.1', '::1'):
+    if not config or not command:
         raise HTTPException(status_code=403, detail='本地配置不可用')
     key = body.key.get_secret_value()
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,256}', key):
         raise HTTPException(status_code=422, detail='密钥格式无效')
     path = Path(config)
-    async with _key_lock:
+    async with model_config_lock:
         set_key(str(path), 'DEEPSEEK_API_KEY', key)
         path.chmod(0o600)
-        try:
-            process = await asyncio.create_subprocess_exec(
-                *command,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            )
-        except OSError:
-            return {'saved': True, 'gateway_restarted': False}
-        try:
-            await asyncio.wait_for(process.wait(), 120)
-        except TimeoutError:
-            process.kill()
+        return {'saved': True, 'gateway_restarted': await restart_gateway(command)}
+
+
+async def restart_gateway(command: list[str]) -> bool:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            *command, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    try:
+        await asyncio.wait_for(process.wait(), 120)
+    except (TimeoutError, asyncio.CancelledError) as exc:
+        if process.returncode is None:
+            with suppress(ProcessLookupError):
+                process.kill()
             await process.wait()
-            return {'saved': True, 'gateway_restarted': False}
-        return {'saved': True, 'gateway_restarted': process.returncode == 0}
+        if isinstance(exc, asyncio.CancelledError):
+            raise
+        return False
+    return process.returncode == 0
 
 
 async def gateway_models() -> tuple[bool, list[str]]:
@@ -90,6 +105,24 @@ async def gateway_models() -> tuple[bool, list[str]]:
             return True, []
 
 
+# Model catalog. The Portal exposes aliases and limits independently from provider administration.
+def model_catalog(settings: Settings, models: list[str]) -> dict:
+    configured = read_registry(settings.data_dir).models
+    return {
+        "data": [{"id": name,
+                  "context_window": configured[name].context_window if name in configured else None,
+                  "unpriced": name in configured and configured[name].unpriced} for name in models],
+        "default_model": prefer_model(settings.default_model, models),
+        "evolve_model": prefer_model(settings.evolve_model, models),
+    }
+
+
+@router.get("/v1/models")
+async def models_catalog(user: Annotated[Principal, Depends(authorize("read"))]) -> dict:
+    _, models = await gateway_models()
+    return model_catalog(get_settings(), models)
+
+
 async def temporal_reachable(request: Request) -> bool:
     client = getattr(request.app.state.orchestrator, "client", None)
     if client is None:
@@ -109,6 +142,7 @@ async def config(request: Request,
         return {"guest_view": True, "guest_tenant": user.tenant_id, "model_configured": configured}
     settings = get_settings()
     (gateway, models), temporal = await asyncio.gather(gateway_models(), temporal_reachable(request))
+    catalog = model_catalog(settings, models)
     provider_health = ProviderHealth(settings.data_dir).read()
     backends = ["codex"]
     try:
@@ -119,7 +153,9 @@ async def config(request: Request,
         backends.extend(["opencode", "opencode-brain"])
     backends.extend(["pi", "dsh"])
     return {"guest_view": False, "model_configured": configured,
-            "agent_backends": backends, "default_model": settings.default_model,
+            "agent_backends": backends, "default_model": catalog["default_model"],
+            "evolve_model": catalog["evolve_model"],
+            "unpriced_models": [row["id"] for row in catalog["data"] if row["unpriced"]],
             "default_agent_backend": settings.agent_backend,
             "models": models, "sandbox_driver": settings.sandbox_driver,
             "state_transport": settings.state_transport, "secret_provider": settings.secret_provider,
@@ -129,10 +165,11 @@ async def config(request: Request,
             "gateway_provider_error": provider_health.get("last_error"),
             "gateway_provider_account_error": provider_health.get("account_error"),
             "can_rescore": can_rescore(user),
-            "prompt_evolution": {"suite": PROMPT_SUITE, "models": PROMPT_MODELS, "path": PROMPT_PATH},
+            "prompt_evolution": {"suite": PROMPT_SUITE, "models": models, "path": PROMPT_PATH},
             "can_configure_model": user.tenant_id == "eval" and user.role == "admin" and not user.scopes
             and bool(_restart_gateway_command(os.environ.get("SCA_PORTAL_LOCAL_CONFIG")))
-            and bool(request.client and request.client.host in ("127.0.0.1", "::1")),
+            and _local_client(request),
+            "model_docker_mode": os.environ.get("SCA_RUNTIME_MODE") == "docker",
             **(_source_config(settings) if settings.sandbox_driver == "local" else {})}
 
 
@@ -146,6 +183,7 @@ _ASSETS = {
     "portal-evolution.js": "text/javascript",
     "portal-settings.js": "text/javascript",
     "portal-projects.js": "text/javascript",
+    "portal-models.js": "text/javascript",
     "task-dag.js": "text/javascript",
     "task-dag.css": "text/css",
 }
@@ -245,3 +283,7 @@ def _restart_gateway_command(config: str | None) -> list[str]:
     if sys.platform == "win32" and os.environ.get("SCA_RUNTIME_MODE") == "source":
         return [sys.executable, str(root / "scripts/portal_source.py"), "restart-gateway"]
     return ["bash", str(root / "scripts/portal_demo.sh"), "restart-gateway"]
+
+
+def _local_client(request: Request) -> bool:
+    return bool(request.client and request.client.host in ("127.0.0.1", "::1"))

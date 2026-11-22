@@ -11,7 +11,7 @@ import pytest
 
 STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
-    "portal-ui.js", "portal-markdown.js", "portal-tasks.js",
+    "portal-ui.js", "portal-models.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
@@ -184,7 +184,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
-    assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
+    assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-message-form" class="task-message-form stack" data-access="member" hidden' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 

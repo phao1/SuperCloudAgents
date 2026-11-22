@@ -492,7 +492,7 @@ body[data-trace-expanded] { overflow: hidden; }
       </div>
     </header>
     <p id="guest-view-banner" class="panel" hidden>只读访客模式 · <a href="#/overview">登录</a></p>
-    <p id="model-not-configured" class="provider-error-banner" role="status" hidden>未配置模型密钥：可浏览历史，无法运行新任务</p>
+    <p id="model-not-configured" class="provider-error-banner" role="status" hidden>尚未接入模型，可浏览历史记录</p>
     <!-- source mode warning -->
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
@@ -525,6 +525,7 @@ body[data-trace-expanded] { overflow: hidden; }
         </div>
         <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
       </div>
+      <div id="model-providers" class="panel" hidden></div>
       <div class="cards" data-access="eval" hidden>
         <article class="feature">
           <h2>系统提示词自演进</h2>
@@ -591,7 +592,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <label>套件<select id="suite" required></select></label>
             <label>后端<select id="backend"><option value="opencode">OpenCode</option><option value="pi">Pi</option><option value="dsh">DeepSeek Harness</option><option value="codex">Codex</option></select></label>
             <label>OpenCode 版本<select id="version"><option value="">默认版本</option></select></label>
-            <label>模型<input id="model" list="models" value="deepseek-flash"></label>
+            <label>模型<input id="model" list="models"></label>
             <datalist id="models"></datalist>
             <label>重复次数<input id="repeat" type="number" value="1" min="1" max="100" required></label>
             <label>并发<input id="concurrency" type="number" value="1" min="1" max="100" required></label>
@@ -909,7 +910,7 @@ body[data-trace-expanded] { overflow: hidden; }
             <p id="fix-source">在评测详情选择一个用例和它的执行证据。</p>
             <div class="fields two">
               <label>执行后端<select id="fix-backend"><option value="codex">Codex</option><option value="opencode">OpenCode</option></select></label>
-              <label>模型<input id="fix-model" list="models" value="deepseek-flash"></label>
+              <label>模型<input id="fix-model" list="models"></label>
               <label class="wide"><span id="instruction-label">问题诊断</span><textarea id="instruction" maxlength="10000"></textarea></label>
             </div>
             <div class="action-bar">
@@ -940,6 +941,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
 <script src="/portal/assets/portal-ui.js"></script>
+<script src="/portal/assets/portal-models.js"></script>
 <script src="/portal/assets/portal-markdown.js"></script>
 <script src="/portal/assets/portal-tasks.js"></script>
 <script src="/portal/assets/portal-evolution.js"></script>
@@ -1097,6 +1099,7 @@ async function loadConfig(c){
   c??=await data('/portal/config');
   if(identity!==portalIdentity)return;
   const backendChanged=portalConfig?.default_agent_backend!==c.default_agent_backend;
+  const previousDefault=portalConfig?.default_model;
   portalConfig=c;
   $('model-not-configured').hidden=c.model_configured!==false;
   if(c.guest_view)return c;
@@ -1113,8 +1116,7 @@ async function loadConfig(c){
   $('provider-key-note').textContent=c.can_configure_model
     ?'保存在本机，保存后会重启模型网关。'
     :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
-  if(!$('model').value)$('model').value=c.default_model;
-  options('models',c.models,x=>x,x=>x);
+  portalModels.configure(c,previousDefault);
   options('backend',c.agent_backends,x=>x,portalUI.backendLabel);
   if(currentTask&&pageRoute().current==='tasks'){
     if(backendChanged)portalTasks.render(currentTask,taskEvents);
@@ -1173,9 +1175,9 @@ function syncEvalForm(){
   version.disabled=backend.value!=='opencode'&&backend.value!=='opencode-brain';
   const valid=!isPrompt||(version.value&&portalConfig.prompt_evolution.models.includes(model.value.trim()));
   $('run-form').querySelector('button[type=submit]').disabled=launchingRun||!valid;
-  $('suite-note').textContent=isPrompt
-    ?(valid?'比较系统提示词建议重复至少 2 次。':'请选择已安装版本和 DeepSeek 模型。')
-    :'';
+  $('suite-note').textContent=[isPrompt
+    ?(valid?'比较系统提示词建议重复至少 2 次。':'请选择已安装版本和已接入模型。'):'',
+    portalModels.budgetWarning([model.value.trim()||portalConfig?.default_model])].filter(Boolean).join(' ');
 }
 function applyEvalPreset(preset){
   const name=preset==='prompt'?portalConfig?.prompt_evolution?.suite:preset==='repair'?'opencode-demo':null;
@@ -1185,7 +1187,7 @@ function applyEvalPreset(preset){
   $('backend').value='opencode';
   $('repeat').value=preset==='prompt'?'2':'1';
   if(preset==='prompt'&&!portalConfig.prompt_evolution.models.includes($('model').value)){
-    $('model').value=portalConfig.prompt_evolution.models[0];
+    $('model').value=portalConfig.default_model||'';
   }
 }
 function runBody(){
@@ -2578,7 +2580,13 @@ async function loadPage(page,parts,polling=false){
   }
   if(page==='overview'&&portalUI.can('history')&&(polling||!identity.guest))return loadConfig();
   if(page==='versions')return loadVersions();
-  if(page==='evolutions')return polling?portalEvolution.poll():portalEvolution.load(parts);
+  if(page==='evolutions'){
+    if(polling)return portalEvolution.poll();
+    const admin=portalUI.can('eval-admin');
+    await Promise.all([!identity.guest&&!portalConfig?loadConfig():null,
+      admin&&!suites.length?loadSuites():null,admin&&!versions.length?loadVersions():null]);
+    if(current())return portalEvolution.load(parts);
+  }
   if(polling)return;
   if(page==='submit')return portalTasks.loadSubmit();
   if(page==='memories')return loadMemories();
@@ -2686,6 +2694,7 @@ $('provider-key-form').onsubmit=async event=>{
     input.value='';
     label.textContent=result.gateway_restarted?'密钥已保存，模型网关已重启。':'密钥已保存，网关重启失败。请查看服务状态。';
     await loadConfig();
+    await portalModels.refresh();
   }catch(e){label.textContent=e.message}
   finally{savingKey=false;control.disabled=false;input.disabled=false}
 };
@@ -2836,6 +2845,7 @@ function resetPortalSession(){
   portalEvolution.reset();
   portalSettings.reset();
   portalProjects.reset();
+  portalModels.reset();
   portalIdentity=portalConfig=null;
   guestChecked=false;
   canRescore=false;

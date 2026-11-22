@@ -7,8 +7,12 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
+import yaml
+
+from sca.gateway.model_providers import GATEWAY_FILE, ProviderInput, ProviderRegistry
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/portal_demo.sh"
@@ -84,6 +88,7 @@ start_postgres() {
     load_source_env
 }
 start_source_services() { gateway_config > source-gateway-config; }
+start_litellm() { gateway_config > source-gateway-config; }
 stop_source_services() { echo "stopped native services"; }
 start() { echo "$1" >> startup-calls; }
 owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }
@@ -107,6 +112,7 @@ stop() { :; }
     portal_env.parent.mkdir()
     portal_env.write_text(f"export SCA_PORTAL_LOCAL_CONFIG={shlex.quote(str(tmp_path / '.env'))}\n")
     (tmp_path / ".env").touch()
+    shutil.copytree(ROOT / "deploy/litellm", tmp_path / "deploy/litellm")
     (tmp_path / ".venv" / "bin").mkdir(parents=True)
     python = tmp_path / ".venv" / "bin" / "python"
     python.write_text(
@@ -195,7 +201,25 @@ def test_gateway_starts_with_and_without_a_model_key(demo, mode):
         (root / ".env").write_text(entry)
         result = run("up", "--mode", mode)
         assert result.returncode == 0, result.stderr
-        assert selected.read_text().strip() == expected
+        assert Path(selected.read_text().strip()).name == expected
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(('mode', 'host'), [('docker', 'host.docker.internal'), ('source', 'localhost')])
+def test_gateway_launchers_load_registry_on_start_and_restart(demo, mode, host):
+    run, portal_env = demo
+    data_dir = portal_env.parent
+    provider = ProviderInput(name='Local', type='openai-compatible', base_url='http://localhost:8001/v1',
+                             models=[{'name': 'local', 'upstream_model': 'my-model'}])
+    registry = ProviderRegistry().with_provider(uuid4(), provider)
+    registry.save(data_dir)
+    for command in [('up', '--mode', mode), ('restart-gateway',)]:
+        launched = run(*command)
+        assert launched.returncode == 0, launched.stderr
+        assert Path((data_dir.parent / f'{mode}-gateway-config').read_text().strip()).name == GATEWAY_FILE
+        rows = yaml.safe_load((data_dir / GATEWAY_FILE).read_text(encoding='utf-8'))['model_list']
+        assert [row['model_name'] for row in rows] == ['local']
+        assert rows[0]['litellm_params']['api_base'] == f'http://{host}:8001/v1'
 
 
 @POSIX_ONLY
