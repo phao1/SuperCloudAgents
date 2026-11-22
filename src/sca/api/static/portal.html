@@ -914,6 +914,7 @@ body[data-trace-expanded] { overflow: hidden; }
   <div class="panel-head"><h2 id="evidence-title">事件证据</h2><button id="evidence-close" type="button">关闭</button></div>
   <div id="evidence-body"></div>
 </aside>
+<!-- archive bootstrap -->
 <script src="/portal/task-flow.js"></script>
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
@@ -928,7 +929,8 @@ body[data-trace-expanded] { overflow: hidden; }
 const $=id=>document.getElementById(id), enc=encodeURIComponent;
 let runs=[],versions=[],selectedTask=null,eventCursor=0,refreshing=false;
 let fixes=[], flow={}, fixSelection=null, taskEvents=[], taskLoading=false, suites=[], serverTasks=[], builds=[];
-let portalToken=localStorage.getItem('sca-portal-token')||'';
+const archivePortal=typeof SCAPortalArchive==='undefined'?null:SCAPortalArchive;
+let portalToken=archivePortal?'':localStorage.getItem('sca-portal-token')||'';
 let guestChecked=false;
 let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
 let routeLoad=null;
@@ -2893,10 +2895,14 @@ document.addEventListener('keydown',event=>{
   if(!$('evidence').hidden)closeEvidence();
   else if($('trace-workspace').hasAttribute('data-expanded'))setTraceFullscreen(false).catch(error);
 });
-window.addEventListener('hashchange',()=>route().catch(error));
-route().catch(error);
-refresh().catch(error);
-setInterval(()=>refresh().catch(error),4000);
+if(archivePortal){
+  archivePortal.start().catch(error);
+}else{
+  window.addEventListener('hashchange',()=>route().catch(error));
+  route().catch(error);
+  refresh().catch(error);
+  setInterval(()=>refresh().catch(error),4000);
+}
 </script>
 </body>
 </html>

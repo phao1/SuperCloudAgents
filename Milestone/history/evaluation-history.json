@@ -1,0 +1,109 @@
+{
+  "runs": [
+    {
+      "id": "prompt-baseline",
+      "title": "系统提示词基线",
+      "date": "2026-11-19",
+      "suite": "opencode-prompt",
+      "version": "2.3.0-sca.1",
+      "model": "deepseek-flash",
+      "passed": 4,
+      "total": 6,
+      "source": "portal-run-2026-11-19.md#系统提示词基线和迭代步骤",
+      "cases": [
+        {
+          "name": "csv-escape",
+          "repeat": 1,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": false,
+          "duration": 25.11
+        },
+        {
+          "name": "csv-escape",
+          "repeat": 2,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": false,
+          "duration": 22.34
+        },
+        {
+          "name": "retry-budget",
+          "repeat": 1,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": true,
+          "duration": 22.39
+        },
+        {
+          "name": "retry-budget",
+          "repeat": 2,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": true,
+          "duration": 23.51
+        },
+        {
+          "name": "stable-dedupe",
+          "repeat": 1,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": true,
+          "duration": 23.01
+        },
+        {
+          "name": "stable-dedupe",
+          "repeat": 2,
+          "verification": true,
+          "trajectory": true,
+          "acceptance": true,
+          "duration": 22.59
+        }
+      ]
+    },
+    {
+      "id": "file-tool-regression",
+      "title": "文件工具修复回归",
+      "date": "2026-11-17",
+      "suite": "opencode-demo",
+      "version": "2.3.0-sca.4",
+      "model": "deepseek-flash",
+      "passed": 6,
+      "total": 6,
+      "source": "portal-demo.md",
+      "note": "修复后用同一套件复测，6 项通过。修复 1 项、回归 0 项。"
+    },
+    {
+      "id": "file-tool-baseline",
+      "title": "文件工具基线",
+      "date": "2026-11-17",
+      "suite": "opencode-demo",
+      "version": "2.3.0-sca.1",
+      "model": "deepseek-flash",
+      "passed": 5,
+      "total": 6,
+      "source": "portal-demo.md",
+      "note": "基线 5 项通过。失败题的文件编辑证据记录到中文内容被清空。"
+    }
+  ],
+  "comparison": {
+    "baseline": "file-tool-baseline",
+    "candidate": "file-tool-regression",
+    "fixed": 1,
+    "regressions": 0,
+    "source": "portal-demo.md"
+  },
+  "versions": [
+    {
+      "version": "2.3.0-sca.1",
+      "label": "基线",
+      "source": "portal-demo.md"
+    },
+    {
+      "version": "2.3.0-sca.4",
+      "parent": "2.3.0-sca.1",
+      "label": "文件工具修复版",
+      "source": "portal-demo.md"
+    }
+  ]
+}

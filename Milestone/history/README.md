@@ -11,7 +11,11 @@
 py -3 scripts/serve_portal_history.py
 ```
 
-浏览器打开 <http://127.0.0.1:8000/portal>。如果 8000 被占用，可在命令末尾加 `--port 8001`。也可以下载 [task-history.html](task-history.html) 的原始文件，用 Edge 或 Chrome 直接打开。
+浏览器打开 <http://127.0.0.1:8000/portal>，可查看概览、评测中心、任务历史、数据分析、版本对比、版本谱系和自演进闭环。
+新版 `/healthz` 返回 `"portal":"archive"`。从旧版更新后，在原 PowerShell 窗口按 Ctrl+C 并重新运行脚本。端口被其他程序使用时，可加 `--port 8001`。
+
+评测中心收录 3 条已发布的运行记录，来源为 [11 月 19 日运行记录](../portal-run-2026-11-19.md)和 [文件工具修复演示](../portal-demo.md)。
+任务历史也可由 `/portal/history` 单独访问，或用浏览器直接打开 [task-history.html](task-history.html)。
 
 [复制给 Windows 上 Codex 的启动提示词](windows-start-prompt.md)
 
