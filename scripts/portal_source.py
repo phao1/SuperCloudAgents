@@ -179,6 +179,29 @@ def run_logged(argv: list[str | Path], log: Path, *, cwd: Path | None = None,
         raise ValueError(f"{Path(argv[0]).stem} 执行失败，请查看 {log}。") from None
 
 
+def transfer_history(command: str, archive: Path, *, migrate: bool) -> int:
+    from sca.config import get_settings
+
+    try:
+        settings = get_settings()
+    except (OSError, ValueError):
+        raise ValueError("无法加载 Portal 配置，请检查本机配置和环境变量。") from None
+    fields = {"database_url", "data_dir", "object_store", "default_max_active_tasks"}
+    if settings.object_store == "s3":
+        fields.update({"s3_bucket", "s3_endpoint_url", "s3_access_key", "s3_secret_key", "s3_region"})
+    # The standalone history CLI reads storage configuration from the process environment.
+    storage = settings.model_dump(include=fields, exclude_none=True)
+    env = {**os.environ, **{f"SCA_{key.upper()}": str(value) for key, value in storage.items()}}
+    if migrate:
+        try:
+            subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"], env=env, check=True,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            raise ValueError("历史数据库迁移失败，请检查本机 PostgreSQL 和迁移版本。") from None
+    args = ["--out", str(archive)] if command == "export" else [str(archive)]
+    return subprocess.call([sys.executable, "-m", "sca.history", command, *args], env=env)
+
+
 def install_dsh(data: Path) -> None:
     from sca.agents.local import DSH_PACKAGE, dsh_install_dir, installed_dsh
     from sca.config import Settings
@@ -648,6 +671,13 @@ class WindowsSource:
         print(f"Portal {API_URL}/portal")
         print("登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。")
 
+    def history(self, command: str, archive: Path) -> int:
+        self.start_postgres()
+        return subprocess.call(
+            [self.python, Path(__file__).resolve(), "history", command, str(archive), "--migrate"],
+            cwd=self.root, env=self.environment({"SCA_RUNTIME_MODE": "source"}),
+        )
+
     def restart_gateway(self) -> None:
         from dotenv import dotenv_values
 
@@ -670,9 +700,11 @@ class WindowsSource:
                         print("".join(deque(stream, maxlen=100)), end="")
 
 
-def manage_windows(command: str, service: str | None = None) -> None:
+def manage_windows(command: str, service: str | None = None, *, archive: Path | None = None) -> None:
     if sys.platform != "win32":
         raise ValueError("请使用 bash scripts/portal_source.sh 管理 Linux 或 macOS 源码模式。")
+    if archive is not None:
+        archive = archive.absolute()
     root = Path(__file__).resolve().parents[1]
     os.chdir(root)
     stack = WindowsSource(root)
@@ -681,7 +713,7 @@ def manage_windows(command: str, service: str | None = None) -> None:
         return
     if sys.version_info[:2] != (3, 12):
         raise ValueError("需要 Python 3.12，请运行 winget install -e --id Python.Python.3.12。")
-    if command == "up":
+    if command in ("up", "import-history", "export-history"):
         stack.runtime.mkdir(parents=True, exist_ok=True)
         install_log = stack.runtime / "setup.log"
         if not stack.python.is_file():
@@ -697,10 +729,14 @@ def manage_windows(command: str, service: str | None = None) -> None:
         print("源码模式服务未运行。")
         return
     if Path(sys.prefix).resolve() != stack.python.parent.parent:
-        raise SystemExit(subprocess.call([stack.python, "-X", "utf8", Path(__file__).resolve(), command]))
+        args = [str(archive)] if archive is not None else []
+        raise SystemExit(subprocess.call([stack.python, "-X", "utf8", Path(__file__).resolve(), command, *args]))
     match command:
         case "up":
             stack.up()
+        case "import-history" | "export-history":
+            assert archive is not None
+            raise SystemExit(stack.history(command.removesuffix("-history"), archive))
         case "down":
             failures = []
             for name in reversed(SERVICES):
@@ -731,6 +767,12 @@ def main() -> None:
         commands.add_parser(command).add_argument("data", type=Path)
     for command in ("up", "down", "status", "restart-gateway"):
         commands.add_parser(command)
+    for command in ("import-history", "export-history"):
+        commands.add_parser(command).add_argument("archive", type=Path)
+    history = commands.add_parser("history")
+    history.add_argument("action", choices=("import", "export"))
+    history.add_argument("archive", type=Path)
+    history.add_argument("--migrate", action="store_true")
     commands.add_parser("logs").add_argument(
         "service", nargs="?", choices=(*SERVICES, "setup", "migrations", "dsh"),
     )
@@ -749,8 +791,11 @@ def main() -> None:
                 install_dsh(args.data)
             case "prepare-gateway":
                 prepare_gateway(args.data)
+            case "history":
+                raise SystemExit(transfer_history(args.action, args.archive, migrate=args.migrate))
             case _:
-                manage_windows(args.command, getattr(args, "service", None))
+                manage_windows(args.command, getattr(args, "service", None),
+                               archive=getattr(args, "archive", None))
     except ValueError as exc:
         raise SystemExit(str(exc)) from None
 

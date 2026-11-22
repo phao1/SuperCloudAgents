@@ -1,0 +1,12 @@
+split: dev
+category: unicode
+instruction: 'Implement replace_spans(text,spans): spans are (start,end,replacement)
+  with half-open Python character offsets (not UTF-8 byte offsets). Accept unsorted
+  one-shot spans, sort by start, reject negative/reversed/out-of-range or overlapping
+  spans with ValueError. Adjacent spans allowed; zero-width insertions allowed unless
+  inside a nonempty span. Same-position insertions preserve input order and precede
+  a nonempty span starting there. Preserve all untouched text exactly, including decomposed
+  accents and CRLF. Use only the Python standard library. Keep verify.py unchanged.
+  Run python verify.py before finishing.'
+verify_command: python verify.py
+image: python:3.12

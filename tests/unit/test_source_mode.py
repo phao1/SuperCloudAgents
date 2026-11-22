@@ -269,6 +269,157 @@ def test_windows_up_migrates_before_starting_api_and_worker(tmp_path, monkeypatc
         assert starts == ["postgres", "migration", "temporal", "gateway", "worker", "api"]
 
 
+@pytest.mark.parametrize("action", ["import", "export"])
+def test_windows_history_uses_source_database_and_preserves_archive_path(tmp_path, monkeypatch, action):
+    repo = tmp_path / "checkout with spaces"
+    script = repo / "scripts/portal_source.py"
+    venv = repo / ".venv"
+    archive = tmp_path / "历史 bundle.zip"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(sys, "argv", [str(script), f"{action}-history", archive.name])
+    monkeypatch.setattr(portal_source, "__file__", str(script))
+    monkeypatch.setattr(portal_source, "sys", SimpleNamespace(
+        platform="win32", version_info=sys.version_info, prefix=str(venv),
+        executable=sys.executable,
+    ))
+    monkeypatch.setenv("SCA_DATABASE_URL", "postgresql+asyncpg://fixture.invalid/unrelated")
+    monkeypatch.setenv("SCA_DATA_DIR", str(tmp_path / "unrelated"))
+    stack = portal_source.WindowsSource(repo)
+    stack.python.parent.mkdir(parents=True)
+    stack.python.touch()
+    manifest = b'[project]\nname = "fixture"\n'
+    (repo / "pyproject.toml").write_bytes(manifest)
+    (venv / ".sca-source-project").write_text(hashlib.sha256(manifest).hexdigest(), encoding="ascii")
+    calls = []
+
+    def start_postgres(stack):
+        calls.append("postgres")
+        stack.pg_port.write_text("55432\n", encoding="ascii")
+        stack.pg_password.write_text("fixture-password\n", encoding="ascii")
+
+    def transfer(argv, *, cwd, env):
+        calls.append("history")
+        assert argv == [stack.python, script, "history", action, str(archive), "--migrate"]
+        assert cwd == repo
+        worker_env = stack.environment({})
+        for key in ("SCA_DATABASE_URL", "SCA_DATA_DIR", "SCA_SANDBOX_DRIVER"):
+            assert env[key] == worker_env[key]
+        assert env["SCA_DATABASE_URL"].endswith("@127.0.0.1:55432/sca")
+        assert env["SCA_DATA_DIR"] == str(stack.data)
+        return 7
+
+    monkeypatch.setattr(portal_source.WindowsSource, "start_postgres", start_postgres)
+    monkeypatch.setattr(portal_source.subprocess, "call", transfer)
+    with pytest.raises(SystemExit) as error:
+        portal_source.main()
+    assert error.value.code == 7
+    assert calls == ["postgres", "history"]
+
+
+def test_windows_history_prepares_venv_and_forwards_archive_on_first_run(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    repo.mkdir()
+    (repo / "pyproject.toml").touch()
+    script = repo / "scripts/portal_source.py"
+    python = repo / ".venv/Scripts/python.exe"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(portal_source, "__file__", str(script))
+    monkeypatch.setattr(portal_source, "sys", SimpleNamespace(
+        platform="win32", version_info=sys.version_info, prefix=sys.prefix, executable=sys.executable,
+    ))
+    calls = []
+
+    def install(argv, log):
+        calls.append(argv[:3])
+        assert log.name == "setup.log" and log.parent.is_dir()
+        if argv[2] == "venv":
+            python.parent.mkdir(parents=True)
+            python.touch()
+
+    def launch(argv):
+        calls.append(argv)
+        return 0
+
+    monkeypatch.setattr(portal_source, "run_logged", install)
+    monkeypatch.setattr(portal_source.subprocess, "call", launch)
+    with pytest.raises(SystemExit) as error:
+        portal_source.manage_windows("import-history", archive=Path("history copy.zip"))
+    assert error.value.code == 0
+    assert calls == [
+        [sys.executable, "-m", "venv"], [python, "-m", "pip"],
+        [python, "-X", "utf8", script, "import-history", str(tmp_path / "history copy.zip")],
+    ]
+
+
+@pytest.mark.parametrize("args", [["import-history"], ["export-history", "one.zip", "two.zip"]])
+def test_windows_history_requires_one_archive(monkeypatch, args):
+    monkeypatch.setattr(sys, "argv", ["portal_source.py", *args])
+    monkeypatch.setattr(portal_source, "manage_windows", None)
+    with pytest.raises(SystemExit) as error:
+        portal_source.main()
+    assert error.value.code == 2
+
+
+@pytest.mark.parametrize("mode", ["source", "docker"])
+def test_history_cli_uses_worker_storage_settings(tmp_path, monkeypatch, mode):
+    from sca import config
+
+    monkeypatch.chdir(tmp_path)
+    for name in ("SCA_DATA_DIR", "SCA_OBJECT_STORE", "SCA_S3_BUCKET", "SCA_DATABASE_URL"):
+        monkeypatch.delenv(name, raising=False)
+    (tmp_path / ".env").write_text(
+        "SCA_DATABASE_URL=postgresql+asyncpg://fixture.invalid/portal\n"
+        "SCA_DATA_DIR=portal-data\nSCA_OBJECT_STORE=s3\nSCA_S3_BUCKET=fixture-bucket\n",
+        encoding="utf-8",
+    )
+    if mode == "source":
+        monkeypatch.setenv("SCA_DATABASE_URL", "postgresql+asyncpg://127.0.0.1:55432/sca")
+        monkeypatch.setenv("SCA_DATA_DIR", str(tmp_path / ".data"))
+        monkeypatch.setenv("SCA_OBJECT_STORE", "local")
+    worker = Settings()
+    monkeypatch.setattr(config, "get_settings", Settings)
+    calls = []
+
+    def record(argv, *, env, **kwargs):
+        calls.append(argv)
+        assert env["SCA_DATABASE_URL"] == worker.database_url
+        assert Path(env["SCA_DATA_DIR"]) == worker.data_dir
+        assert env["SCA_OBJECT_STORE"] == worker.object_store
+        if mode == "docker":
+            assert env["SCA_S3_BUCKET"] == worker.s3_bucket
+        if argv[2] == "alembic":
+            assert kwargs["stdout"] == kwargs["stderr"] == subprocess.DEVNULL
+        return 0
+
+    monkeypatch.setattr(portal_source.subprocess, "run", record)
+    monkeypatch.setattr(portal_source.subprocess, "call", record)
+    archive = tmp_path / "history copy.zip"
+    if mode == "source":
+        assert portal_source.transfer_history("import", archive, migrate=True) == 0
+        assert calls == [
+            [sys.executable, "-m", "alembic", "upgrade", "head"],
+            [sys.executable, "-m", "sca.history", "import", str(archive)],
+        ]
+    else:
+        assert portal_source.transfer_history("export", archive, migrate=False) == 0
+        assert calls == [[sys.executable, "-m", "sca.history", "export", "--out", str(archive)]]
+
+
+def test_history_migration_failure_blocks_import_and_hides_details(tmp_path, monkeypatch):
+    from sca import config
+
+    monkeypatch.setattr(config, "get_settings", lambda: Settings(_env_file=None))
+
+    def failed_migration(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, args[0], stderr="fixture-private-details")
+
+    monkeypatch.setattr(portal_source.subprocess, "run", failed_migration)
+    monkeypatch.setattr(portal_source.subprocess, "call", None)
+    with pytest.raises(ValueError, match="历史数据库迁移失败") as error:
+        portal_source.transfer_history("import", tmp_path / "archive.zip", migrate=True)
+    assert "fixture-private-details" not in str(error.value)
+
+
 def test_settings_default_dsh_for_windows_local_only(monkeypatch):
     from sca import config
 

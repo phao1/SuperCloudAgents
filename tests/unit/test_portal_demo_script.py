@@ -1,5 +1,6 @@
-"""Static checks that never start demo services or inspect local credentials."""
+"""Checks that never start demo services or inspect local credentials."""
 
+import json
 import re
 import shlex
 import shutil
@@ -11,10 +12,12 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts/portal_demo.sh"
+SOURCE_SCRIPT = SCRIPT.with_name("portal_source.sh")
+POSIX_ONLY = pytest.mark.skipif(sys.platform == "win32", reason="Runs the POSIX Portal launcher")
 
 
 def test_bash_syntax() -> None:
-    for script in (SCRIPT, SCRIPT.with_name("portal_source.sh")):
+    for script in (SCRIPT, SOURCE_SCRIPT):
         subprocess.run(["bash", "-n", str(script)], check=True, timeout=10)
 
 
@@ -42,7 +45,9 @@ def test_help_without_docker(tmp_path: Path) -> None:
         timeout=10,
         check=True,
     )
-    assert all(word in result.stdout for word in ("setup", "up", "down", "status", "logs"))
+    assert all(word in result.stdout for word in (
+        "setup", "up", "down", "status", "logs", "import-history", "export-history",
+    ))
 
 
 def test_secret_output_and_process_contracts() -> None:
@@ -68,14 +73,35 @@ def demo(tmp_path, monkeypatch):
     scripts.mkdir()
     script = scripts / SCRIPT.name
     shutil.copyfile(SCRIPT, script)
-    (scripts / "portal_source.sh").write_text(
-        'find_postgres() { :; }\nsource_port() { :; }\nload_source_env() { :; }\n'
-        'start_source_services() { gateway_config > source-gateway-config; }\n'
-        'stop_source_services() { echo "stopped native services"; }\n'
-        'start() { echo "$1" >> startup-calls; }\n'
-        'owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }\n'
-        'request() { :; }\n'
-        'stop() { :; }\n'
+    source = scripts / SOURCE_SCRIPT.name
+    source.write_bytes(SOURCE_SCRIPT.read_bytes() + b"""
+find_postgres() { :; }
+source_port() { :; }
+start_postgres() {
+    echo postgres >> startup-calls
+    echo 55432 > "$PG_PORT_FILE"
+    echo fixture-password > "$PG_PASSWORD_FILE"
+    load_source_env
+}
+start_source_services() { gateway_config > source-gateway-config; }
+stop_source_services() { echo "stopped native services"; }
+start() { echo "$1" >> startup-calls; }
+owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }
+request() { :; }
+stop() { :; }
+""")
+    (scripts / "portal_source.py").write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "from urllib.parse import urlsplit\n"
+        "Path('history-calls').write_text(json.dumps({\n"
+        "    'args': sys.argv[1:],\n"
+        "    'mode': os.environ['SCA_RUNTIME_MODE'],\n"
+        "    'data_dir': Path(os.environ['SCA_DATA_DIR']).name,\n"
+        "    'db_port': urlsplit(os.environ['SCA_DATABASE_URL']).port,\n"
+        "}))\n"
+        "sys.exit(int(os.environ.get('DEMO_HISTORY_STATUS', '0')))\n",
+        encoding="utf-8",
     )
     portal_env = tmp_path / ".data" / "portal.env"
     portal_env.parent.mkdir()
@@ -111,9 +137,10 @@ def demo(tmp_path, monkeypatch):
     monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
     monkeypatch.delenv("SCA_STRIPE_SIMULATOR", raising=False)
 
-    def run(*args):
+    def run(*args, native=False, cwd=None):
         return subprocess.run(
-            ["bash", str(script), *args], check=False, capture_output=True, text=True, timeout=10,
+            ["bash", str(source if native else script), *args], cwd=cwd,
+            check=False, capture_output=True, text=True, timeout=10,
         )
 
     return run, portal_env
@@ -184,3 +211,57 @@ def test_up_migrates_before_starting_api_and_worker(demo, monkeypatch, mode, mig
             calls.append("-m sca.agents.docker_node")
         calls.extend(("api", "worker"))
     assert (portal_env.parents[1] / "startup-calls").read_text().splitlines() == calls
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("command", ["import-history", "export-history"])
+def test_source_history_uses_native_postgres_only(demo, command, monkeypatch):
+    run, portal_env = demo
+    root = portal_env.parents[1]
+    caller = root / "calling directory"
+    caller.mkdir()
+    monkeypatch.setenv("SCA_RUNTIME_MODE", "docker")
+    monkeypatch.setenv("DEMO_HISTORY_STATUS", "7")
+    result = run(command, "history copy.zip", native=True, cwd=caller)
+    assert result.returncode == 7, result.stderr
+    actual = json.loads((root / "history-calls").read_text())
+    route, action, archive, *options = actual.pop("args")
+    assert (route, action, Path(archive), options) == (
+        "history", command.removesuffix("-history"), caller / "history copy.zip", ["--migrate"],
+    )
+    assert actual == {"mode": "source", "data_dir": ".data", "db_port": 55432}
+    assert (root / "startup-calls").read_text().splitlines() == ["postgres"]
+    assert not (root / "docker-calls").exists()
+    assert not result.stdout and not result.stderr
+
+
+@POSIX_ONLY
+def test_docker_history_uses_saved_portal_env_without_starting_services(demo):
+    run, portal_env = demo
+    root = portal_env.parents[1]
+    with portal_env.open("a") as config:
+        config.write('export SCA_RUNTIME_MODE=docker SCA_DATA_DIR="$PWD/portal-data"\n')
+        config.write('export SCA_DATABASE_URL=postgresql+asyncpg://fixture.invalid:6543/sca\n')
+    archive = root / "server history.zip"
+    result = run("export-history", str(archive), cwd=root)
+    assert result.returncode == 0, result.stderr
+    actual = json.loads((root / "history-calls").read_text())
+    route, action, path = actual.pop("args")
+    assert (route, action, Path(path)) == ("history", "export", archive)
+    assert actual == {"mode": "docker", "data_dir": "portal-data", "db_port": 6543}
+    assert not (root / "startup-calls").exists()
+    assert not (root / "docker-calls").exists()
+    assert not result.stdout and not result.stderr
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(("command", "args", "native"), [
+    ("import-history", [], True),
+    ("export-history", ["one.zip", "two.zip"], True),
+    ("export-history", [], False),
+])
+def test_history_requires_one_archive(demo, command, args, native):
+    run, portal_env = demo
+    result = run(command, *args, native=native)
+    assert result.returncode == 2 and "<zip>" in result.stdout
+    assert not (portal_env.parents[1] / "history-calls").exists()

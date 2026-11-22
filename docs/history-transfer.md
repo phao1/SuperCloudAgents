@@ -6,6 +6,32 @@
 
 ## Linux 导出
 
+在 Docker 模式的 SCA 服务器仓库根目录运行，脚本复用 Portal 的数据库和对象存储配置。
+通过 shell 环境变量覆盖配置的部署，在同样的环境中执行导出。
+
+```bash
+bash scripts/portal_demo.sh export-history sca-history.zip
+```
+
+## Windows 导入
+
+将 ZIP 复制到 Windows 的 SCA 仓库根目录，在 PowerShell 中运行。
+
+```powershell
+.\scripts\portal_source.ps1 import-history .\sca-history.zip
+```
+
+首次运行会准备 Python 环境。脚本启动或复用源码模式的本机 PostgreSQL，应用数据库迁移，
+并使用启动脚本配置的数据库连接和对象存储完成导入。导入后可运行
+`.\scripts\portal_source.ps1 up` 启动 Portal。Windows 本机也可执行
+`.\scripts\portal_source.ps1 export-history .\sca-history.zip` 导出。
+Linux 和 macOS 源码模式使用 `bash scripts/portal_source.sh import-history <zip>` 或
+`bash scripts/portal_source.sh export-history <zip>`。
+
+## 高级用法
+
+### Linux 手工导出
+
 在服务器的 SCA 源码目录中，用运行 Portal 的数据库和对象存储。以下命令适用于 Docker 模式
 默认的本机 Postgres 端口和本地对象存储。自定义部署时，先在当前 shell 配置实际的
 `SCA_DATABASE_URL` 和对象存储参数。命令使用运维数据库角色，配置从环境变量读取。
@@ -40,7 +66,7 @@ S3 部署使用 `SCA_OBJECT_STORE=s3`，并在当前环境提供 Worker 使用�
 .venv/bin/python -m sca.history export --strict --out "$PWD/sca-history.zip"
 ```
 
-## Windows 导入
+### Windows 手工导入
 
 将 ZIP 复制到 Windows 的 SCA 源码目录。运行本机 Postgres，在 PowerShell 中使用目标 Portal
 的数据库连接串和数据目录。连接串使用 `postgresql+asyncpg` 驱动，连接到 SCA 数据库。

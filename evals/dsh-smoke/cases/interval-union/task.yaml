@@ -1,0 +1,9 @@
+split: dev
+category: bug-fix
+instruction: 'Fix merge(intervals): union integer half-open intervals [start,end),
+  discard empty intervals, reject reversed endpoints with ValueError, merge touching
+  intervals, return sorted tuples. Accept a one-shot iterable; never mutate input.
+  Use only the Python standard library. Keep verify.py unchanged. Run python verify.py
+  before finishing.'
+verify_command: python verify.py
+image: python:3.12

@@ -55,6 +55,23 @@ Remove-Item Env:PORTAL_TOKEN
 也可以在启动前将密钥填入仓库根目录的 `.env`；脚本会复用现有配置。在获取密钥前可以
 查看历史记录。请妥善保存 `.env` 和 `.data/portal.env`。
 
+## 导入 Linux 历史
+
+在 Linux Docker 模式服务器的 SCA 仓库根目录导出历史。
+
+```bash
+bash scripts/portal_demo.sh export-history sca-history.zip
+```
+
+将 ZIP 复制到 Windows 的 SCA 仓库根目录，在 PowerShell 中运行。
+
+```powershell
+.\scripts\portal_source.ps1 import-history .\sca-history.zip
+```
+
+脚本会启动或复用本机 PostgreSQL、应用迁移并导入历史。导入后用 `up` 启动 Portal 查看记录。
+Windows 本机可用 `export-history <zip>` 导出。[历史归档内容与高级用法](history-transfer.md)
+
 ## 运行任务与演进
 
 1. 在「提交任务」选择「DeepSeek Harness」。填写仓库地址、基线分支、任务要求和验证命令。
@@ -63,9 +80,10 @@ Remove-Item Env:PORTAL_TOKEN
    「使用当前冠军」，可应用同一 DSH 版本和模型的冠军指引。
 2. 提交后进入任务详情，在「执行图 DAG」和执行泳道查看进展。验证通过后，可在「任务审核」
    检查补丁并选择批准或继续修改。
-3. 在「自动演进」选择 DeepSeek Harness、包含开发集和留出集的套件、模型和预算，点击
-   「开始演进」。基线版本留空时使用 `SCA_DSH_VERSION`。打开演进记录查看执行图与评测结果。
-   启动脚本会应用 DSH 演进所需的迁移 `0025`。[准备评测套件](design-evolution.md#最小试跑)
+3. 在「自动演进」选择 DeepSeek Harness、评测套件、模型和预算，点击「开始演进」。
+   首次建议用内置套件 `dsh-smoke` 和 `deepseek-flash`，按下方参数试跑预计花费 ¥1–2。
+   基线版本留空时使用 `SCA_DSH_VERSION`。打开演进记录查看执行图与评测结果。
+   启动脚本会应用 DSH 演进所需的迁移 `0025`。
 
 ### API 提交示例
 
@@ -88,7 +106,7 @@ Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/v1/tasks' -Headers $h
     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($task))
 ```
 
-准备好 `dsh-smoke` 套件后，使用同一租户管理员令牌提交演进并查看执行图。
+使用同一租户管理员令牌提交 `dsh-smoke` 演进并查看执行图。
 
 ```powershell
 $api = 'http://127.0.0.1:8000'
