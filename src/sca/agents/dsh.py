@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from sca.agents.provider_errors import model_error_event
-from sca.core.errors import AgentTurnError, SandboxError
+from sca.config import DSH_DEFAULT_MAX_OUTPUT_TOKENS
+from sca.core.errors import GATEWAY_BUDGET_REFUSAL, AgentTurnError, ModelBudgetRefused, SandboxError
 from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import (
     AgentContext,
@@ -118,14 +119,17 @@ def _overlay_guidance(overlay: AgentOverlay | None) -> str:
     return "\n\n".join(text for text in sections if text and text.strip())
 
 
-def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *, guidance: str = "") -> str:
+def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *,
+                 max_output_tokens: int = DSH_DEFAULT_MAX_OUTPUT_TOKENS, guidance: str = "") -> str:
     disabled = ["tool-web", "web-search-deepseek", "web-deepseek-api", "web-fetch-http",
-                "llm-deepseek-account"]
+                "llm-deepseek-account", "session-title-llm"]
     if protocol == "messages":
         provider = "deepseek-official"
         disabled.append("llm-pi-ai")
         # An explicit base URL in the last overlay overrides prior profile settings.
-        adapter = {"id": "llm-deepseek", "config": {"baseURL": base_url, "apiKeyEnv": KEY_ENV}}
+        adapter = {"id": "llm-deepseek", "config": {
+            "baseURL": base_url, "apiKeyEnv": KEY_ENV, "maxTokens": max_output_tokens,
+        }}
     else:
         provider = "sca-gateway"
         disabled.append("llm-deepseek")
@@ -136,12 +140,13 @@ def render_patch(base_url: str, model: str, protocol: GatewayProtocol, *, guidan
             compat["thinkingFormat"] = "deepseek"
         adapter = {"id": "llm-pi-ai", "config": {"providers": {provider: {
             "baseURL": base_url, "api": "openai-completions", "apiKeyEnv": KEY_ENV,
-            # Leave room for the prompt in the limiter's per-key token reservation.
-            "defaultMaxTokens": 32_768, "models": [{"id": model}], "compat": compat,
+            # The adapter uses an explicit per-model cap as the request default.
+            "models": [{"id": model, "maxTokens": max_output_tokens}], "compat": compat,
         }}}}
     rows = [
         *({"id": name, "disabled": True} for name in disabled),
         adapter,
+        {"id": "compaction-basic", "config": {"maxTokens": max_output_tokens}},
         {"id": "agent-default-model", "config": {"provider": provider, "model": model}},
     ]
     if guidance:
@@ -182,10 +187,11 @@ def _usage(raw: object) -> AgentEvent | None:
 
     read = cached("cacheReadTokens")
     # Both DSH adapters report uncached input separately from cache reads and writes.
+    total_input = input_tokens + read + cached("cacheWriteTokens")
     return AgentEvent(type="usage", data={
-        "input_tokens": input_tokens + read + cached("cacheWriteTokens"),
+        "input_tokens": total_input,
         "cached_input_tokens": read, "output_tokens": output_tokens,
-    }, model_call_succeeded=True)
+    }, model_call_succeeded=bool(total_input or output_tokens))
 
 
 @dataclass
@@ -197,6 +203,7 @@ class _RunEvents:
     final: dict[str, Any] = field(default_factory=dict)
     last_error: dict[str, Any] = field(default_factory=dict)
     driver_failed: bool = False
+    model_responded: bool = False
 
     def consume(self, raw: dict[str, Any]) -> AgentEvent | None:
         # @deepseek-ai/dsh-headless src/json-stream.ts defines the projected event stream.
@@ -214,10 +221,12 @@ class _RunEvents:
                     return AgentEvent(type="session_started", data={"session_id": found})
         elif kind == "text":
             if isinstance(text := raw.get("text"), str) and text:
+                self.model_responded = True
                 return AgentEvent(type="message", data={"text": text})
         elif kind == "tool_call":
             call_id, name = raw.get("callId"), raw.get("tool")
             if isinstance(call_id, str) and isinstance(name, str):
+                self.model_responded = True
                 inputs = raw.get("input")
                 self.tools[call_id] = (name, inputs)
                 return AgentEvent(type="tool", data={"call_id": call_id, "name": name,
@@ -225,7 +234,10 @@ class _RunEvents:
         elif kind == "tool_result":
             return self.tool_result(raw)
         elif kind == "status" and raw.get("phase") == "step_end":
-            return _usage(raw.get("usage"))
+            event = _usage(raw.get("usage"))
+            if event is not None and event.model_call_succeeded:
+                self.model_responded = True
+            return event
         elif kind == "final" or (kind == "status" and raw.get("phase") == "turn_end"):
             reason = _object(raw.get("reason"))
             if reason.get("kind") == "error" and (error := _object(reason.get("error"))):
@@ -294,11 +306,13 @@ class DshBackend:
                  sandbox_image: str = "sca-sandbox-dsh:latest", *,
                  protocol: GatewayProtocol = "messages", executable: str | None = None,
                  node_executable: str | None = None, python_executable: str | None = None,
+                 max_output_tokens: int = DSH_DEFAULT_MAX_OUTPUT_TOKENS,
                  docker_runtime: DockerNodeRuntime | None = None) -> None:
         self.default_model = default_model
         self.version = version
         self.sandbox_image = sandbox_image if executable is None else None
         self.protocol = protocol
+        self.max_output_tokens = max_output_tokens
         self.executable = executable
         self.node_executable = node_executable
         self.docker_runtime = docker_runtime
@@ -349,7 +363,8 @@ class DshBackend:
         env = {"HOME": ctx.agent_home, "DSH_HOME": f"{ctx.agent_home}/dsh",
                "DSH_PERMISSION_MODE": "workspace-write", "DSH_TELEMETRY_MODE": "DISABLED",
                KEY_ENV: key, "DEEPSEEK_BASE_URL": base_url}
-        config = render_patch(base_url, ctx.model or self.default_model, self.protocol, guidance=guidance)
+        config = render_patch(base_url, ctx.model or self.default_model, self.protocol,
+                              max_output_tokens=self.max_output_tokens, guidance=guidance)
         stdin = config.encode("ascii") + b"\n" + prompt.encode()
 
         run = _RunEvents(session_id)
@@ -397,5 +412,7 @@ class DshBackend:
         error = model_error_event({"error": run.last_error, "name": provider_hint, "detail": stderr}, diagnosis)
         if error.data["message"] != diagnosis:
             yield error
+            if error.data["message"] == GATEWAY_BUDGET_REFUSAL:
+                raise ModelBudgetRefused(model_responded=run.model_responded)
             diagnosis += " | " + error.data["message"]
         raise AgentTurnError(diagnosis)

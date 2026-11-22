@@ -26,6 +26,9 @@ HOST_ARCH: Literal["x64", "arm64"] = (
     "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
 )
 
+# DSH request budgets
+DSH_DEFAULT_MAX_OUTPUT_TOKENS = 8_192
+
 
 class IntentCredential(BaseModel):
     token: SecretStr = Field(min_length=1, repr=False)
@@ -333,6 +336,9 @@ class Settings(BaseSettings):
     # Mounted Docker runtimes for Node agents
     node_runtime_max_mb: int = Field(default=2000, ge=1)
     pi_node_runtime_max_mb: int = Field(default=270, ge=1)
+
+    # DSH request budgets
+    dsh_max_output_tokens: int = Field(default=DSH_DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=2**53 - 1)
 
 
 # Local source mode

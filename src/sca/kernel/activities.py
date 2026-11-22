@@ -17,9 +17,12 @@ from temporalio.exceptions import ApplicationError
 
 from sca.config import Settings
 from sca.core.errors import (
+    MODEL_BUDGET_EXHAUSTED,
+    MODEL_BUDGET_MISCONFIGURED,
     AgentTurnError,
     ConflictError,
     InvalidTaskError,
+    ModelBudgetRefused,
     NotFoundError,
     SandboxError,
 )
@@ -1085,6 +1088,9 @@ class KernelActivities:
         if turn_error is not None:
             if provider_error is not None and provider_error.is_account_error:
                 raise account_failure(provider_error) from None
+            if isinstance(turn_error, ModelBudgetRefused):
+                budget_error = await self._model_budget_failure(inp, key, turn_error)
+                raise budget_error from None
             reason = await self.store.check_budget(task_id)
             if reason or "budget" in str(turn_error).lower():
                 raise ApplicationError(
@@ -1106,6 +1112,22 @@ class KernelActivities:
             dedup_key=f"{key}.completed",
         )
         return TurnResult(session_id=session_id, final_message=final_message)
+
+    # Model gateway budget refusals
+    async def _model_budget_failure(
+        self, inp: TurnInput, key: str, error: ModelBudgetRefused,
+    ) -> ApplicationError:
+        model_responded = error.model_responded
+        if not model_responded:
+            # Read after key settlement to include usage from interrupted and earlier turns.
+            usage = (await self.store.get_task(inp.task_id)).usage
+            model_responded = any(usage.get(field, 0) > 0 for field in (
+                "input_tokens", "output_tokens", "cost_micro_usd",
+            ))
+        reason = MODEL_BUDGET_EXHAUSTED if model_responded else MODEL_BUDGET_MISCONFIGURED
+        await self.store.append_event(inp.task_id, EventType.BUDGET_EXCEEDED,
+                                      {"turn": inp.turn, "reason": reason}, dedup_key=f"{key}.budget")
+        return ApplicationError(reason, type="BudgetExceeded", non_retryable=True)
 
     @activity.defn
     async def check_budget(self, inp: StepInput) -> str | None:

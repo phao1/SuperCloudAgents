@@ -34,3 +34,18 @@ class AgentTurnError(ScaError):
 
 class WorkspaceError(ScaError):
     pass
+
+
+# Model gateway budget refusals
+GATEWAY_BUDGET_REFUSAL = "model gateway budget refused"
+MODEL_BUDGET_EXHAUSTED = "预算耗尽"
+MODEL_BUDGET_MISCONFIGURED = "预算配置错误，网关拒绝了首个模型请求。请检查预算和 DSH 输出 Token 上限"
+MODEL_BUDGET_REASONS = (MODEL_BUDGET_EXHAUSTED, MODEL_BUDGET_MISCONFIGURED)
+
+
+class ModelBudgetRefused(AgentTurnError):
+    """The gateway denied a model request under its budget."""
+
+    def __init__(self, *, model_responded: bool) -> None:
+        self.model_responded = model_responded
+        super().__init__(GATEWAY_BUDGET_REFUSAL)

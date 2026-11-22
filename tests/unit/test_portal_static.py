@@ -107,6 +107,8 @@ assert.equal(resultLabel(infra),'⚠ 基础设施错误 · 模型服务账户余
 assert.equal(dimensions([infra]).rate,'—');
 const errored={status:'errored',acceptance_passed:null,verification_passed:null};
 assert.equal(resultLabel(errored),'⚠ 用例执行错误');
+assert.equal(resultLabel({...errored,reason:'预算配置错误'}),'⚠ 预算配置错误');
+assert.equal(resultLabel({status:'failed',acceptance_passed:false,reason:'预算耗尽'}),'✕ 预算耗尽');
 assert.equal(dimensions([errored]).rate,'—');
 assert.equal(dimensions([errored,{acceptance_passed:true,verification_passed:true}]).verification,'100%');
 assert.equal(terminalLines('clone\r\nprogress 1%\rprogress 100%\r\nend'), 'clone\nprogress 100%\nend');

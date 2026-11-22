@@ -2570,20 +2570,28 @@ class Store:
     # Evaluation case errors
 
     async def _eval_result_rows(self, session: AsyncSession, run_id: str) -> list[dict]:
+        from sqlalchemy import case
+
+        from sca.core.errors import MODEL_BUDGET_REASONS
         from sca.db.schema import eval_results
         from sca.eval.trajectory import is_errored, overall_passed
 
         # A case stopped by an account error has nullable scores and a failure on its task.
         result = eval_results.c
+        # DSH request budgets carry their case reason on the failed task.
+        budget_failure = (tasks.c.state == TaskState.FAILED) & tasks.c.state_reason.in_(MODEL_BUDGET_REASONS)
         rows = (await session.execute(select(
-            eval_results, tasks.c.result["model_provider_error"].label("infrastructure_error"),
-        ).outerjoin(tasks, (tasks.c.id == result.task_id) & (tasks.c.tenant_id == result.tenant_id)
-                    & result.acceptance_passed.is_(None)).where(
+            eval_results,
+            case((result.acceptance_passed.is_(None), tasks.c.result["model_provider_error"])).label("infrastructure_error"),
+            case((budget_failure, tasks.c.state_reason)).label("reason"),
+        ).outerjoin(tasks, (tasks.c.id == result.task_id) & (tasks.c.tenant_id == result.tenant_id)).where(
             result.run_id == task_uuid(run_id), result.tenant_id == "eval",
         ).order_by(result.case_id, result.repeat))).mappings()
         results = []
         for row in rows:
             result_row = dict(row)
+            if result_row["reason"] is None:
+                result_row.pop("reason")
             passed = None if is_errored(result_row) else overall_passed(result_row)
             status = "errored" if passed is None else ("passed" if passed else "failed")
             results.append({**result_row, "passed": passed, "status": status})
