@@ -27,7 +27,7 @@ const SCATaskTimeline = (() => {
       const reported = type === 'agent.usage' ? p.model_call_duration_ms
         : nonnegative(p.duration_ms) ? p.duration_ms : nonnegative(p.duration_s) ? p.duration_s * 1000 : null;
       const duration = nonnegative(reported) ? reported : null;
-      const observed = start ?? end ?? timestamp(Date.parse(event.created_at));
+      const observed = start ?? end ?? timestamp(event.archive_offset_ms) ?? timestamp(Date.parse(event.created_at));
       let interval = observed === null ? null : [observed, observed];
       if (start !== null && end !== null && end >= start) {
         interval = [start, type === 'agent.usage' && duration !== null ? Math.min(end, start + duration) : end];
@@ -70,7 +70,7 @@ const SCATaskTimeline = (() => {
       other: (extent - occupied) / extent * 100 };
   }
 
-  function create(root, { titleFor, onSelect, onRangeChange }) {
+  function create(root, { titleFor, onSelect, onRangeChange, formatTime = value => timeFormat.format(value) }) {
     const find = selector => root.querySelector(selector);
     const track = find('svg'), marks = find('.task-time-marks'), rounds = find('.task-time-rounds');
     const brush = find('.task-time-selection'), tooltip = find('.task-time-tooltip');
@@ -119,7 +119,7 @@ const SCATaskTimeline = (() => {
       if (!record.interval) return '时间未提供';
       const [start, end] = record.interval;
       const ms = end > start ? end - start : record.duration;
-      const span = timeFormat.format(start) + (end > start ? ' → ' + timeFormat.format(end) : '');
+      const span = formatTime(start) + (end > start ? ' → ' + formatTime(end) : '');
       return span + ' · ' + (ms === null ? '耗时未提供' : Number(ms.toFixed(2)) + ' 毫秒');
     }
 
@@ -222,7 +222,7 @@ const SCATaskTimeline = (() => {
       if (!next && !range) return;
       range = next;
       clear.hidden = !range;
-      clear.title = range ? timeFormat.format(range[0]) + ' → ' + timeFormat.format(range[1]) : '';
+      clear.title = range ? formatTime(range[0]) + ' → ' + formatTime(range[1]) : '';
       reset.disabled = !view && !range;
       drawBrush();
       onRangeChange();

@@ -1690,6 +1690,15 @@ async function streamTask(taskId){
   }
 }
 
+function formatArchiveOffset(ms){
+  return '+'+(ms/1000).toFixed(3)+' 秒';
+}
+
+function eventDisplayTime(event){
+  return Number.isFinite(event.archive_offset_ms)
+    ? formatArchiveOffset(event.archive_offset_ms) : event.created_at||'';
+}
+
 function renderTimeline(){
   const root=$('timeline'),expanded=new Set([...root.querySelectorAll('details[open]')].map(n=>n.dataset.seq));
   root.replaceChildren();
@@ -1700,17 +1709,18 @@ function renderTimeline(){
   for(const event of taskEvents){
     const p=event.payload||{};
     if(p.turn!==undefined&&p.turn!==null&&p.turn!==turn){turn=p.turn;start=null}
-    if(event.type==='agent.turn_started')start=event.created_at;
+    const occurred=event.archive_offset_ms??Date.parse(event.created_at);
+    if(event.type==='agent.turn_started')start=occurred;
     if(taskTimeline&&!taskTimeline.includes(event.seq))continue;
     if(!group||turn!==current){
       current=turn;
       group=el('div',undefined,'turn-group turn-grid');
-      summary=el('small','等待用量数据');
+      summary=el('small',archivePortal?'':'等待用量数据');
       group.append(el('h3',turn?'第 '+turn+' 轮':'准备阶段'),summary);
       root.append(group);
       usage={};
     }
-    if(event.type==='agent.usage'){
+    if(!archivePortal&&event.type==='agent.usage'){
       for(const k of ['input_tokens','output_tokens','cached_input_tokens','reasoning_tokens','cost'])usage[k]=(usage[k]||0)+Number(p[k]||0);
       summary.textContent='输入 '+(usage.input_tokens||0)+' · 输出 '+(usage.output_tokens||0)+' · 缓存 '+(usage.cached_input_tokens||0)+' · 推理 '+(usage.reasoning_tokens||0)+' Token · '+money(usage.cost)
     }
@@ -1732,9 +1742,9 @@ function renderTimeline(){
     if(p.exit_code!==undefined&&p.exit_code!==null)title.append(el('span','退出码 '+p.exit_code,'badge '+(p.exit_code===0?'good':'bad')));
     let duration=p.duration_s;
     if(duration===undefined&&p.duration_ms!==undefined)duration=p.duration_ms/1000;
-    if(event.type==='agent.turn_completed'&&start&&event.created_at)duration=(new Date(event.created_at)-new Date(start))/1000;
+    if(event.type==='agent.turn_completed'&&Number.isFinite(start)&&Number.isFinite(occurred))duration=(occurred-start)/1000;
     if(duration!==undefined&&Number.isFinite(Number(duration)))title.append(el('span',Number(duration).toFixed(2)+' 秒','badge'));
-    card.append(title,el('small','#'+event.seq+' · '+(event.created_at||'')+' · '+event.type));
+    card.append(title,el('small','#'+event.seq+' · '+eventDisplayTime(event)+' · '+event.type));
     function field(label,value){
       if(value===undefined||value===null||value==='')return;
       card.append(el('h4',label),el('pre',typeof value==='string'?value:json(value)))
@@ -2117,7 +2127,7 @@ function showEvidence(event,revealRaw=false){
   if($('evidence').hidden)evidenceTrigger=document.activeElement;
   evidenceView='event';
   $('evidence').hidden=false;$('evidence-title').textContent=(eventLabels[event.type]||event.type)+' / #'+event.seq;
-  const body=$('evidence-body');body.replaceChildren(el('small',event.created_at||'时间未提供'));
+  const body=$('evidence-body');body.replaceChildren(el('small',eventDisplayTime(event)||'时间未提供'));
   if(currentTask?.id===event.task_id){
     const description=SCAJobFlow.describeStep(currentTask,event,taskEvents,portalConfig||{});
     if(description.summary){
@@ -2225,16 +2235,16 @@ function renderTaskState(t){
 function renderTaskObservability(t){
   renderArchitecture(t);
   if(evidenceView==='quality'&&!$('evidence').hidden)renderTaskQuality(t);
-  const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(Date.parse(t.updated_at)-Date.parse(t.created_at))/1000;
+  const usage=taskEvents.filter(e=>e.type==='agent.usage').reduce((sum,e)=>{for(const key of ['input_tokens','output_tokens','cached_input_tokens','cost'])sum[key]=(sum[key]||0)+Number(e.payload?.[key]||0);return sum},{}),acceptance=taskEvents.filter(e=>e.type==='acceptance.completed').at(-1),verify=taskEvents.filter(e=>e.type==='verification.completed').at(-1),elapsed=(t.archive_elapsed_ms??(Date.parse(t.updated_at)-Date.parse(t.created_at)))/1000;
   const turns=new Set(taskEvents.filter(e=>e.type==='agent.turn_started').map(e=>e.payload.turn)).size;
   const hasAcceptance=Boolean(t.spec?.acceptance_files)||Boolean(acceptance);
   const acceptanceStatus=acceptance?(acceptance.payload.passed?'通过':'失败')
     :hasAcceptance?(finishedTask(t.state)?'未执行':'待验收'):'不适用';
   $('task-metrics').replaceChildren(
     metric('隐藏验收',acceptanceStatus,'验证 '+(verify?(verify.payload.passed?'通过':'失败'):'待执行')),
-    metric('任务时长',Number.isFinite(elapsed)?elapsed.toFixed(1)+' 秒':'—','从任务创建至最近更新'),
+    metric('任务时长',Number.isFinite(elapsed)?elapsed.toFixed(1)+' 秒':'—',archivePortal?'归档日期 · '+t.created_at:'从任务创建至最近更新'),
     metric('Agent 轮次',turns,t.spec?.agent_backend||'默认后端'),
-    metric('费用',usage.cost===undefined?'—':money(usage.cost),'输入 '+(usage.input_tokens??'—')+' / 输出 '+(usage.output_tokens??'—')+' / 缓存 '+(usage.cached_input_tokens??'—'))
+    ...(archivePortal?[]:[metric('费用',usage.cost===undefined?'—':money(usage.cost),'输入 '+(usage.input_tokens??'—')+' / 输出 '+(usage.output_tokens??'—')+' / 缓存 '+(usage.cached_input_tokens??'—'))])
   );
   renderSwimlane(t);
   for(const run of runDetails.values()){
@@ -2302,6 +2312,7 @@ function renderSwimlane(task){
       openEvent(seq,true);
     },
     onRangeChange:renderTimeline,
+    formatTime:archivePortal?formatArchiveOffset:undefined,
   });
   const timing=taskTimeline.update(task.id,taskEvents),note=$('timing-note');
   note.hidden=!timing;
@@ -2349,7 +2360,9 @@ async function loadMemories(){
   const status=$('memory-status').value,scope=$('memory-filter').value.trim();
   const rows=await data('/memories?status='+enc(status)+(scope?'&scope='+enc(scope):''));
   if(identity!==portalIdentity)return;
-  $('memory-list').replaceChildren(rows.length?table(['内容','范围','分类','来源任务','上次使用','操作'],rows.map(memory=>{
+  const columns=['内容','范围','分类','来源任务','上次使用'];
+  if(!archivePortal)columns.push('操作');
+  $('memory-list').replaceChildren(rows.length?table(columns,rows.map(memory=>{
     const actions=el('div');
     if(portalUI.can('member'))actions.append(button(memory.status==='active'?'停用':'启用',async()=>{
       await api('/memories/'+enc(memory.id),{status:memory.status==='active'?'retired':'active'},'PATCH');await loadMemories();
@@ -2357,7 +2370,13 @@ async function loadMemories(){
       if(!confirm('确认删除这条共享记忆？'))return;
       await api('/memories/'+enc(memory.id),undefined,'DELETE');await loadMemories();
     }));
-    return [el('span',memory.text),memory.scope,memoryCategoryLabel(memory.category),memory.source_task_id?evidenceLink(memory.source_task_id,'#/tasks/'+enc(memory.source_task_id)):'手动创建',memory.last_used_at||'尚未使用',actions];
+    const seq=memory.source_event_seq;
+    const event=Number.isInteger(seq)?'/events/'+enc(seq):'';
+    const source=memory.source_task_id
+      ?evidenceLink(memory.source_task_id+(event?' · 事件 #'+seq:''),'#/tasks/'+enc(memory.source_task_id)+event)
+      :'手动创建';
+    return [el('span',memory.text),memory.scope,memoryCategoryLabel(memory.category),source,
+      memory.last_used_at||'尚未使用',...(archivePortal?[]:[actions])];
   })):el('p','当前条件下没有记忆。'));
 }
 $('memory-refresh').onclick=()=>loadMemories().catch(error);

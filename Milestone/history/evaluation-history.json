@@ -105,5 +105,17 @@
       "label": "文件工具修复版",
       "source": "portal-demo.md"
     }
+  ],
+  "memories": [
+    {
+      "id": "order-cents-convention",
+      "text": "订单金额统一使用整数分，按币种分别汇总。",
+      "scope": "仓库 · 订单演示",
+      "category": "convention",
+      "status": "active",
+      "source_task_id": "T010",
+      "source_event_seq": 61,
+      "last_used_at": "2026-11-19"
+    }
   ]
 }
