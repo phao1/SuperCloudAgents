@@ -136,6 +136,50 @@ def test_live_case_links_and_status_are_preserved_before_collection():
     assert next(node for node in updated.nodes if node.id == "promotion:1").status == "running"
 
 
+def test_partial_eval_scores_are_hidden_and_live_spend_counts_each_case_once():
+    base = run(1, status="running")
+    first, second = task(base), task(base, state="RUNNING", name="second")
+    data = history("running", runs=[base], tasks=[first, second],
+                   results=[result(base, first)], proposer_spent_usd=.002)
+    data["evolution"]["spent_usd"] = 0
+    first["cost_micro_usd"] = 2000
+    root, evaluation, *_ = build_evolution_dag(data).nodes
+    assert root.score is evaluation.score is None
+    assert evaluation.meta["cases_passed"] == 1
+    assert root.cost_usd == pytest.approx(.004)
+    assert root.meta["eval_spent_usd"] == pytest.approx(.002)
+
+    second["state"] = "FAILED"
+    data["results"].append(result(base, second, acceptance=False, case_id="second"))
+    base["status"] = "completed"
+    root, evaluation, *_ = build_evolution_dag(data).nodes
+    assert root.score is None and evaluation.score == .5
+    data["evolution"].update(status="completed", spent_usd=.002)
+    root = build_evolution_dag(data).nodes[0]
+    assert root.score == .5 and root.cost_usd == pytest.approx(.004)
+
+
+def test_generation_score_excludes_partial_candidate_runs():
+    valid, partial = candidate(1, 1, decision="rejected"), candidate(2, 1)
+    completed = run(3, overlay=valid["overlay"])
+    running = run(4, overlay=partial["overlay"], status="running")
+    valid.update(dev_run_id=completed["id"], dev_metrics={"pass_rate": 0})
+    partial.update(dev_run_id=running["id"], dev_metrics={"pass_rate": 1})
+    first, second = task(completed), task(running)
+    data = history("running", candidates=[valid, partial], runs=[completed, running], tasks=[first, second],
+                   results=[result(completed, first, acceptance=False), result(running, second)])
+    nodes = {node.id: node for node in build_evolution_dag(data).nodes}
+    generation = nodes["generation:1"]
+    assert generation.status == "running" and generation.score is None
+    assert nodes[f"candidate:{partial['id']}"].score is None
+
+    running["status"] = "budget_exhausted"
+    partial["decision"] = "rejected"
+    nodes = {node.id: node for node in build_evolution_dag(data).nodes}
+    generation = nodes["generation:1"]
+    assert generation.status == "succeeded" and generation.score == 0
+
+
 @pytest.mark.parametrize(("stored", "expected"), [
     ("queued", "queued"), ("running", "running"), ("completed", "succeeded"), ("failed", "failed"),
     ("stopped", "stopped"), ("budget_exhausted", "stopped"), ("patience_exhausted", "stopped"),

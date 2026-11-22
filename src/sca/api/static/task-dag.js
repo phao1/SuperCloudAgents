@@ -179,7 +179,14 @@ const SCATaskDAG = (() => {
     return Number.isFinite(score) ? percentFormat.format(score) : null;
   }
 
+  function evolutionScorePending(node) {
+    return (node.kind === 'evolution' || node.kind === 'generation') && node.status === 'running';
+  }
+
   function metricLine(node) {
+    if (evolutionScorePending(node)) {
+      return Number.isFinite(node.cost_usd) ? '进行中 · $' + node.cost_usd.toFixed(6) : '进行中';
+    }
     if (!Object.hasOwn(node, 'score')) return '';
     const score = scoreLabel(node.score);
     const cases = node.casePassed == null ? score && `通过率 ${score}` : `${node.caseCount} 个用例 · ${node.casePassed} 通过`;
@@ -623,7 +630,8 @@ const SCATaskDAG = (() => {
       fact('时长', node.duration_s == null ? null : node.duration_s.toFixed(2) + ' 秒');
       fact('费用', node.cost_usd == null ? null : '$' + node.cost_usd.toFixed(6));
       fact('Token', node.tokens?.toLocaleString('zh-CN'));
-      if (Number.isFinite(node.score)) fact('通过率', scoreLabel(node.score));
+      if (evolutionScorePending(node)) fact('通过率', '进行中');
+      else if (Number.isFinite(node.score)) fact('通过率', scoreLabel(node.score));
       if (node.caseCount) fact('用例数', node.caseCount);
       if (node.casePassed != null) fact('通过数', node.casePassed);
       if (node.summary) {

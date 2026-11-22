@@ -8,6 +8,23 @@ import pytest
 from sca.gateway.litellm import LiteLLMGateway
 
 
+@pytest.mark.parametrize("header,expected", [("0.0025", .0025), ("0", 0), (None, None), ("nan", None), ("-1", None)])
+async def test_completion_reads_reported_cost(header, expected):
+    def handle(request):
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "ok"}}]},
+            headers={} if header is None else {"X-LiteLLM-Response-Cost": header},
+        )
+
+    gateway = LiteLLMGateway("http://gateway", "fixture", "http://sandbox")
+    await gateway.aclose()
+    async with httpx.AsyncClient(base_url="http://gateway", transport=httpx.MockTransport(handle)) as http:
+        gateway._http = http
+        assert await gateway.complete_with_cost([], "fixture") == ("ok", expected)
+        assert await gateway.complete([], "fixture") == "ok"
+
+
 @pytest.mark.parametrize("mode", ["grows", "empty", "error", "malformed", "timeout"])
 async def test_settle_and_revoke(mode, monkeypatch):
     import sca.gateway.litellm as module

@@ -50,6 +50,12 @@ async def test_evolution_dag_and_guest_access_with_rls(postgres, store, api_stor
         tenant_id="eval", kind="coding", idempotency_key=f"eval:{run_id}:in-progress:0",
         spec={"eval_run_id": str(run_id), "agent_backend": "fake"},
     )
+    await eval_store.add_usage(live_task.id, {"cost_micro_usd": 3200})
+    completion = uuid4()
+    api_eval = api_store.for_tenant("eval")
+    await api_eval.record_evolution_proposer_spend(evolution_id, completion, .004)
+    await api_eval.record_evolution_proposer_spend(evolution_id, completion, .004)
+    await outsider_store.record_evolution_proposer_spend(outsider_id, uuid4(), .90)
 
     def client_for(guest_view="local", guest_tenant="eval"):
         settings = Settings(_env_file=None, guest_view=guest_view, guest_tenant=guest_tenant, data_dir=tmp_path)
@@ -74,6 +80,9 @@ async def test_evolution_dag_and_guest_access_with_rls(postgres, store, api_stor
         response = await client.get(evolution + "/dag")
         assert str(outsider_task.id) not in response.text and str(outsider_run_id) not in response.text
         nodes = response.json()["nodes"]
+        root = next(node for node in nodes if node["kind"] == "evolution")
+        assert root["cost_usd"] == pytest.approx(float(row["spent_usd"]) + .0032 + .004)
+        assert root["meta"]["proposer_spent_usd"] == pytest.approx(.004)
         assert sum(node["kind"] == "generation" for node in nodes) == 2
         assert sum(node["kind"] == "candidate" for node in nodes) == 6
         assert next(node for node in nodes if node["kind"] == "champion")["meta"]["champion_id"] == str(champion_id)

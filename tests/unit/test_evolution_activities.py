@@ -70,6 +70,8 @@ async def test_operator_guidance_has_priority_in_both_prompts(tmp_path):
         assert system['role'] == 'system' and 'Operator guidance (highest priority' in system['content']
         assert 'Prefer narrower checks.' in system['content']
         assert 'Never alter permissions or sandbox policy' in system['content']
+        assert 'including diagnoses and hypotheses, in Simplified Chinese' in system['content']
+        assert 'Agent overlay text may remain in English' in system['content']
         assert 'Prefer narrower checks.' not in context['content']
         assert 'HOLDOUT_MARKER' not in context['content']
 
@@ -90,6 +92,31 @@ async def test_unparseable_proposals_get_one_correction_round(tmp_path):
     assert result[0]['hypothesis'] == 'h' and result[0]['static_check']['valid']
     assert gateway.complete.await_count == 3
     assert 'not a valid JSON array' in str(gateway.complete.call_args.args[0][-1])
+
+
+async def test_records_each_metered_reflection_proposal_and_correction_as_it_returns(tmp_path):
+    activities, store, gateway, request = setup(tmp_path)
+    outcomes = [
+        ('{"diagnoses":["检查边界"]}', .002),
+        ('[{"hypothesis":', .003),
+        ('[{"hypothesis":"验证修改","overlay":{"tool_guidance":"Run tests"}}]', .004),
+    ]
+    store.record_evolution_proposer_spend = AsyncMock()
+
+    async def complete(messages, model, *, max_tokens):
+        assert store.record_evolution_proposer_spend.await_count == 3 - len(outcomes)
+        assert model == 'local-proposer'
+        return outcomes.pop(0)
+
+    gateway.complete_with_cost = complete
+    request['config']['evolve_model'] = 'local-proposer'
+    result = await activities.propose(request)
+    assert result[0]['hypothesis'] == '验证修改'
+    calls = [call.args for call in store.record_evolution_proposer_spend.await_args_list]
+    assert [str(evolution) for evolution, _, _ in calls] == [request['id']] * 3
+    assert len({completion for _, completion, _ in calls}) == 3
+    assert [cost for _, _, cost in calls] == [.002, .003, .004]
+    gateway.complete.assert_not_awaited()
 
 
 @pytest.mark.parametrize('backend', ['legacy', 'dsh'])

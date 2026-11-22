@@ -35,6 +35,7 @@ class EvolutionHistory(TypedDict):
     tasks: list[dict]
     champions: list[dict]
     generations: NotRequired[list[dict]]
+    proposer_spent_usd: NotRequired[float]
 
 
 class EvolutionNode(BaseModel):
@@ -206,7 +207,8 @@ def _add_run(
     scores = [case.score for case in cases if case.score is not None]
     node = EvolutionNode(
         id=f"eval:{run['id']}", kind="eval_run", label=label, status=RUN_STATUS[run["status"]],
-        score=sum(scores) / len(scores) if scores else None, cost_usd=_cost(cases),
+        score=sum(scores) / len(scores) if scores and run["status"] == "completed" else None,
+        cost_usd=_cost(cases),
         started_at=run["created_at"], finished_at=run["finished_at"],
         meta={"run_id": str(run["id"]), "split": split, "role": role,
               "state": run["status"], "reason": run["variant"].get("reason"),
@@ -260,9 +262,7 @@ def _add_candidate(
             evaluation, tail = _add_run(dag, run, cases.get(run["id"], []), tail, split=split,
                                         position=(row['generation'], 2 if split == 'dev' else 4, number))
         if split == "dev":
-            node.score = metrics.get("pass_rate")
-            if node.score is None and evaluation is not None:
-                node.score = evaluation.score
+            node.score = evaluation.score if evaluation is not None else metrics.get("pass_rate")
         cost = evaluation.cost_usd if evaluation is not None else None
         if cost is None:
             cost = metrics.get("cost_usd")
@@ -299,7 +299,7 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
     status = RUN_STATUS[row["status"]]
     root = EvolutionNode(
         id=f"evolution:{row['id']}", kind="evolution", label=f"演进 · {str(row['id'])[:8]}", status=status,
-        cost_usd=float(row["spent_usd"]), started_at=row["created_at"], finished_at=row["finished_at"],
+        started_at=row["created_at"], finished_at=row["finished_at"],
         meta={"state": row["status"], "reason": row["config"].get("reason"), "model": row["config"].get("model"),
               "band": 0, "level": 0, "column": 0},
     )
@@ -317,7 +317,8 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
     if baseline:
         initial, tail = _add_run(dag, baseline, cases.get(baseline["id"], []), tail,
                                  role="baseline", position=(0, 1, 1))
-        root.score = initial.score
+        if status not in ACTIVE:
+            root.score = initial.score
     for column, (run, role) in enumerate(extras[0], start=2 if baseline else 1):
         _add_run(dag, run, cases.get(run["id"], []), [root], role=role, position=(0, 1, column))
 
@@ -351,15 +352,19 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
             evaluations.append(evaluation)
             feeders.extend(ends)
         generation.cost_usd = _cost(branches + evaluations)
-        generation.score = max((node.score for node in branches if node.score is not None), default=None)
 
         pending = any(node.meta["decision"] == "pending" for node in branches)
-        if pending and status in ACTIVE:
+        active_eval = any(RUN_STATUS[run["status"]] in ACTIVE for candidate in group
+                          for run in owned[candidate["id"]].values()) or any(
+                              node.status in ACTIVE for node in evaluations)
+        if status in ACTIVE and (pending or active_eval):
             generation.status = "running"
-        elif pending or any(run.status == "failed" for run in evaluations):
+        elif pending or active_eval or any(run.status == "failed" for run in evaluations):
             generation.status = "failed" if status == "failed" else "stopped"
         else:
             generation.status = "succeeded"
+        if generation.status not in ACTIVE:
+            generation.score = max((node.score for node in branches if node.score is not None), default=None)
         decision = _promotion(generation, number, branches, winner, status)
         dag.add(decision, feeders, "merge")
         tail = [decision]
@@ -377,9 +382,16 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
             dag.add(champion_node, tail, "select")
             tail = [champion_node]
             if is_best:
-                root.score = champion_node.score
+                if status not in ACTIVE:
+                    root.score = champion_node.score
                 final_champion = champion_node
 
+    eval_spent = sum(node.cost_usd or 0 for node in dag.nodes if node.kind == "eval_run")
+    # Historical graphs may omit some child evaluations while retaining the workflow total.
+    eval_spent = max(float(row["spent_usd"]), eval_spent)
+    proposer_spent = history.get("proposer_spent_usd", 0)
+    root.cost_usd = eval_spent + proposer_spent
+    root.meta.update(eval_spent_usd=eval_spent, proposer_spent_usd=proposer_spent)
     _result_band(dag, root, tail, final_champion, last, row['finished_at'])
     return dag
 

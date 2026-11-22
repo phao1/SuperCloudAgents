@@ -338,7 +338,7 @@ const portalEvolution = (() => {
     const id = state.id, path = runsPath + '/' + enc(id);
     const canManage = ui.can('eval-admin');
     const canReadChampions = canManage || state.identity.guest;
-    const header = el('div', undefined, 'stack');
+    const header = el('div', undefined, 'stack'), spend = el('p');
     const actions = ui.actions(evidenceLink('返回演进记录', pageHref('runs')));
     const message = notice(), plots = el('div', undefined, 'portal-charts'), baselineList = ui.scroll('各代冠军');
     const candidates = ui.scroll('演进候选');
@@ -346,7 +346,21 @@ const portalEvolution = (() => {
     const legend = el('div', undefined, 'portal-chart-note');
     legend.append(el('span', '当代冠军'), el('span', '候选', 'candidate'));
     const panel = $('evolution-dag-template').content.firstElementChild.cloneNode(true);
-    state.dag = SCATaskDAG.create(panel, runId => data(runsPath + '/' + enc(runId) + '/dag'), {
+    let currentRun, liveSpend;
+    function updateSpend() {
+      if (!currentRun) return;
+      const total = Math.max(Number(currentRun.spent_usd) || 0, liveSpend ?? 0);
+      spend.textContent = stateLabel(currentRun.status) + ' · 已用 ' + ui.cost(total)
+        + ' · 评测预算 ' + ui.cost(currentRun.config.budget_usd);
+    }
+    state.dag = SCATaskDAG.create(panel, async runId => {
+      const graph = await data(runsPath + '/' + enc(runId) + '/dag');
+      if (active(state)) {
+        liveSpend = graph.nodes?.find(node => node.kind === 'evolution')?.cost_usd;
+        updateSpend();
+      }
+      return graph;
+    }, {
       project: SCATaskDAG.projectEvolution,
     });
     const workbench = el('div', undefined, 'portal-run-workbench');
@@ -364,6 +378,8 @@ const portalEvolution = (() => {
     return async () => {
       const row = await data(path);
       if (!active(state)) return;
+      currentRun = row;
+      updateSpend();
       state.dag.refresh(id, true);
       state.polling = activeStates.includes(row.status);
       state.conversation.setState(state.polling ? '' : '演进已结束，无法发送消息。', row.status === 'paused');
@@ -387,8 +403,7 @@ const portalEvolution = (() => {
       signature = nextSignature;
       const config = row.config;
       header.replaceChildren(el('h3', suiteLabel(config.suite) + ' · ' + targetLabel(config)),
-        el('p', stateLabel(row.status) + ' · 已用 ' + ui.cost(row.spent_usd) + ' / ' + ui.cost(config.budget_usd)),
-        el('small', id + ' · ' + ui.date(row.created_at)));
+        spend, el('small', id + ' · ' + ui.date(row.created_at)));
       if (row.reason) header.append(el('p', row.reason, 'bad portal-reason'));
       actions.replaceChildren(evidenceLink('返回演进记录', pageHref('runs')));
       if (row.best_champion_id && canReadChampions) {
