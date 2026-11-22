@@ -349,7 +349,7 @@ const portalProjects = (() => {
     }
     showDocuments(library.documents);
     ui.list(artifacts, ['文件', '线程', '大小', '上传时间'], library.artifacts.map(item => [
-      ui.action(item.name, async () => {
+      item.missing_reason ? el('span', item.name + ' · ' + item.missing_reason) : ui.action(item.name, async () => {
         const name = item.name.split('/').map(enc).join('/');
         const response = await api('/tasks/' + enc(item.task_id) + '/artifacts/' + name);
         const blob = await response.blob();

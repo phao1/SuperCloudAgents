@@ -15,7 +15,14 @@ from boto3.s3.transfer import TransferConfig
 from botocore.exceptions import ClientError
 
 from sca.core.errors import NotFoundError
-from sca.history.bundle import BLOCK_SIZE, DigestWriter, HistoryError, Member, check_digest
+from sca.history.bundle import (
+    BLOCK_SIZE,
+    BundleWriter,
+    DigestWriter,
+    HistoryError,
+    Member,
+    check_digest,
+)
 from sca.history.privacy import copy_text
 from sca.storage.local import LocalObjectStore
 from sca.storage.s3 import S3ObjectStore
@@ -25,8 +32,23 @@ _TEXT_EXTENSIONS = {".log", ".txt", ".md", ".json", ".jsonl", ".csv", ".diff", "
 _CREDENTIAL_FILES = {"auth.json", "credentials", ".npmrc", ".netrc", "id_rsa", "id_ed25519"}
 
 
+def _s3_object(
+    store: S3ObjectStore, key: str, *, metadata_only: bool = False, allow_missing_bucket: bool = False,
+) -> dict:
+    request = store.client.head_object if metadata_only else store.client.get_object
+    try:
+        return request(Bucket=store.bucket, Key=key)
+    except ClientError as exc:
+        code = exc.response["Error"]["Code"]
+        if code in {"NoSuchKey", "404", "NotFound"} or (allow_missing_bucket and code == "NoSuchBucket"):
+            raise NotFoundError("History object not found") from None
+        raise
+
+
 @contextmanager
-def read_object(store: Storage, key: str) -> Iterator[tuple[BinaryIO, int]]:
+def read_object(
+    store: Storage, key: str, *, allow_missing_bucket: bool = False,
+) -> Iterator[tuple[BinaryIO, int]]:
     if isinstance(store, LocalObjectStore):
         try:
             source = store._path(key).open("rb")
@@ -36,38 +58,41 @@ def read_object(store: Storage, key: str) -> Iterator[tuple[BinaryIO, int]]:
             yield source, os.fstat(source.fileno()).st_size
         return
 
-    try:
-        response = store.client.get_object(Bucket=store.bucket, Key=key)
-    except ClientError as exc:
-        if exc.response["Error"]["Code"] in {"NoSuchKey", "404", "NotFound", "NoSuchBucket"}:
-            raise NotFoundError("History object not found") from None
-        raise
+    response = _s3_object(store, key, allow_missing_bucket=allow_missing_bucket)
     with io.BufferedReader(response["Body"]) as source:
         yield source, response["ContentLength"]
 
 
 def copy_artifact(
-    store: Storage, key: str, name: str, media_type: str, size: int, target: BinaryIO,
+    store: Storage, key: str, name: str, media_type: str, size: int, bundle: BundleWriter, member: str,
 ) -> None:
     filename = PurePosixPath(name.replace("\\", "/")).name.lower()
     if filename in _CREDENTIAL_FILES or filename == ".env" or filename.startswith(".env."):
-        target.write(b"[redacted credential file]\n")
+        if isinstance(store, LocalObjectStore):
+            if not store._path(key).is_file():
+                raise NotFoundError("History object not found")
+        else:
+            _s3_object(store, key, metadata_only=True)
+        with bundle.open(member) as target:
+            target.write(b"[redacted credential file]\n")
         return
+
+    extension = PurePosixPath(filename).suffix
     with read_object(store, key) as (source, length):
         if length != size:
             raise HistoryError("A published artifact changed during export. Retry the export.")
-        extension = PurePosixPath(filename).suffix
-        if extension == ".gz" and PurePosixPath(filename[:-3]).suffix in _TEXT_EXTENSIONS:
-            with (
-                gzip.GzipFile(fileobj=source) as compressed,
-                gzip.GzipFile(fileobj=target, mode="wb", mtime=0) as output,
-            ):
-                copy_text(compressed, output)
-        elif (media_type.startswith("text/") or media_type.split(";")[0].endswith(("json", "+xml"))
-              or extension in _TEXT_EXTENSIONS or _looks_like_text(source.peek(4096)[:4096])):
-            copy_text(source, target, patch=extension in {".diff", ".patch"})
-        else:
-            shutil.copyfileobj(source, target, BLOCK_SIZE)
+        with bundle.open(member) as target:
+            if extension == ".gz" and PurePosixPath(filename[:-3]).suffix in _TEXT_EXTENSIONS:
+                with (
+                    gzip.GzipFile(fileobj=source) as compressed,
+                    gzip.GzipFile(fileobj=target, mode="wb", mtime=0) as output,
+                ):
+                    copy_text(compressed, output)
+            elif (media_type.startswith("text/") or media_type.split(";")[0].endswith(("json", "+xml"))
+                  or extension in _TEXT_EXTENSIONS or _looks_like_text(source.peek(4096)[:4096])):
+                copy_text(source, target, patch=extension in {".diff", ".patch"})
+            else:
+                shutil.copyfileobj(source, target, BLOCK_SIZE)
 
 
 def _looks_like_text(sample: bytes) -> bool:
@@ -85,7 +110,7 @@ def write_object(
 ) -> bool:
     """Publish verified bytes. A previous attempt's object can be reused."""
     try:
-        with read_object(store, key) as (existing, _):
+        with read_object(store, key, allow_missing_bucket=True) as (existing, _):
             check_digest(existing, member)
             return False
     except NotFoundError:

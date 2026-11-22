@@ -427,7 +427,7 @@ const portalTasks = (() => {
     };
   }
 
-  async function loadAttempts(task) {
+  async function loadAttempts(task, artifactsRequest) {
     const root = $('task-best-of');
     root.parentElement.hidden = !task.spec.best_of;
     if (!task.spec.best_of) return;
@@ -435,21 +435,26 @@ const portalTasks = (() => {
       .filter(([name]) => name.startsWith('best_of_'))]);
     if (attemptsSignature === key) return;
     const path = taskPath(task) + '/best-of';
-    const record = await data(path);
+    const [record, artifacts] = await Promise.all([data(path), artifactsRequest]);
     if (!openTaskIs(task.id)) return;
     const message = $('task-best-of-status');
     ui.list(root, ['尝试', '模型 / 版本', '验证', '费用', '轮次', '变更统计', '操作'],
       record.attempts.map(attempt => {
         const actions = [];
         if (attempt.patch_artifact) {
-          actions.push(ui.action('查看补丁', async () => {
-            const name = attempt.patch_artifact.split('/').map(enc).join('/');
-            const patch = await (await api(taskPath(task) + '/artifacts/' + name)).text();
-            if (!openTaskIs(task.id)) return;
-            $('task-attempt-patch-title').textContent = '候选 ' + attempt.attempt + ' 的补丁';
-            diff($('task-attempt-patch-text'), patch);
-            $('task-attempt-patch').hidden = false;
-          }, message));
+          const artifact = artifacts.find(item => item.name === attempt.patch_artifact);
+          if (artifact?.missing_reason) {
+            actions.push(el('span', artifact.missing_reason));
+          } else {
+            actions.push(ui.action('查看补丁', async () => {
+              const name = attempt.patch_artifact.split('/').map(enc).join('/');
+              const patch = await (await api(taskPath(task) + '/artifacts/' + name)).text();
+              if (!openTaskIs(task.id)) return;
+              $('task-attempt-patch-title').textContent = '候选 ' + attempt.attempt + ' 的补丁';
+              diff($('task-attempt-patch-text'), patch);
+              $('task-attempt-patch').hidden = false;
+            }, message));
+          }
           if (ui.can('member') && record.select === 'human' && record.awaiting_selection) {
             actions.push(ui.action('选择', async () => {
               await data(path + '/select', {attempt: attempt.attempt});
@@ -502,9 +507,9 @@ const portalTasks = (() => {
     }, message)), message);
   }
 
-  function refreshTask(task) {
+  function refreshTask(task, artifactsRequest) {
     impact(task);
-    return loadAttempts(task).catch(e => {
+    return loadAttempts(task, artifactsRequest).catch(e => {
       if (openTaskIs(task.id)) ui.setMessage($('task-best-of-status'), e.message, true);
     });
   }
@@ -577,7 +582,8 @@ const portalTasks = (() => {
   async function report(task, artifacts) {
     const artifact = artifacts.find(item => item.name === 'report.md');
     if (!artifact) return null;
-    const key = JSON.stringify([task.id, artifact.created_at, artifact.size_bytes]);
+    const key = JSON.stringify([task.id, artifact.created_at, artifact.size_bytes, artifact.missing_reason]);
+    if (artifact.missing_reason) return {key, missingReason: artifact.missing_reason};
     if (key !== reportCache?.key) {
       const pending = api(taskPath(task) + '/artifacts/report.md').then(response => response.text());
       reportCache = {key, pending};
@@ -622,7 +628,8 @@ const portalTasks = (() => {
       root.dataset.report = '';
       target.replaceChildren(el('p', '分析报告尚未发布。当前状态 · ' + statusText(task.state)));
     } else if (root.dataset.report !== result.key) {
-      target.replaceChildren(portalMarkdown.render(result.text));
+      target.replaceChildren(result.missingReason
+        ? el('p', result.missingReason) : portalMarkdown.render(result.text));
       root.dataset.report = result.key;
     }
   }
@@ -640,8 +647,9 @@ const portalTasks = (() => {
       $(id).parentElement.hidden = true;
     }
     for (const id of ['task-extras-status', 'task-best-of-status', 'task-terminal-output', 'task-terminal-status',
-      'task-attempt-patch-text', 'analysis-report', 'analysis-rendered']) $(id).replaceChildren();
-    for (const id of ['task-attempt-patch', 'task-terminal-panel', 'analysis-report-panel']) $(id).hidden = true;
+      'task-attempt-patch-text', 'analysis-report', 'analysis-rendered', 'task-missing-artifacts']) $(id).replaceChildren();
+    for (const id of ['task-attempt-patch', 'task-terminal-panel', 'analysis-report-panel',
+      'task-missing-artifacts-panel']) $(id).hidden = true;
     $('analysis-report-panel').dataset.report = '';
   }
 

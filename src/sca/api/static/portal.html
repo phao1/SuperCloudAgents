@@ -805,6 +805,9 @@ body[data-trace-expanded] { overflow: hidden; }
             </fieldset>
             <p id="task-message-status" class="status-text portal-message" role="status"></p>
           </form>
+          <div id="task-missing-artifacts-panel" class="stack" hidden>
+            <h3>缺失的文件</h3><ul id="task-missing-artifacts"></ul>
+          </div>
           <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
         </div>
       </div>
@@ -1819,26 +1822,31 @@ async function updateTask(){
     void streamTask(id);
     const [,routeId,section,seq]=location.hash.slice(2).split('/');
     if(routeId===id&&section==='events'&&$('evidence').hidden)openEvent(Number(seq));
-    const [artifacts]=await Promise.all([data('/tasks/'+enc(id)+'/artifacts'),portalTasks.refreshTask(t)]);
+    const artifactsRequest=data(path+'/artifacts');
+    const [artifacts]=await Promise.all([artifactsRequest,portalTasks.refreshTask(t,artifactsRequest)]);
     if(selectedTask!==id||portalIdentity!==identity)return;
-    if(t.kind==='analysis'&&artifacts.some(a=>a.name==='report.md')){
-      const artifact=artifacts.find(a=>a.name==='report.md');
-      const key=id+'|'+artifact.created_at+'|'+artifact.size_bytes;
-      if($('analysis-report-panel').dataset.report!==key){
-        const report=await(await api('/tasks/'+enc(id)+'/artifacts/report.md')).text();
-        if(selectedTask===id&&portalIdentity===identity){
-          $('analysis-report').textContent=report;
-          $('analysis-rendered').replaceChildren(portalMarkdown.render(report));
-          $('analysis-report-panel').dataset.report=key;
-          $('task-analysis-link').href='#/analysis/'+enc(id);
-          $('analysis-report-panel').hidden=false;
-        }
-      }
-    }else {
-      $('analysis-report-panel').hidden=true;
+    const missing=artifacts.filter(a=>a.missing_reason&&a.name!=='changes.patch'
+      &&(t.kind!=='analysis'||a.name!=='report.md'));
+    $('task-missing-artifacts-panel').hidden=!missing.length;
+    $('task-missing-artifacts').replaceChildren(...missing.map(a=>el('li',a.name+' · '+a.missing_reason)));
+
+    const report=t.kind==='analysis'?await portalTasks.report(t,artifacts):null;
+    if(selectedTask!==id||portalIdentity!==identity)return;
+    const panel=$('analysis-report-panel');
+    panel.hidden=!report;
+    if(report&&panel.dataset.report!==report.key){
+      $('analysis-report').textContent=report.text??'';
+      $('analysis-report').parentElement.hidden=Boolean(report.missingReason);
+      $('analysis-rendered').replaceChildren(report.missingReason
+        ?el('p',report.missingReason):portalMarkdown.render(report.text));
+      panel.dataset.report=report.key;
+      $('task-analysis-link').href='#/analysis/'+enc(id);
     }
-    if(artifacts.some(a=>a.name==='changes.patch')){
-      const patch=await(await api('/tasks/'+enc(id)+'/artifacts/changes.patch')).text();
+    const patchArtifact=artifacts.find(a=>a.name==='changes.patch');
+    if(patchArtifact?.missing_reason){
+      $('patch').textContent=patchArtifact.missing_reason;
+    }else if(patchArtifact){
+      const patch=await(await api(path+'/artifacts/changes.patch')).text();
       if(selectedTask===id&&portalIdentity===identity){diff($('patch'),patch);renderTaskDiagnostics(patch)}
     }
   } finally{
