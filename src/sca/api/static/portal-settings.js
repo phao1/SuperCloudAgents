@@ -233,7 +233,7 @@ const portalSettings = (() => {
         ui.field('默认基线（留空使用仓库默认分支）', 'base_ref', {value: defaults.base_ref || ''}),
         ui.field('Agent 后端', 'agent_backend', {value: defaults.agent_backend || '',
           choices: ui.backendChoices(portalConfig, defaults.agent_backend)}),
-        ui.field('默认模型（可选）', 'model', {value: defaults.model || '', placeholder: portalConfig.default_model}),
+        portalModels.field('默认模型（可选）', 'model', {value: defaults.model || '', placeholder: portalConfig.default_model}),
         ui.field('沙箱镜像（可选）', 'image', {value: defaults.image || ''}),
         ui.field('准备命令', 'setup_command', {value: defaults.setup_command || ''}),
         ui.field('主要验证命令', 'verify_command', {value: defaults.verify_command || ''}),

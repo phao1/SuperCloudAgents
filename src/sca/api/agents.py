@@ -20,7 +20,6 @@ from sca.agents.opencode_build import (
     write_record,
 )
 from sca.agents.opencode_prompt import (
-    PROMPT_MODELS,
     PROMPT_PATH,
     PROMPT_SUITE,
     PROMPT_TARGET,
@@ -128,7 +127,7 @@ def prompt_fix_spec(
     row = next((row for row in run["results"] if str(row["task_id"]) == str(task.id)), None)
     if (
         run["status"] != "completed" or run["suite"] != PROMPT_SUITE or row is None
-        or variant.get("agent_backend") != "opencode" or model not in PROMPT_MODELS
+        or variant.get("agent_backend") != "opencode" or not model
         or not version or not variant.get("prompt_version")
         or any(task.spec.get(field) != variant[field]
                for field in ("agent_backend", "agent_version", "model", "prompt_version"))

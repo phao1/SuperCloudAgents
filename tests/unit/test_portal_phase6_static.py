@@ -11,7 +11,7 @@ import pytest
 
 STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
-    "portal-ui.js", "portal-conversation.js", "portal-markdown.js", "portal-tasks.js",
+    "portal-ui.js", "portal-conversation.js", "portal-models.js", "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
@@ -82,7 +82,7 @@ def test_project_dialog_visibility_uses_the_native_open_state():
         ("portal-tasks.js", ("/tasks", "/tools/available", "/best-of", "/select",
                              "/impact", "/terminal", "/artifacts/report.md", "/pr")),
         ("portal-conversation.js", ("/messages",)),
-        ("portal-evolution.js", ("/evolutions", "/evolution-schedules", "/champions",
+        ("portal-evolution.js", ("/evolutions", "/evolution-schedules", "/champions", "/models",
                                  "/champions/rollouts", "/evals/harvest", "/run-now",
                                  "/approve", "/reject", "/rollback", "/solidify")),
         ("portal-settings.js", ("/tools", "/grants", "/knowledge/documents",
@@ -185,7 +185,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 def test_portal_route_bootstrap(tmp_path, destination):
     source = (STATIC / "portal.html").read_text()
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
-    assert '未配置模型密钥：可浏览历史，无法运行新任务' in source
+    assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
@@ -203,8 +203,9 @@ const artifacts=destination==='task'?['changes.patch','verify.log','report.md']
   .map(name=>({name,missing_reason:missingReason})):[];
 const project={id:'project-id',name:'默认项目',status:'active',group_counts:{resolved:1030}};
 const candidate={id:'candidate',generation:1,decision:'pending',reason:'awaiting approval',overlay:{}};
-const evolution={id:'evo-id',status:'awaiting_approval',config:{suite:'fixture',agent_version:'fake',model:'fake'},
-  candidates:[candidate],journal:[]};
+const evolution={id:'evo-id',status:'awaiting_approval',spent_usd:0,
+  config:{suite:'fixture',agent_version:'fake',model:'fake',budget_usd:1},candidates:[candidate],journal:[]};
+let liveSpend=.0042;
 const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_champion_id:'previous',
   agent_version:'fake',model:'fake',solidify_builds:[{version:'built',status:'succeeded',regression_status:'completed'}]};
 const taskPath='/v1/tasks/'+task.id;
@@ -286,6 +287,7 @@ global.fetch=async (path,request)=>{
     [taskPath+'/artifacts']:artifacts,
     [taskPath+'/conversation?limit=100']:{items:[],cursor:'0',has_more:false},
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
+    [evolutionPath+'/dag']:{nodes:[{kind:'evolution',cost_usd:liveSpend}],edges:[]},
     [evolutionPath+'/conversation?limit=100']:{items:[],cursor:'e:0',has_more:false},
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
@@ -359,8 +361,12 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(!['停止演进','批准','拒绝'].some(label=>content().includes(label)));
     assert(calls.includes(evolutionPath+'/dag'));
     assert(calls.includes(evolutionPath+'/conversation?limit=100'));
+    assert(content().some(label=>label.includes('已用 $0.0042')));
+    liveSpend=.0064;
     await refresh();
+    await nextTick();
     assert.equal(calls.filter(path=>path===evolutionPath+'/dag').length,2);
+    assert(content().some(label=>label.includes('已用 $0.0064')));
 
     location.hash='#/evolutions/champions/'+champion.id;
     await route();
@@ -544,7 +550,7 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
            'config': {'suite': 'dsh-smoke', 'agent_backend': 'dsh', 'model': 'model-a', 'budget_usd': 1},
            'candidates': [], 'journal': []}
     graph = {'nodes': [
-        {'id': root, 'kind': 'evolution', 'label': '演进', 'status': 'running',
+        {'id': root, 'kind': 'evolution', 'label': '演进', 'status': 'running', 'cost_usd': .0142,
          'meta': {'band': 0, 'level': 0, 'column': 0}},
         {'id': run, 'kind': 'eval_run', 'label': '基线评测', 'status': 'succeeded', 'score': 1,
          'meta': {'band': 0, 'level': 1, 'column': 1, 'cases_passed': 1}},
@@ -591,6 +597,8 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
             fixtures = {
                 '/v1/portal/whoami': {'role': 'admin', 'tenant_id': 'eval'},
                 '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'default_agent_backend': 'dsh'},
+                '/v1/models': {'default_model': 'model-b', 'evolve_model': 'proposer-a',
+                               'data': [{'id': 'model-b', 'unpriced': True}, {'id': 'proposer-a'}]},
                 '/v1/agents/opencode/versions': [{'version': 'fixture-opencode'}],
                 '/v1/evals/suites': [
                     {'name': 'dsh-smoke', 'cases': ['a', 'b', 'c'], 'case_metadata': {
@@ -622,17 +630,27 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         assert suite.input_value() == 'opencode-evolve'
         assert form.get_by_label('基线版本').input_value() == 'fixture-opencode'
         backend.select_option('dsh')
-        form.get_by_label('评测模型').fill('model-b')
+        assert form.get_by_label('评测模型').input_value() == 'model-b'
+        assert form.get_by_label('反思与候选生成模型').input_value() == 'proposer-a'
+        assert page.locator('#models option').evaluate_all('(options) => options.map(o => o.value)') == [
+            'model-b', 'proposer-a',
+        ]
+        assert form.get_by_text('未定价模型按 $0 计费', exact=False).is_visible()
         form.get_by_label('总预算（美元）').fill('0.5')
         start.click()
         page.wait_for_url(f'**/portal#/evolutions/runs/{evolution_id}')
-        assert {key: starts[0][key] for key in ('agent_backend', 'suite', 'model', 'generations', 'candidates',
+        assert {key: starts[0][key] for key in ('agent_backend', 'suite', 'model', 'evolve_model', 'generations', 'candidates',
                                                 'repeat', 'budget_usd')} == {
-            'agent_backend': 'dsh', 'suite': 'dsh-smoke', 'model': 'model-b', 'generations': 1,
+            'agent_backend': 'dsh', 'suite': 'dsh-smoke', 'model': 'model-b', 'evolve_model': 'proposer-a', 'generations': 1,
             'candidates': 2, 'repeat': 1, 'budget_usd': .5,
         }
         panel, chat = page.locator('#evolution-dag'), page.locator('#evolution-conversation')
         panel.locator('[data-band="基线"]').wait_for()
+        for node in (root, generation):
+            label = panel.locator(f'[data-node="{node}"]').get_attribute('aria-label')
+            assert '进行中' in label
+            assert '通过率 100%' not in label
+        page.get_by_text('已用 $0.0142', exact=False).wait_for()
         assert '1 个用例 · 1 通过' in panel.locator(f'[data-node="{run}"]').get_attribute('aria-label')
         assert chat.bounding_box()['x'] > panel.bounding_box()['x']
         chat.get_by_role('link', name='定位节点').click()

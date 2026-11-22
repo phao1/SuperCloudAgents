@@ -91,6 +91,9 @@ bash scripts/portal_demo.sh down
 Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
 [Windows 源码模式指南](docs/windows.md)
 
+在「概览 → 模型接入」配置 vLLM、Ollama、LM Studio 或其他兼容服务的地址、可选密钥和模型。
+[模型接入与预算](docs/models.md)
+
 | 能力 | Docker 模式 | 源码模式 |
 | --- | --- | --- |
 | 任务隔离 | 每任务一个容器，支持出口白名单 | 本机进程，无隔离，出口白名单不生效 |
@@ -112,8 +115,8 @@ curl -fsS http://127.0.0.1:8000/v1/tasks
 ```
 
 在浏览器打开 `http://127.0.0.1:8000/portal`。新会话默认进入演示租户 `eval` 的任务历史，
-无需输入令牌或 DeepSeek API Key。顶部「只读访客模式 · 登录」可切换到令牌登录。缺少模型密钥时
-仍可查看轨迹和补丁，登录后可在概览配置密钥以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
+无需输入令牌或模型密钥。顶部「只读访客模式 · 登录」可切换到令牌登录。尚未接入模型时可查看轨迹和补丁，
+登录后可在概览添加模型以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
 
 从 Linux 服务器把任务、项目、评测和演进记录带到 Windows 源码实例时，使用
 [历史导出与导入](docs/history-transfer.md)。

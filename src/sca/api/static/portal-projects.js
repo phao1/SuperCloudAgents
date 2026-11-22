@@ -157,7 +157,7 @@ const portalProjects = (() => {
         ui.field('默认后端', 'default_backend', {
           choices: ui.backendChoices(portalConfig, project?.default_backend), value: project?.default_backend || '',
         }),
-        ui.field('默认模型', 'default_model', {maxLength: 200, value: project?.default_model || '',
+        portalModels.field('默认模型', 'default_model', {maxLength: 200, value: project?.default_model || '',
           placeholder: portalConfig.default_model}),
       ),
       repos.block, instructions,

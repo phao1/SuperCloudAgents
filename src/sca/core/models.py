@@ -245,6 +245,10 @@ class AgentContext(BaseModel):
     # Mounted Docker runtimes for Node agents
     image: str | None = None
 
+    # Local model providers
+    model_context_window: int | None = None
+    model_registered: bool = False
+
 
 class SandboxAdditions(BaseModel):
     """Extra mounts/env an agent backend needs the sandbox to be created with."""

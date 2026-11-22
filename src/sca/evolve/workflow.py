@@ -65,7 +65,7 @@ class EvolutionWorkflow:
     async def evaluate(self, overlay: dict, split: str, *, candidate_id: str | None = None,
                        role: str = 'candidate') -> dict | None:
         remaining = round(self.budget_usd - self.spent, 9)
-        if self.stopped or remaining < self.config['case_budget']:
+        if self.stopped or (not self.config.get('model_unpriced') and remaining < self.config['case_budget']):
             return None
         run_id = str(workflow.uuid4())
         params = {'run_id': run_id, 'overlay': overlay, 'split': split, 'remaining': remaining}
@@ -96,6 +96,10 @@ class EvolutionWorkflow:
             await self.act('status', {'status': 'running', 'spent_usd': self.spent})
         return run
 
+    def budget_exhausted(self) -> bool:
+        return (not self.config.get('model_unpriced')
+                and self.budget_usd - self.spent < self.config['case_budget'])
+
     def evaluation_failure(self, run: dict | None, *, candidate: bool = False) -> str | None:
         if run is not None and candidate and run['status'] == 'cancelled':
             return run.get('reason') or '候选评测已取消'
@@ -125,7 +129,7 @@ class EvolutionWorkflow:
                 if self.stopped:
                     status = 'stopped'
                     break
-                if self.budget_usd - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 dev_run = dev_run or await self.evaluate(champion['overlay'], 'dev', role='baseline')
@@ -138,7 +142,7 @@ class EvolutionWorkflow:
                 if not dev_run or dev_run['status'] != 'completed':
                     status = 'budget_exhausted'
                     break
-                if self.budget_usd - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 self.current_generation = generation
@@ -240,7 +244,7 @@ class EvolutionWorkflow:
                 if self.stopped or self.steering.stop_after_generation:
                     status = 'stopped'
                     break
-                if self.budget_usd - self.spent < self.config['case_budget']:
+                if self.budget_exhausted():
                     status = 'budget_exhausted'
                     break
                 if stale >= self.config['patience']:

@@ -55,6 +55,9 @@ Remove-Item Env:PORTAL_TOKEN
 也可以在启动前将密钥填入仓库根目录的 `.env`；脚本会复用现有配置。在获取密钥前可以
 查看历史记录。请妥善保存 `.env` 和 `.data/portal.env`。
 
+连接本机的 Ollama、LM Studio 或网络上的 vLLM 时，在「概览 → 模型接入」填写基础 URL 和模型 ID。
+同机服务可以使用 `127.0.0.1`，免密服务的 API Key 可留空。[模型接入与预算](models.md)
+
 ## 导入 Linux 历史
 
 在 Linux Docker 模式服务器的 SCA 仓库根目录导出历史。

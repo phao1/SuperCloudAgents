@@ -15,6 +15,6 @@ def require_model() -> None:
 
 async def model_not_configured(request: Request, exc: ModelNotConfiguredError) -> JSONResponse:
     return JSONResponse(
-        {"error": {"code": "model_not_configured", "message": "请先在 Portal 配置模型密钥"}},
+        {"error": {"code": "model_not_configured", "message": "请先在 Portal 配置模型接入"}},
         status_code=409,
     )

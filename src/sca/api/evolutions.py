@@ -37,6 +37,8 @@ from sca.evolve.steering import (
     receipt,
 )
 from sca.evolve.workflow import EvolutionWorkflow
+from sca.gateway.configuration import local_default_model
+from sca.gateway.model_providers import read_registry
 
 router = APIRouter(prefix='/v1')
 Admin = Annotated[Principal, Depends(authorize('tokens'))]
@@ -85,6 +87,8 @@ async def evolution_suite(name: str) -> tuple[Path, dict]:
 
 def evolution_config(body: EvolutionTarget) -> dict:
     values = body.model_dump()
+    if 'model' not in body.model_fields_set and 'model' in values:
+        values['model'] = local_default_model(get_settings().data_dir, values['model'])
     if body.agent_backend == 'dsh':
         installed = get_settings().dsh_version
         if body.agent_version not in (None, installed):
@@ -99,6 +103,9 @@ async def start(body: EvolutionConfig, request: Request, user: Admin) -> dict:
     require_model()
     settings = get_settings()
     config = evolution_config(body)
+    model = read_registry(settings.data_dir).models.get(config['model'])
+    if model and model.unpriced:
+        config['model_unpriced'] = True
     resolved, suite = await evolution_suite(body.suite)
     config['suite'] = str(resolved)
     evolution_id = uuid4()

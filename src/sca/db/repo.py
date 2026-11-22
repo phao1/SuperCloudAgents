@@ -3009,11 +3009,13 @@ class Store:
             generation_rows = (await session.execute(self._conversation_events(evolution_id)
                 .where(journal.payload['kind'].astext == 'generation')
                 .with_only_columns(journal.payload, journal.created_at))).mappings().all()
+            proposer_spent = await self._evolution_proposer_spend(session, evolution_id)
         return {
             "evolution": dict(evolution), "candidates": list(map(dict, candidates)),
             "runs": list(map(dict, runs)), "results": list(map(dict, results)),
             "tasks": list(map(dict, case_tasks)), "champions": list(map(dict, promoted)),
             "generations": [{**entry['payload'], 'created_at': entry['created_at']} for entry in generation_rows],
+            "proposer_spent_usd": proposer_spent,
         }
 
     # Evolution conversation
@@ -3195,3 +3197,43 @@ class Store:
             snapshot = query.with_only_columns(c.task_id, c.seq, c.type, compact.label('payload'), c.created_at)
             rows = (await session.execute(snapshot.where(c.seq <= page[-1].seq, c.type.in_(context)))).mappings()
             return task, page, [Event.model_validate(dict(event)) for event in rows]
+
+    # Evolution proposer spend
+
+    def _evolution_proposer_events(self, evolution_id: UUID) -> Select:
+        from sca.db.schema import evolution_events
+
+        c = evolution_events.c
+        return select(evolution_events).where(
+            c.tenant_id == self.tenant_id, c.type == "evolution.proposer_spend",
+            c.payload["evolution_id"].astext == str(evolution_id),
+        )
+
+    async def _evolution_proposer_spend(self, session: AsyncSession, evolution_id: UUID) -> float:
+        from sqlalchemy import Numeric, cast
+
+        from sca.db.schema import evolution_events
+
+        cost = evolution_events.c.payload["cost_usd"]
+        total = await session.scalar(self._evolution_proposer_events(evolution_id)
+            .where(func.jsonb_typeof(cost) == "number")
+            .with_only_columns(func.sum(cast(cost.astext, Numeric))))
+        return float(total or 0)
+
+    async def record_evolution_proposer_spend(
+        self, evolution_id: UUID, completion_id: UUID, cost_usd: float,
+    ) -> None:
+        from sca.db.schema import evolution_events
+
+        c = evolution_events.c
+        async with self._transaction() as session:
+            await self._conversation_evolution(session, evolution_id, lock=True)
+            existing = self._evolution_proposer_events(evolution_id).where(
+                c.payload["completion_id"].astext == str(completion_id),
+            ).exists()
+            if not await session.scalar(select(existing)):
+                await session.execute(insert(evolution_events).values(
+                    tenant_id=self.tenant_id, type="evolution.proposer_spend", actor="workflow",
+                    payload={"evolution_id": str(evolution_id), "completion_id": str(completion_id),
+                             "cost_usd": cost_usd},
+                ))

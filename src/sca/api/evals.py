@@ -13,7 +13,7 @@ from sqlalchemy.exc import NoResultFound
 from temporalio.client import Client
 from temporalio.service import RPCError
 
-from sca.agents.opencode_prompt import PROMPT_MODELS, PROMPT_SUITE, version_commit
+from sca.agents.opencode_prompt import PROMPT_SUITE, version_commit
 from sca.api.authz import ForbiddenError, authorize, principal
 from sca.api.guest_history import history_payload
 from sca.api.model_access import require_model
@@ -135,8 +135,8 @@ async def enqueue_run(
         raise HTTPException(409, "套件内容已变化，请用当前套件重新运行基线")
     variant = body.variant.model_dump(exclude_none=True)
     if body.suite == PROMPT_SUITE:
-        if body.variant.agent_backend != "opencode" or body.variant.model not in PROMPT_MODELS:
-            raise HTTPException(422, "系统提示词评测需要 OpenCode 和受支持的 DeepSeek 模型")
+        if body.variant.agent_backend != "opencode" or not body.variant.model:
+            raise HTTPException(422, "系统提示词评测需要 OpenCode 和模型")
         try:
             version_commit(settings, body.variant.agent_version or "")
             prompt_version = body.variant.prompt_version or EvaluationSettings().default_prompt_version

@@ -11,7 +11,6 @@ from sca.agents.opencode import validate_version
 from sca.config import Settings
 
 PROMPT_PATH = "packages/core/src/session/runner/prompt/system.txt"
-PROMPT_MODELS = ("deepseek-flash", "deepseek-v4-pro")
 PROMPT_SUITE = "opencode-prompt"
 PROMPT_TARGET = "system_prompt"
 TOOL_GUIDANCE = "${OPENCODE_TOOL_GUIDANCE}"

@@ -266,7 +266,7 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID" -H "Authorization: Bearer $
 
 `scripts/portal_demo.sh up` 的 Docker 和源码模式，以及 Windows 上的
 `.\scripts\portal_source.ps1 up`，都会在启动 API 和 Worker 前运行
-`alembic upgrade head`，应用已有迁移（含 `0025`）。手动部署时，先运行同一条迁移命令。
+`alembic upgrade head`，应用已有迁移（含 `0025` 和 `0026`）。手动部署时，先运行同一条迁移命令。
 Worker 需要 `dsh` 后端、模型网关和 `SCA_EVAL_API_TOKEN`。在 Portal「自动演进」
 选择 DeepSeek Harness、评测套件和模型。
 基线版本填写已安装的 `@deepseek-ai/dsh` npm 版本，留空使用 `SCA_DSH_VERSION`（默认
@@ -324,7 +324,8 @@ OpenCode 提示词评测入口；有开发集和留出集的 `opencode-evolve*` 
 任务因 Agent 或环境故障结束且未完成一轮时，用例标记为 `errored`。DSH 预算拒绝有单独的判定规则。
 评测详情返回 `errored` 计数及逐题状态。超过半数已执行用例出错时，评测以 `failed` 结束并记录原因。
 演进需要完整的配对结果。基线无效会结束演进，候选评测无效会记录拒绝原因。
-效率晋升要求双方有正的实测费用，开发集通过率持平或提高，留出集通过率不降且费用不涨。
+效率晋升要求双方有正的实测用量，已定价模型比较美元支出，未定价模型比较总 Token。
+开发集通过率持平或提高，留出集通过率不降且用量不涨。
 Portal 的评测和演进详情显示失败原因，演进活动失败时还会显示错误类别。
 可通过 `GET /v1/evals/runs/{id}` 和 `GET /v1/evolutions/{id}` 查看这些字段。
 查看单个任务的实测费用时，读取 `GET /v1/tasks/{id}` 的 `usage.cost_micro_usd`。
@@ -379,6 +380,25 @@ curl -fsS "$SCA_API_URL/v1/evals/runs/$EVAL_RUN_ID" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
 curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+### 实时进度与费用
+
+在「自动演进」中选择评测模型和「反思与候选生成模型」。两个选择器读取
+`GET /v1/models`，启动接口用 `model` 和可选的 `evolve_model` 指定对应模型。
+反思摘要与候选假设使用简体中文，给 Agent 的覆盖内容可保留英文。[模型接入](models.md)
+
+运行中的演进和代际节点显示「进行中」。完成的评测按已收集、可评分的结果计算通过率。
+顶部「已用」随 DAG 刷新，包含各次评测已经记账的任务费用，以及 LiteLLM 随反思和提议响应
+返回的费用。页面另列评测预算。DAG 根节点的 `cost_usd` 为总额，`meta.eval_spent_usd` 和
+`meta.proposer_spent_usd` 提供明细。[LiteLLM 响应费用字段](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/common_request_processing.py#L1904-L1928)
+
+```bash
+curl -fsS "$SCA_API_URL/v1/models" -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/dag" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"guidance","text":"优先验证边界条件"}'
 ```
 
 ### 验证

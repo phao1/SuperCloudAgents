@@ -59,7 +59,7 @@ class LiteLLMGateway:
         if self._provider_health is not None:
             self._provider_health.record(error)
 
-    async def _post_model(self, path: str, body: dict) -> dict:
+    async def _post_model(self, path: str, body: dict) -> tuple[dict, httpx.Headers]:
         try:
             response = await self._request("POST", path, json=body)
         except GatewayError:
@@ -78,7 +78,7 @@ class LiteLLMGateway:
             raise GatewayError("invalid model gateway response") from None
         if isinstance(data, dict):
             if data.get("error") is None:
-                return data
+                return data, response.headers
             if error := classify_model_error(data):
                 self._observe_model(error)
                 raise error
@@ -87,7 +87,7 @@ class LiteLLMGateway:
     async def embed(self, texts: list[str], model: str) -> list[list[float]]:
         if not texts:
             return []
-        data = await self._post_model("/v1/embeddings", {"model": model, "input": texts})
+        data, _ = await self._post_model("/v1/embeddings", {"model": model, "input": texts})
         try:
             rows = sorted(data["data"], key=lambda row: row["index"])
             if [row["index"] for row in rows] != list(range(len(texts))):
@@ -104,7 +104,12 @@ class LiteLLMGateway:
 
     async def complete(self, messages: list[dict[str, str]], model: str, *,
                        max_tokens: int = 1024) -> str:
-        data = await self._post_model('/v1/chat/completions', {
+        content, _ = await self.complete_with_cost(messages, model, max_tokens=max_tokens)
+        return content
+
+    async def complete_with_cost(self, messages: list[dict[str, str]], model: str, *,
+                                 max_tokens: int = 1024) -> tuple[str, float | None]:
+        data, headers = await self._post_model('/v1/chat/completions', {
             'model': model, 'messages': messages, 'max_tokens': max_tokens, 'temperature': 0,
         })
         try:
@@ -114,7 +119,11 @@ class LiteLLMGateway:
         except (KeyError, IndexError, TypeError, ValueError):
             raise GatewayError('invalid completion response') from None
         self._observe_model(None)
-        return content
+        try:
+            cost = float(headers.get('x-litellm-response-cost', ''))
+        except ValueError:
+            return content, None
+        return content, cost if math.isfinite(cost) and cost >= 0 else None
 
     async def issue_key(
         self,
