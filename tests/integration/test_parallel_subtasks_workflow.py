@@ -3,6 +3,7 @@
 import asyncio
 import socket
 from contextlib import asynccontextmanager, suppress
+from dataclasses import replace
 from uuid import uuid4
 
 import pytest
@@ -45,6 +46,7 @@ class Script:
         self.active: set[str] = set()
         self.peak = 0
         self.turns: asyncio.Queue[SubtaskInput] = asyncio.Queue()
+        self.prompts: list[SubtaskInput] = []
         self.queued: asyncio.Queue[str] = asyncio.Queue()
         self.finished: set[str] = set()
         self.release = asyncio.Event()
@@ -71,8 +73,8 @@ class Script:
     @activity.defn(name='coding.prepare_scoped_subtask')
     async def prepare(self, inp: SubtaskPreparationInput) -> dict:
         assert {result.name for result in inp.dependencies} <= self.finished
-        self.start(inp.name)
-        return {}
+        self.start(inp.agent.workspace if inp.agent else inp.name)
+        return {'session_id': 'fake-session'} if inp.agent and inp.agent.workspace != inp.name else {}
 
     @activity.defn(name='coding.subtask_step')
     async def step(self, inp: SubtaskInput) -> dict:
@@ -80,6 +82,7 @@ class Script:
             case 'prepare':
                 self.start(inp.name)
             case 'run_agent_turn':
+                self.prompts.append(inp)
                 self.turns.put_nowait(inp)
                 try:
                     while not self.release.is_set() and inp.turn == 1:
@@ -96,12 +99,12 @@ class Script:
                 self.finished.add(inp.name)
                 return {'passed': True}
             case 'destroy_sandbox':
-                self.active.discard(inp.name)
+                self.active.discard(inp.agent.workspace if inp.agent else inp.name)
         return {}
 
     @activity.defn(name='coding.best_of_step')
     async def attempt_step(self, inp: AttemptStep) -> dict:
-        return await self.step(inp.step)
+        return await self.step(replace(inp.step, agent=None))
 
     @activity.defn(name='coding.best_of_subtask_start')
     async def start_attempts(self, inp: SubtaskAttempts) -> list[Attempt]:
@@ -122,8 +125,10 @@ class Script:
         pass
 
     @activity.defn(name='coding.record_subtask_schedule')
-    async def schedule(self, inp: SubtaskSchedule) -> None:
+    async def schedule(self, inp: SubtaskSchedule) -> str:
         assert inp.max_parallel_agents == 2
+        assert inp.lanes
+        return 'fake'
 
     @activity.defn(name='coding.record_subtask_progress')
     async def progress(self, inp: SubtaskProgress) -> None:
@@ -233,7 +238,8 @@ def subtask(name, **options):
 @pytest.mark.parametrize('mode', ['queue', 'interrupt'])
 async def test_cap_dependencies_and_interjection_fanout(runtime, mode):
     script = Script()
-    task = spec(subtask('api'), subtask('ui'), subtask('docs'), subtask('tests', depends_on=['api', 'ui']))
+    task = spec(subtask('api'), subtask('ui'), subtask('docs'),
+                subtask('followup', depends_on=['api']), subtask('tests', depends_on=['api', 'ui']))
     async with runtime(script, task) as (root, result, replayer), asyncio.timeout(15):
         first_two = {(await script.turns.get()).name, (await script.turns.get()).name}
         assert len(first_two) == 2 and 'tests' not in first_two
@@ -260,6 +266,9 @@ async def test_cap_dependencies_and_interjection_fanout(runtime, mode):
             await replayer.replay_workflow(await root.fetch_history())
     assert script.peak == 2
     assert script.interrupted == (first_two if mode == 'interrupt' else set())
+    [followup] = [turn for turn in script.prompts if turn.name == 'followup']
+    assert followup.agent.workspace == 'api' and followup.session_id == 'fake-session'
+    assert 'Cover an empty input' not in followup.prompt
 
 
 async def test_nested_best_of_uses_the_same_capacity(runtime):

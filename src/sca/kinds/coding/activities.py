@@ -42,7 +42,7 @@ from sca.kernel.activities import (
 )
 from sca.kernel.interjection import MESSAGES_PENDING
 from sca.kinds.coding.spec import CodingSpec
-from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskInput
+from sca.kinds.coding.subtask_inputs import MergeInput, SubtaskAgent, SubtaskInput
 from sca.observability import business_metrics, metric_guard
 from sca.storage.local import key_for
 from sca.workspace.git import GitWorkspace
@@ -209,7 +209,7 @@ class CodingActivities(KernelActivities):
     async def subtask_step(self, inp: SubtaskInput) -> dict:
         from sca.kinds.coding.subtasks import ChildActivities
 
-        child = ChildActivities(self, inp.name)
+        child = ChildActivities(self, inp.name, inp.agent)
         await self._ensure_state(inp.task_id)
         if inp.action == "prepare":
             await child.record_started(inp.task_id)
@@ -231,31 +231,41 @@ class CodingActivities(KernelActivities):
 
     @activity.defn(name="coding.merge_subtasks")
     async def merge_subtasks(self, inp: MergeInput) -> list[dict]:
-        await self._ensure_state(inp.task_id)
+        from sca.kinds.coding.subtasks import subtask_sources
         from sca.workspace.merge import merge_subtasks
 
+        await self._ensure_state(inp.task_id)
         task = await self.store.get_task(inp.task_id)
-        from sca.kinds.coding.subtasks import ChildActivities
-
-        for result in inp.results:
-            await ChildActivities(self, result.name)._ensure_state(inp.task_id)
+        base = task.result["base_sha"]
         ws = self._workspace(inp.task_id)
-        commit, results = await merge_subtasks(
-            ws.mirror,
-            task.result["base_sha"],
-            ws.branch,
-            [(self._task_dir(inp.task_id) / "sub" / r.name / "mirror.git", r) for r in inp.results],
-            task_id=inp.task_id,
-        )
-        for r in results:
-            if r.status not in {"merged", "unchanged"}:
-                child = GitWorkspace(self._task_dir(inp.task_id) / "sub" / r.name, r.branch)
-                patch = (await child.diff(task.result["base_sha"]) if r.commit else "").encode()
-                name = f"subtask-{r.name}.patch"
+        async with subtask_sources(self, inp.task_id, inp.results) as sources:
+            commit, results = await merge_subtasks(ws.mirror, base, ws.branch, sources, task_id=inp.task_id)
+            for (source, _), result in zip(sources, results, strict=True):
+                if result.status in {"merged", "unchanged"}:
+                    continue
+                patch = b""
+                if result.commit:
+                    directory = source.parent
+                    if result.agent_lane is not None:
+                        directory /= result.name
+                        directory.mkdir()
+                    child = GitWorkspace(directory, result.branch)
+                    if result.agent_lane is not None:
+                        await child._git("clone", "--mirror", "--", str(source), str(child.mirror))
+                    patch = (await child.diff(base)).encode()
+                name = f"subtask-{result.name}.patch"
                 uri = await self.objects.put(key_for(inp.task_id, name), patch, "text/x-diff")
                 await self.store.add_artifact(inp.task_id, name, "text/x-diff", uri, len(patch))
         await self._save_state(inp.task_id, 0, commit)
-        statuses = [asdict(r) for r in results]
+        statuses = []
+        backend = self._backend(await self._spec(inp.task_id)).name if any(r.agent_lane for r in results) else None
+        for result in results:
+            status = asdict(result)
+            status.pop("applied_messages")
+            status.pop("agent_lane")
+            if backend is not None and result.agent_lane is not None:
+                status.update(SubtaskAgent(result.agent_lane, backend, result.name).event_fields())
+            statuses.append(status)
         await self.store.update_result(inp.task_id, {"commit": commit, "subtasks": statuses})
         await self.store.append_event(
             inp.task_id,

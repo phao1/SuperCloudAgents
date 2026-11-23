@@ -2,8 +2,10 @@ import json
 import shutil
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import pytest
+from test_portal_phase6_static import TENANT_PORTAL_CONFIG, portal_browser, serve_portal
 from test_task_dag import history, task
 
 from sca.core.models import TaskState
@@ -110,6 +112,115 @@ for (const direction of ['vertical', 'horizontal']) {
   assert(positions.turn[along] < positions.c[along]);
 }
 """)
+
+
+@pytest.fixture
+def agent_example():
+    owner = task(spec={"plan": "auto", "agent_backend": "dsh", "instruction": "并行实现 A、B、C、D，再从 A 继续完成 E"})
+    subtasks = [{"name": name, "depends_on": ["A"] if name == "E" else []} for name in "ABCDE"]
+    assignments = {
+        name: {"agent_lane": number, "agent_label": f"Agent {number} · DeepSeek Harness", "backend": "dsh"}
+        for name, number in zip("ABCDE", [1, 2, 3, 4, 1], strict=True)
+    }
+    rows = history(
+        owner,
+        ("plan.started", {"attempt": 1}),
+        ("plan.completed", {"attempt": 1, "split": True, "subtasks": subtasks}),
+        ("subtasks.scheduled", {"max_parallel_agents": 2, "subtasks": [
+            {"name": name, **assignments[name]} for name in "ABCDE"
+        ]}),
+        ("subtask.started", {"subtask": "A", **assignments["A"]}),
+        ("agent.turn_started", {"subtask": "A", **assignments["A"], "turn": 1}),
+        ("agent.turn_completed", {"subtask": "A", **assignments["A"], "turn": 1}),
+        ("subtask.completed", {"subtask": "A", **assignments["A"], "passed": True}),
+        ("subtask.started", {"subtask": "C", **assignments["C"]}),
+        ("subtask.completed", {"subtask": "C", **assignments["C"], "passed": True}),
+        ("subtask.started", {"subtask": "E", **assignments["E"]}),
+        ("agent.turn_started", {"subtask": "E", **assignments["E"], "turn": 1}),
+    )
+    dag = build_task_dag(owner, rows, []).model_dump(mode="json", by_alias=True)
+    return owner, dag, rows
+
+
+def test_agent_lanes_stay_aligned_with_cross_lane_dependencies(agent_example):
+    _, dag, _ = agent_example
+    run_node("""
+const assert = require('node:assert/strict');
+const {layout, projectGraph} = require(process.argv[1]);
+const dag = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
+const a = dag.nodes.find(n => n.kind === 'subtask' && n.label === 'A');
+const e = dag.nodes.find(n => n.kind === 'subtask' && n.label === 'E');
+const b = dag.nodes.find(n => n.kind === 'subtask' && n.label === 'B');
+dag.edges.push({from: b.id, to: e.id, kind: 'dependency'});
+for (const orientation of ['vertical', 'horizontal']) {
+  const graph = layout(projectGraph(dag, new Set([a.id])), orientation);
+  const item = id => graph.nodes.find(n => n.node.id === id);
+  const across = orientation === 'vertical' ? 'x' : 'y';
+  const along = orientation === 'vertical' ? 'y' : 'x';
+  const turns = graph.nodes.filter(n => n.node.meta?.parent === a.id);
+  assert.equal(item(a.id).cross, item(e.id).cross);
+  assert(turns.length && turns.every(turn => turn.cross === item(a.id).cross));
+  assert(item(e.id)[along] > item(a.id)[along]);
+  assert(item(a.id)[across] < item(b.id)[across]);
+  assert.equal(graph.agentBands.length, 4);
+  const edge = graph.edges.find(({source, target}) => source.node.id === b.id && target.node.id === e.id);
+  assert.equal(edge?.kind, 'dependency');
+  assert.notEqual(edge.source.cross, edge.target.cross);
+}
+""", dag)
+
+
+def test_portal_browser_renders_four_agent_lanes_at_1440(agent_example, tmp_path):
+    owner, dag, rows = agent_example
+    task_path = f"/v1/tasks/{owner.id}"
+    e = next(node for node in dag["nodes"] if node["kind"] == "subtask" and node["label"] == "E")
+    journal = {"items": [
+        {"id": "a-started", "kind": "subtask.started", "text": "A · 开始", "created_at": owner.created_at.isoformat(),
+         "agent_lane": 1, "agent_label": "Agent 1 · DeepSeek Harness"},
+        {"id": "e-started", "kind": "subtask.started", "text": "E · 开始", "created_at": owner.created_at.isoformat(),
+         "agent_lane": 1, "agent_label": "Agent 1 · DeepSeek Harness", "dag_node_id": e["id"]},
+    ], "cursor": "11", "has_more": False}
+    fixtures = {
+        "/v1/portal/config": TENANT_PORTAL_CONFIG,
+        "/v1/portal/whoami": {"role": "member", "tenant_id": owner.tenant_id},
+        task_path: owner.model_dump(mode="json"),
+        task_path + "/dag": dag,
+        task_path + "/events": [row.model_dump(mode="json") for row in rows],
+        task_path + "/conversation": journal,
+    }
+
+    def handle(route):
+        url = urlsplit(route.request.url)
+        if serve_portal(route, url.path):
+            return
+        if url.path == task_path + "/conversation" and "cursor=11" in url.query:
+            route.fulfill(json={**journal, "items": []})
+        elif url.path == task_path + "/events" and "after=11" in url.query:
+            route.fulfill(json=[])
+        else:
+            route.fulfill(json=fixtures.get(url.path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page(viewport={"width": 1440, "height": 1000}, reduced_motion="reduce")
+        page.set_default_timeout(5000)
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-member')")
+        page.route("**/*", handle)
+        page.goto(f"http://portal.test/portal#/tasks/{owner.id}")
+        panel = page.locator("#task-dag")
+        panel.get_by_text("4 个 agent · 5 个子任务 · 最多并发 2", exact=True).wait_for()
+        lane = panel.locator(".dag-agent-lane")
+        lane.last.wait_for()
+        assert lane.count() == 4
+        assert lane.locator(".dag-agent-chain").all_text_contents() == ["A → E", "B", "C", "D"]
+        assert lane.locator(".dag-agent-status").all_text_contents() == ["运行中", "排队中", "完成", "排队中"]
+        assert lane.first.locator(".dag-agent-backend").text_content() == "DeepSeek Harness"
+        chat = page.locator("#task-conversation")
+        chip = chat.get_by_text("Agent 1 · DeepSeek Harness · E · 开始", exact=True)
+        chip.wait_for()
+        panel.evaluate("(node) => node.scrollIntoView({block: 'start'})")
+        page.screenshot(path=tmp_path / "agent-lanes-1440.png", animations="disabled")
+        chip.dispatch_event("click")
+        assert panel.locator('[data-kind="subtask"][aria-pressed="true"]').get_attribute("data-node") == e["id"]
 
 
 def test_dag_layout_layers_branches_without_overlap_and_routes_long_edges():

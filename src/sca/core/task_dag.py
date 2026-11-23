@@ -206,6 +206,7 @@ class _TaskTrace:
     ) -> DAGNode:
         if "subtask" in lane.node.meta:
             meta.setdefault("subtask", lane.node.meta["subtask"])
+        meta.update(_fields(lane.node.meta, "agent_lane", "agent_label"))
         if kind in EXECUTION_STEPS:
             meta["parent"] = lane.node.id
         return self.graph.add(self.task, f"{lane.node.id}/{kind}:{suffix}", kind, label, **meta)
@@ -238,7 +239,7 @@ class _TaskTrace:
             if not isinstance(name, str):
                 continue
             lane = self._subtask(name)
-            lane.node.meta.update(_fields(row, "depends_on", "paths"))
+            lane.node.meta.update(_fields(row, "depends_on", "paths", "agent_lane", "agent_label", "backend"))
             self._declare_attempts(lane, row.get("best_of"))
 
     def _declare_attempts(self, lane: _Lane, best_of: Any) -> None:
@@ -263,6 +264,7 @@ class _TaskTrace:
                 if plan.node.finished_at is None or payload.get("turn") == 0:
                     return plan
             lane = self._subtask(name)
+            lane.node.meta.update(_fields(payload, "agent_lane", "agent_label"))
             if event.type != "subtasks.merged":
                 lane.node.start(event.created_at)
         number = payload.get("best_of_attempt", payload.get("best_of_candidate"))
@@ -301,6 +303,7 @@ class _TaskTrace:
             lane.needs_fix = False
             if type_ != "agent.turn_completed":
                 turn.start(at)
+        turn.meta.update(_fields(lane.node.meta, "agent_lane", "agent_label"))
         if type_ in TOOL_EVENTS:
             self._tool(lane, turn, event)
         elif type_ == "agent.usage":
@@ -327,7 +330,7 @@ class _TaskTrace:
         if group is None:
             group = self.graph.add(
                 self.task, f"{turn.id}/tool_group", "tool_group", "工具调用",
-                tools=[], counts={}, **_fields(turn.meta, "parent", "turn", "subtask"),
+                tools=[], counts={}, **_fields(turn.meta, "parent", "turn", "subtask", "agent_lane", "agent_label"),
             )
             lane.tools[turn.id] = self.graph.advance(lane, group)
             group.start(event.created_at)
@@ -537,11 +540,12 @@ class _TaskTrace:
                 self._merge(p.get("subtasks"), at)
         elif type_ == "subtasks.scheduled":
             self.root.node.meta.update(_fields(p, "max_parallel_agents"))
+            self._declare_subtasks(p.get("subtasks"))
         elif type_ in {"subtask.queued", "subtask.started", "subtask.completed"} and isinstance(
             name := p.get("subtask"), str,
         ):
             node = self._subtask(name).node
-            node.meta.update(_fields(p, "backend", "model"))
+            node.meta.update(_fields(p, "backend", "model", "agent_lane", "agent_label"))
             if type_ == "subtask.queued":
                 node.meta["waiting_for_slot"] = True
             else:
@@ -577,7 +581,8 @@ class _TaskTrace:
                     return lane.select
                 attempt = lane.attempts.get(p.get("attempt"))
                 return attempt.node if attempt else lane.node
-            elif type_ == "sandbox.destroyed" and lane.node.kind == "subtask" and not lane.attempts:
+            elif (type_ == "sandbox.destroyed" and lane.node.kind == "subtask"
+                  and not lane.attempts and "agent_lane" not in p):
                 if lane.tail.kind == "verification":
                     status = "succeeded" if lane.tail.status == "skipped" else lane.tail.status
                     lane.node.close(status, at)
@@ -748,6 +753,41 @@ class _TaskTrace:
             branch.tokens = self._total(branch_turns, "tokens")
             branch.cost_usd = self._total(branch_turns, "cost_usd")
 
+    # Agent lanes
+    def summarize_agents(self) -> None:
+        agents: dict[int, list[DAGNode]] = defaultdict(list)
+        for lane in self.subtasks.values():
+            if type(number := lane.node.meta.get("agent_lane")) is int and 1 <= number <= 8:
+                agents[number].append(lane.node)
+        if not agents:
+            return
+        rows = []
+        for number, nodes in sorted(agents.items()):
+            nodes.sort(key=lambda node: node.meta.get("level", 0))
+            states = {node.status for node in nodes}
+            if "running" in states or states == {"succeeded", "pending"}:
+                status = "running"
+            elif "pending" in states:
+                status = "pending"
+            elif "failed" in states:
+                status = "failed"
+            elif "cancelled" in states:
+                status = "cancelled"
+            elif "succeeded" in states:
+                status = "succeeded"
+            else:
+                status = "skipped"
+            label = nodes[0].meta.get("agent_label")
+            backend = nodes[0].meta.get("backend")
+            rows.append({
+                "agent_lane": number,
+                "agent_label": label if isinstance(label, str) and label else f"Agent {number}",
+                "backend": backend if isinstance(backend, str) else None,
+                "status": status,
+                "subtasks": [node.label for node in nodes],
+            })
+        self.root.node.meta.update(agent_count=len(rows), agent_lanes=rows)
+
 
 def build_task_dag(task: Task, events: Iterable[Event], children: Iterable[Task]) -> TaskDAG:
     """Build a snapshot from the root, the available descendant rows and their events."""
@@ -805,6 +845,7 @@ def build_task_dag(task: Task, events: Iterable[Event], children: Iterable[Task]
             for step in owned[child.task.id]:
                 if step is actual or step is child.finish or step.meta.get("parent") == actual.id:
                     step.meta["parent"] = branch.id
+        trace.summarize_agents()
     return TaskDAG(nodes=list(graph.nodes.values()), edges=list(graph.edges.values()))
 
 

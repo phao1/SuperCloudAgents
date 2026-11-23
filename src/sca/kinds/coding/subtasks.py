@@ -5,9 +5,10 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from temporalio import activity
@@ -17,8 +18,9 @@ from sca.codegraph.index import CodeIndex
 from sca.codegraph.repository import changed_paths, display_path, index_commit
 from sca.core.errors import WorkspaceError
 from sca.core.interfaces import ObjectStore, StateTransport
-from sca.core.models import Event, EventType, SandboxSpec, Task
+from sca.core.models import Event, EventType, SandboxSpec, Task, tail
 from sca.db.repo import Store
+from sca.history.privacy import clean_text
 from sca.kinds.coding.activities import (
     CheckpointResult,
     CodingActivities,
@@ -28,6 +30,7 @@ from sca.kinds.coding.activities import (
 )
 from sca.kinds.coding.spec import path_scope
 from sca.kinds.coding.subtask_inputs import (
+    SubtaskAgent,
     SubtaskInput,
     SubtaskPreparationInput,
     SubtaskProgress,
@@ -43,9 +46,10 @@ def _artifact_name(scope: str, artifact: str, nested: bool) -> str:
 
 
 class ChildStore:
-    def __init__(self, store: Store, name: str) -> None:
+    def __init__(self, store: Store, name: str, agent: SubtaskAgent | None = None) -> None:
         self.store, self.name = store, name
         self.prefix = f"subtask.{name}."
+        self._agent_fields = agent.event_fields() if agent else {}
 
     @property
     def usage_prefix(self) -> str:
@@ -81,7 +85,7 @@ class ChildStore:
         return await self.store.append_event(
             task_id,
             type_,
-            {**payload, "subtask": self.name},
+            {**payload, "subtask": self.name, **self._agent_fields},
             dedup_key=f"{self.name}.{dedup_key}" if dedup_key else None,
         )
 
@@ -93,7 +97,7 @@ class ChildStore:
         *, plan_attempt: int | None = None,
     ) -> None:
         await self.store.start_guided_turn(
-            task_id, {**start, "subtask": self.name}, f"{self.name}.{key}",
+            task_id, {**start, "subtask": self.name, **self._agent_fields}, f"{self.name}.{key}",
             message_ids, interrupted_ids, plan_attempt=plan_attempt,
         )
 
@@ -146,11 +150,12 @@ class _CheckpointTransport:
 class ChildActivities(CodingActivities):
     # Instances restored from before nested subtasks have no parent in their state.
     _parent: ChildActivities | None = None
+    lane: SubtaskAgent | None = None
 
-    def __init__(self, parent: CodingActivities, name: str) -> None:
+    def __init__(self, parent: CodingActivities, name: str, agent: SubtaskAgent | None = None) -> None:
         super().__init__(
             settings=parent.settings,
-            store=ChildStore(parent.store, name),
+            store=ChildStore(parent.store, name, agent),
             sandbox=parent.sandbox,
             agent=parent.agent,
             objects=ChildObjects(parent.objects, name),
@@ -160,7 +165,12 @@ class ChildActivities(CodingActivities):
             worker_identity=parent.worker_identity,
         )
         self.name = name
+        self.lane = agent
         self._parent = parent if isinstance(parent, ChildActivities) else None
+
+    @property
+    def workspace_name(self) -> str:
+        return self.lane.workspace if self.lane else self.name
 
     @property
     def scope(self) -> str:
@@ -181,6 +191,10 @@ class ChildActivities(CodingActivities):
                 TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id,
                           inp.interjectible, inp.guidance)
             )
+            if self.lane is not None and not result.session_id and not result.skipped:
+                await self.store.update_result(inp.task_id, {
+                    "turn_summary": tail(clean_text(result.final_message), 2000),
+                })
         else:
             result = await getattr(self, inp.action)(StepInput(inp.task_id, inp.turn))
         if inp.action == "check_budget":
@@ -190,7 +204,7 @@ class ChildActivities(CodingActivities):
     def _task_dir(self, task_id: str) -> Path:
         base = (self._parent._task_dir(task_id) if self._parent is not None
                 else self.settings.task_dir(task_id))
-        return base / "sub" / self.name
+        return base / "sub" / self.workspace_name
 
     async def record_started(self, task_id: str) -> None:
         spec = await self._spec(task_id)
@@ -202,12 +216,12 @@ class ChildActivities(CodingActivities):
         )
 
     def _workspace(self, task_id: str) -> GitWorkspace:
-        return GitWorkspace(self._task_dir(task_id), f"{branch_name(task_id)}-{self.name}")
+        return GitWorkspace(self._task_dir(task_id), f"{branch_name(task_id)}-{self.workspace_name}")
 
     async def _create_sandbox(self, task_id: str) -> tuple[str, str]:
         # The provider wrapper changes only identity and labels, retaining all mounts/policy.
         provider = self.sandbox
-        name = self.scope
+        name = self.workspace_name if self.lane else self.scope
         sandbox_name = self._scoped_sandbox_name(task_id)
 
         class ScopedProvider:
@@ -227,7 +241,7 @@ class ChildActivities(CodingActivities):
     def _scoped_sandbox_name(self, task_id: str) -> str:
         if self._parent is not None:
             return f"{self.scope.replace('.', '-')}-{task_id}"
-        return f"task-{task_id}-{self.name}"
+        return f"task-{task_id}-{self.workspace_name}"
 
     def _memory_proposal_batch(self, turn: int) -> str:
         return f"subtask.{self.name}.{turn}"
@@ -315,7 +329,13 @@ class ChildActivities(CodingActivities):
 
     async def destroy_sandbox(self, task_id: str) -> None:
         task = await self.store.get_task(task_id)
-        sandbox_id = task.result.get("sandbox_id", f"sca-{self._scoped_sandbox_name(task_id)}")
+        sandbox_id = task.result.get("sandbox_id")
+        if not sandbox_id and self.workspace_name != self.name:
+            owner = await ChildStore(self.store.store, self.workspace_name).get_task(task_id)
+            sandbox_id = owner.result.get("sandbox_id")
+        if not sandbox_id:
+            name = self._scoped_sandbox_name(task_id)
+            sandbox_id = name if self.lane and self.settings.sandbox_driver == "local" else f"sca-{name}"
         await self.sandbox.destroy(sandbox_id)
         await self.store.append_event(
             task_id,
@@ -363,21 +383,31 @@ class SubtaskActivities:
 
     # Parallel coding subtasks
     @activity.defn(name="coding.record_subtask_schedule")
-    async def record_schedule(self, inp: SubtaskSchedule) -> None:
+    async def record_schedule(self, inp: SubtaskSchedule) -> str | None:
+        payload: dict[str, Any] = {"max_parallel_agents": inp.max_parallel_agents}
+        backend = None
+        if inp.lanes:
+            backend = self.acts._backend(await self.acts._spec(inp.task_id)).name
+            payload["subtasks"] = [
+                {"name": name, **SubtaskAgent(number, backend, names[0]).event_fields()}
+                for number, names in enumerate(inp.lanes, start=1) for name in names
+            ]
         await self.acts.store.append_event(
-            inp.task_id, "subtasks.scheduled", {"max_parallel_agents": inp.max_parallel_agents},
+            inp.task_id, "subtasks.scheduled", payload,
             dedup_key="subtasks.scheduled",
         )
+        return backend
 
     @activity.defn(name="coding.record_subtask_progress")
     async def record_progress(self, inp: SubtaskProgress) -> None:
         if inp.stage == "queued":
             payload = {}
         else:
-            spec = await self.acts._spec(inp.task_id)
-            payload = {"backend": self.acts._backend(spec).name, "passed": inp.passed,
-                       **({"status": "blocked"} if inp.blocked else {})}
-        await ChildStore(self.acts.store, inp.name).append_event(
+            payload = {"passed": inp.passed, **({"status": "blocked"} if inp.blocked else {})}
+            if inp.agent is None:
+                spec = await self.acts._spec(inp.task_id)
+                payload["backend"] = self.acts._backend(spec).name
+        await ChildStore(self.acts.store, inp.name, inp.agent).append_event(
             inp.task_id, f"subtask.{inp.stage}", payload, dedup_key=inp.stage,
         )
 
@@ -392,12 +422,19 @@ class SubtaskActivities:
         acts = self.acts
         await acts._ensure_state(task_id)
         parent = await acts.store.get_task(task_id)
-        child = ChildActivities(acts, inp.name)
-        await child._ensure_state(task_id)
+        child = ChildActivities(acts, inp.name, inp.agent)
         ws = child._workspace(task_id)
         task = await child.store.get_task(task_id)
         base = task.result.get("base_sha")
-        if not base or not ws.mirror.exists():
+        continuation = {}
+        continuing = inp.agent is not None and inp.agent.workspace != inp.name
+        if continuing:
+            previous = inp.dependencies[0]
+            base = previous.commit
+            continuation = await self._continue_lane(child, task_id, previous)
+        else:
+            await child._ensure_state(task_id)
+        if not continuing and (not base or not ws.mirror.exists()):
             base = parent.result["base_sha"]
             await ws.prepare(str(acts._workspace(task_id).mirror), base, mirror_only=True)
             if inp.dependencies:
@@ -421,19 +458,59 @@ class SubtaskActivities:
                 )
                 hints = contract_hints(index, inp.scopes, inp.shared_paths)
         await child.record_started(task_id)
-        await child.create_sandbox(task_id)
-        return {"contracts": hints}
+        if not continuing:
+            await child.create_sandbox(task_id)
+        return {"contracts": hints, **continuation}
+
+    async def _continue_lane(self, child: ChildActivities, task_id: str, previous: SubtaskResult) -> dict:
+        prior = ChildActivities(self.acts, previous.name, child.lane)
+        restored = await prior._ensure_state(task_id)
+        task = await prior.store.get_task(task_id)
+        sandbox_id = task.result.get("sandbox_id")
+        if restored or not (sandbox_id and await prior.sandbox.exists(sandbox_id)):
+            if sandbox_id:
+                await prior.sandbox.destroy(sandbox_id)
+            await prior.restore_sandbox(StepInput(task_id, 0))
+            sandbox_id = await prior._sandbox_id(task_id)
+
+        # Verification may have left changes after the checkpoint. Reset in the sandbox.
+        git = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+        branch = child._workspace(task_id).branch
+        for args in (["checkout", "-f", "-B", branch, previous.commit], ["clean", "-ffd"]):
+            exit_event, _ = await child._run(sandbox_id, [*git, *args], timeout_s=90)
+            if exit_event.exit_code:
+                raise ApplicationError("could not prepare the next subtask from the lane checkpoint")
+        session = task.result.get("session_id")
+        await child.store.update_result(task_id, {"sandbox_id": sandbox_id, "session_id": session})
+        await child._save_state(task_id, 0, previous.commit)
+        return {"session_id": session, "previous_summary": task.result.get("turn_summary", "")}
 
     async def _merge_dependencies(
         self, inp: SubtaskPreparationInput, ws: GitWorkspace, base: str,
     ) -> tuple[str, list[SubtaskResult]]:
         dependencies = []
         for result in inp.dependencies:
-            child = ChildActivities(self.acts, result.name)
-            await child._ensure_state(inp.task_id)
             # A dependency without its own edits may still carry the merged work of its ancestors.
-            dependencies.append((
-                child._workspace(inp.task_id).mirror,
-                replace(result, changed=bool(result.commit), depends_on=[]),
-            ))
-        return await merge_subtasks(ws.mirror, base, ws.branch, dependencies, task_id=inp.task_id)
+            dependencies.append(replace(result, changed=bool(result.commit), depends_on=[]))
+        async with subtask_sources(self.acts, inp.task_id, dependencies) as sources:
+            return await merge_subtasks(ws.mirror, base, ws.branch, sources, task_id=inp.task_id)
+
+
+# Agent lanes
+@contextlib.asynccontextmanager
+async def subtask_sources(
+    acts: CodingActivities, task_id: str, results: list[SubtaskResult],
+) -> AsyncIterator[list[tuple[Path, SubtaskResult]]]:
+    with TemporaryDirectory(prefix="sca-subtasks-") as directory:
+        sources = []
+        for result in results:
+            child = ChildActivities(acts, result.name)
+            source = child._workspace(task_id).mirror
+            if result.agent_lane is None:
+                await child._ensure_state(task_id)
+            elif result.commit:
+                # A later subtask may already be updating the same lane branch.
+                source = Path(directory) / f"{result.name}.bundle"
+                source.write_bytes(await child._state(task_id).checkpoint_bundle(result.commit))
+            sources.append((source, result))
+        yield sources

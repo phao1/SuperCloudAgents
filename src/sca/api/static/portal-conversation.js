@@ -309,7 +309,7 @@ const portalConversation = (() => {
       const mark = el('span', backend.slice(0, 1), 'conversation-avatar');
       mark.setAttribute('aria-hidden', 'true');
       const group = el('div', undefined, 'conversation-agent-body');
-      const name = el('strong', backend);
+      const name = el('strong', item.agent_label || backend);
       const identity = el('div', undefined, 'conversation-agent-label');
       identity.append(name);
       if (item.scope) identity.append(el('span', item.scope));
@@ -346,8 +346,8 @@ const portalConversation = (() => {
         row.classList.add('conversation-system');
         body.classList.add('conversation-chip');
         const decision = ['review.submitted', 'approval.decision'].includes(item.kind);
-        const label = item.kind.startsWith('subtask.') && item.backend
-          ? `${ui.backendLabel(item.backend)} · ${item.text}` : item.text;
+        const agent = item.agent_label || (item.kind.startsWith('subtask.') && ui.backendLabel(item.backend));
+        const label = agent ? `${agent} · ${item.text}` : item.text;
         body.append(item.dag_node_id ? locate(item.dag_node_id, label) : el('span', label));
         if (decision) {
           body.classList.add('conversation-approval-chip');

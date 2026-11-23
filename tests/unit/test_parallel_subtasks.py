@@ -9,6 +9,7 @@ from temporalio.converter import DataConverter
 from temporalio.worker import Replayer
 
 from sca import config
+from sca.kinds.coding.lanes import agent_lanes
 from sca.kinds.coding.spec import CodingSpec
 from sca.kinds.coding.workflow import CodingBeforeTurn
 
@@ -40,6 +41,33 @@ def test_parallel_agents_environment_override(monkeypatch):
 def test_rejects_invalid_task_parallelism(value):
     with pytest.raises(ValidationError, match='max_parallel_agents'):
         CodingSpec(repo_url='repo', instruction='work', max_parallel_agents=value)
+
+
+@pytest.mark.parametrize(('graph', 'expected'), [
+    ({'a': [], 'b': [], 'c': [], 'd': [], 'e': ['a']}, [['a', 'e'], ['b'], ['c'], ['d']]),
+    ({'a': [], 'c': ['a'], 'b': ['a'], 'e': ['b']}, [['a', 'c'], ['b', 'e']]),
+    ({'a': [], 'b': [], 'c': ['a', 'b'], 'd': ['c']}, [['a'], ['b'], ['c', 'd']]),
+    ({'a': [], 'b': ['a'], 'c': ['a'], 'd': ['b', 'c']}, [['a', 'b'], ['c'], ['d']]),
+    ({'a': [], 'b': [], 'c': []}, [['a'], ['b'], ['c']]),
+    ({'a': [], 'b': [], 'join': ['a', 'b'], 'next': ['a']}, [['a', 'next'], ['b'], ['join']]),
+])
+def test_agent_lanes_follow_chains_forks_and_joins(graph, expected):
+    assert agent_lanes([{'name': name, 'depends_on': needs} for name, needs in graph.items()]) == expected
+
+
+@pytest.mark.parametrize(('hints', 'expected'), [
+    ((2, 1, 2), [['b'], ['a', 'c']]),
+    ((None, 1, None), [['b'], ['a', 'c']]),
+    ((1, 1, 1), [['a', 'c'], ['b']]),
+    ((1, None, 2), [['a', 'c'], ['b']]),
+    ((3, 1, 3), [['a', 'c'], ['b']]),
+    ((True, None, True), [['a', 'c'], ['b']]),
+])
+def test_agent_hints_are_consistent_and_bounded(hints, expected):
+    assert agent_lanes([
+        {'name': name, 'agent': hint, 'depends_on': deps}
+        for name, hint, deps in zip('abc', hints, [[], [], ['a']], strict=True)
+    ]) == expected
 
 
 async def test_replay_before_bounded_subtasks_started_both_children_without_waiting():

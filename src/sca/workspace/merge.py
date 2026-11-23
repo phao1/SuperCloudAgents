@@ -21,6 +21,9 @@ class SubtaskResult:
     status: str = "failed"
     conflicts: list[str] = field(default_factory=list)
     depends_on: list[str] = field(default_factory=list)
+    # Agent lanes
+    agent_lane: int | None = None
+    applied_messages: list[str] = field(default_factory=list, repr=False)
 
 
 MERGED_STATUSES = frozenset({"merged", "unchanged"})

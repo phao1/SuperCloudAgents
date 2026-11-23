@@ -80,6 +80,8 @@ class ConversationItem(BaseModel):
     status: str | None = None
     backend: str | None = None
     scope: str | None = None
+    agent_lane: int | None = None
+    agent_label: str | None = None
     activity: TurnActivity | None = None
     proposal: ProposalSummary | None = None
     evaluation: EvaluationSummary | None = None
@@ -402,7 +404,11 @@ def _agent_identity(event: Event, task: Task, node: DAGNode | None, user: Princi
     attempt = event.payload.get('best_of_attempt', event.payload.get('best_of_candidate'))
     if type(attempt) is int:
         scope = ' · '.join(filter(None, (scope, f'候选 {attempt}')))
-    return {'backend': _display(user, backend, 60) or None, 'scope': scope or None}
+    agent_lane = event.payload.get('agent_lane', meta.get('agent_lane'))
+    agent_label = event.payload.get('agent_label', meta.get('agent_label'))
+    return {'backend': _display(user, backend, 60) or None, 'scope': scope or None,
+            'agent_lane': agent_lane if type(agent_lane) is int else None,
+            'agent_label': _display(user, agent_label, 100) or None}
 
 
 def _task_control_receipt(event: Event) -> str:
@@ -562,10 +568,11 @@ async def task_page(store: Store, task_id: UUID, user: Principal, after: int, li
                 text = one_line(scope, 50) + ' · ' + text
             kind = 'receipt' if event.type.startswith('user.message.') else event.type
             status = event.type.rsplit('.', 1)[-1] if kind == 'receipt' else None
+            identity = _agent_identity(event, task, node, user)
+            if identity['agent_lane'] is None:
+                identity = {'backend': identity['backend']} if kind.startswith('subtask.') else {}
             source = ConversationItem(kind=kind, text=text, message_id=p.get('message_id'),
-                                      backend=_agent_identity(event, task, node, user)['backend']
-                                      if kind.startswith('subtask.') else None,
-                                      status=p.get('status', status), **common)
+                                      status=p.get('status', status), **identity, **common)
         else:
             continue
         items.append(source)

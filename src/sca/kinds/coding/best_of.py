@@ -5,7 +5,7 @@ from decimal import Decimal
 from math import inf
 
 from sca.kinds.coding.spec import CodingSpec
-from sca.kinds.coding.subtask_inputs import SubtaskInput
+from sca.kinds.coding.subtask_inputs import SubtaskAgent, SubtaskInput
 from sca.workspace.merge import SubtaskResult
 
 SELECT_DECISION_PREFIX = "best_of.select:"
@@ -62,6 +62,7 @@ class RecordAttempt:
     attempt: Attempt
     result: SubtaskResult
     subtask: str | None = None
+    agent: SubtaskAgent | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,7 @@ class SelectAttempt:
     attempt: int
     actor: str | None = None
     subtask: str | None = None
+    agent: SubtaskAgent | None = None
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,7 @@ class SubtaskAttempts:
     task_id: str
     name: str
     n: int
+    agent: SubtaskAgent | None = None
 
 
 def candidate_key(attempt: int) -> str:

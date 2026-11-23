@@ -71,6 +71,19 @@
 .dag-detail code { white-space: pre-wrap; }
 .dag-band rect { fill: var(--panel); fill-opacity: .75; stroke: var(--line); }
 .dag-band text { fill: var(--muted); font-size: 13px; font-weight: 600; }
+.dag-agent-lane rect { fill: var(--panel); stroke: var(--line); }
+.dag-agent-lane[data-status="running"] rect { fill: var(--accent-bg); }
+.dag-agent-heading { font-size: 12px; line-height: 17px; pointer-events: none; }
+.dag-agent-title { display: flex; align-items: baseline; justify-content: space-between; gap: 6px; }
+.dag-agent-title strong { color: var(--ink); font-size: 14px; }
+.dag-agent-status, .dag-agent-backend { color: var(--muted); }
+.dag-agent-lane[data-status="running"] .dag-agent-status { color: var(--accent); }
+.dag-agent-lane[data-status="succeeded"] .dag-agent-status { color: var(--good); }
+.dag-agent-lane[data-status="failed"] .dag-agent-status { color: var(--bad); }
+.dag-agent-backend, .dag-agent-chain {
+  display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.dag-agent-chain { color: var(--ink); font-weight: 600; }
 .dag-type-legend { margin-bottom: 6px; }
 .dag-type-stage { --type-ink: var(--accent); --type-round: 6px; }
 .dag-type-branch { --type-ink: light-dark(#7953a4, #c5a3fb); --type-round: 4px 0; }

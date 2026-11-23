@@ -32,6 +32,7 @@ from sca.kinds.coding.best_of import (
     parse_diff_stats,
 )
 from sca.kinds.coding.spec import BestOfSpec, CodingSpec
+from sca.kinds.coding.subtask_inputs import SubtaskAgent
 from sca.kinds.coding.subtasks import ChildActivities, ChildStore
 from sca.workspace.overlay import OverlayWorkspace
 from sca.workspace.snapshots import preparation_key
@@ -134,12 +135,12 @@ class BestOfActivities:
         return [self.start, self.step, self.record, self.adopt, self.cleanup,
                 self.start_subtask, self.cleanup_subtask]
 
-    def _for_subtask(self, name: str) -> BestOfActivities:
-        return BestOfActivities(ChildActivities(self.coding, name))
+    def _for_subtask(self, name: str, agent: SubtaskAgent | None = None) -> BestOfActivities:
+        return BestOfActivities(ChildActivities(self.coding, name, agent))
 
     @activity.defn(name="coding.best_of_subtask_start")
     async def start_subtask(self, inp: SubtaskAttempts) -> list[Attempt]:
-        scoped = self._for_subtask(inp.name)
+        scoped = self._for_subtask(inp.name, inp.agent)
         spec = await scoped.coding._spec(inp.task_id)
         task = await scoped.store.get_task(inp.task_id)
         remaining = spec.max_cost_usd
@@ -189,7 +190,7 @@ class BestOfActivities:
     @activity.defn(name="coding.best_of_step")
     async def step(self, inp: AttemptStep) -> dict:
         if inp.subtask is not None:
-            return await self._for_subtask(inp.subtask).step(replace(inp, subtask=None))
+            return await self._for_subtask(inp.subtask, inp.step.agent).step(replace(inp, subtask=None))
         child = AttemptActivities(self.coding, inp.attempt)
         if inp.step.action == "prepare":
             await self._prepare(child, await self.store.get_task(inp.step.task_id))
@@ -224,7 +225,7 @@ class BestOfActivities:
     @activity.defn(name="coding.best_of_record")
     async def record(self, inp: RecordAttempt) -> Candidate:
         if inp.subtask is not None:
-            return await self._for_subtask(inp.subtask).record(replace(inp, subtask=None))
+            return await self._for_subtask(inp.subtask, inp.agent).record(replace(inp, subtask=None))
         task = await self.store.get_task(inp.task_id)
         attempt = inp.attempt.attempt
         plan = task.result[PLAN_KEY][attempt - 1]
@@ -267,7 +268,7 @@ class BestOfActivities:
     @activity.defn(name="coding.best_of_adopt")
     async def adopt(self, inp: SelectAttempt) -> None:
         if inp.subtask is not None:
-            await self._for_subtask(inp.subtask).adopt(replace(inp, subtask=None))
+            await self._for_subtask(inp.subtask, inp.agent).adopt(replace(inp, subtask=None))
             return
         task_id = inp.task_id
         task = await self.store.get_task(task_id)
@@ -316,4 +317,4 @@ class BestOfActivities:
 
     @activity.defn(name="coding.best_of_subtask_cleanup")
     async def cleanup_subtask(self, inp: SubtaskAttempts) -> None:
-        await self._for_subtask(inp.name).cleanup(inp.task_id)
+        await self._for_subtask(inp.name, inp.agent).cleanup(inp.task_id)

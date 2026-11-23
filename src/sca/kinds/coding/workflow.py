@@ -62,10 +62,12 @@ with workflow.unsafe.imports_passed_through():
         SubtaskAttempts,
         choose_candidate,
     )
+    from sca.kinds.coding.lanes import agent_lanes
     from sca.kinds.coding.spec import subtask_ancestors, subtask_order
     from sca.kinds.coding.subtask_inputs import (
         MergeInput,
         PlanningInput,
+        SubtaskAgent,
         SubtaskInput,
         SubtaskPreparationInput,
         SubtaskProgress,
@@ -432,6 +434,7 @@ class CodingBeforeTurn(TaskWorkflow):
         cap = spec.get("_max_parallel_agents")
         if cap is not None and not workflow.patched("coding-bounded-subtasks"):
             cap = None
+        use_lanes = cap is not None and workflow.patched("coding-agent-lanes")
         guidance: list[Guidance] = []
         if spec.get("plan") == "auto":
             await self._set_state(task_id, "RUNNING")
@@ -448,7 +451,7 @@ class CodingBeforeTurn(TaskWorkflow):
                                       [message.text for message in [*guidance, *messages]],
                                       self._interjections.enabled,
                                       self._interjections.turn_guidance(messages, plan_attempt=attempt),
-                                      defer_spend=deferred, max_parallel_agents=cap),
+                                      defer_spend=deferred, max_parallel_agents=cap, agent_lanes=use_lanes),
                         SettleTurnSpend(task_id, 0, f"plan-{attempt}") if deferred else None,
                         start_to_close_timeout=turn_timeout + timedelta(minutes=15),
                         heartbeat_timeout=timedelta(minutes=5),
@@ -524,11 +527,22 @@ class CodingBeforeTurn(TaskWorkflow):
             if cap is not None:
                 if self._interjections.enabled:
                     self._subtask_children = _SubtaskChildren(self._interjections)
-                await workflow.execute_activity(
-                    "coding.record_subtask_schedule", SubtaskSchedule(task_id, cap), **_QUICK,
-                )
-                results = await _run_subtask_dag(task_id, subtasks, spec, cap, self._subtask_children)
-                self._subtask_children = None
+                try:
+                    if use_lanes:
+                        lanes = agent_lanes(subtasks)
+                        backend = await workflow.execute_activity(
+                            "coding.record_subtask_schedule", SubtaskSchedule(task_id, cap, lanes), **_QUICK,
+                        )
+                        results = await _run_agent_lanes(
+                            task_id, subtasks, spec, cap, lanes, backend, self._subtask_children,
+                        )
+                    else:
+                        await workflow.execute_activity(
+                            "coding.record_subtask_schedule", SubtaskSchedule(task_id, cap), **_QUICK,
+                        )
+                        results = await _run_subtask_dag(task_id, subtasks, spec, cap, self._subtask_children)
+                finally:
+                    self._subtask_children = None
                 await self._acknowledge_subtask_messages(task_id)
             elif has_dependencies:
                 results = await _run_subtask_dag(task_id, subtasks, spec)
@@ -645,18 +659,22 @@ class CodingSubtaskWorkflow:
         attempt = Attempt(**subtask["attempt"]) if "attempt" in subtask else None
         owner = subtask.get("_best_of_parent")
         scope = owner["name"] if owner else None
+        agent = SubtaskAgent(**subtask["_agent"]) if "_agent" in subtask else None
         best_of = subtask.get("best_of")
         interjectible = bool(spec.get("_parallel_subtasks") and self._interjections.enable())
+        workspace = agent.workspace if agent and attempt is None else name
         result = SubtaskResult(
-            name, branch=f"sca/{task_id[:8]}-{name}", depends_on=subtask.get("depends_on", []),
+            name, branch=f"sca/{task_id[:8]}-{workspace}", depends_on=subtask.get("depends_on", []),
+            agent_lane=agent.number if agent and attempt is None else None,
         )
+        continuing = workspace != name
 
         async def step(
             action: str, turn: int = 0, prompt: str = "", session: str | None = None,
             guidance: TurnGuidance | None = None,
         ) -> dict:
             guided = action == "run_agent_turn" and interjectible
-            inp = SubtaskInput(task_id, name, action, turn, prompt, session, guided, guidance)
+            inp = SubtaskInput(task_id, name, action, turn, prompt, session, guided, guidance, agent)
             no_retry = {"run_verification", "run_setup"}
             if attempt is not None:
                 no_retry.update({"prepare", "run_agent_turn"})
@@ -693,7 +711,7 @@ class CodingSubtaskWorkflow:
                     "coding.prepare_scoped_subtask",
                     SubtaskPreparationInput(
                         task_id, name, [SubtaskResult(**item) for item in dependencies], scopes, shared,
-                        subtask.get("_parallel_paths"),
+                        subtask.get("_parallel_paths"), agent,
                     ),
                     start_to_close_timeout=timedelta(minutes=10),
                     retry_policy=_retry(3),
@@ -702,6 +720,10 @@ class CodingSubtaskWorkflow:
                 if prepared.get("blocked"):
                     result.status, result.reason = "blocked", prepared["blocked"]
                     return result
+                if continuing:
+                    session = prepared.get("session_id")
+                    if not session and (summary := prepared.get("previous_summary")):
+                        context += "\n\nPrevious subtask's turn summary: " + json.dumps(summary, ensure_ascii=False)
                 if scopes.get(name):
                     context += "\n\nYour allowed paths (gitignore globs): " + json.dumps(scopes[name])
                     if shared:
@@ -709,7 +731,7 @@ class CodingSubtaskWorkflow:
                 context += prepared.get("contracts", "")
             else:
                 await step("prepare")
-            if attempt is None and (spec.get("setup_command") or spec.get("_intent_setup")):
+            if attempt is None and not continuing and (spec.get("setup_command") or spec.get("_intent_setup")):
                 await project.wait(task_id)
                 await step("run_setup")
             if best_of:
@@ -779,6 +801,8 @@ class CodingSubtaskWorkflow:
                 raise
             cause = exc.cause if isinstance(exc, ActivityError) else exc
             result.reason = str(cause)
+            if agent is not None:
+                result.passed = False
         finally:
             if result.status != "blocked":
                 try:
@@ -786,7 +810,10 @@ class CodingSubtaskWorkflow:
                             and spec.get("memory_enabled")):
                         await step("collect_memory_proposals")
                 finally:
-                    await step("destroy_sandbox")
+                    if agent is None or attempt is not None or best_of:
+                        await step("destroy_sandbox")
+        if agent is not None:
+            result.applied_messages = self._interjections.applied_ids
         return result
 
 
@@ -796,7 +823,8 @@ async def _run_subtask_attempts(
     children: _SubtaskChildren | None = None,
 ) -> SubtaskResult:
     name = subtask["name"]
-    batch = SubtaskAttempts(task_id, name, subtask["best_of"]["n"])
+    agent = SubtaskAgent(**subtask["_agent"]) if "_agent" in subtask else None
+    batch = SubtaskAttempts(task_id, name, subtask["best_of"]["n"], agent)
     owner = {"name": name, "instruction": subtask["instruction"]}
     scoped_spec = {**spec, "_context_notes": context}
 
@@ -805,8 +833,8 @@ async def _run_subtask_attempts(
 
     async def run_attempt(attempt: Attempt) -> Candidate:
         try:
-            args = [task_id, {"name": attempt.name, "attempt": asdict(attempt),
-                              "_best_of_parent": owner}, scoped_spec]
+            args = [task_id, {"name": attempt.name, "attempt": asdict(attempt), "_best_of_parent": owner,
+                              **({"_agent": asdict(agent)} if agent else {})}, scoped_spec]
             options = {
                 "id": f"task-{task_id}-attempt-{name}-{attempt.attempt}",
                 "cancellation_type": workflow.ChildWorkflowCancellationType.WAIT_CANCELLATION_COMPLETED,
@@ -823,7 +851,7 @@ async def _run_subtask_attempts(
                 raise
             outcome = SubtaskResult(attempt.name, reason=str(exc.cause))
         return await workflow.execute_activity(
-            "coding.best_of_record", RecordAttempt(task_id, attempt, outcome, name),
+            "coding.best_of_record", RecordAttempt(task_id, attempt, outcome, name, agent),
             result_type=Candidate, start_to_close_timeout=timedelta(minutes=5),
             retry_policy=_retry(3),
         )
@@ -843,7 +871,7 @@ async def _run_subtask_attempts(
             result.reason = "No Best-of-N attempt passed subtask verification"
             return result
         await workflow.execute_activity(
-            "coding.best_of_adopt", SelectAttempt(task_id, chosen.attempt, subtask=name),
+            "coding.best_of_adopt", SelectAttempt(task_id, chosen.attempt, subtask=name, agent=agent),
             start_to_close_timeout=timedelta(minutes=10), retry_policy=_retry(3),
         )
         result.commit = chosen.commit or ""
@@ -944,11 +972,13 @@ class _SubtaskChildren:
     @asynccontextmanager
     async def track(
         self, child: workflow.ChildWorkflowHandle[CodingSubtaskWorkflow, SubtaskResult],
+        *, applied: set[str] | None = None,
     ) -> AsyncIterator[None]:
         self._handles.append(child)
         try:
             for message_id, mode in self.inbox.notices():
-                await self._signal(child, message_id, mode)
+                if applied is None or message_id not in applied:
+                    await self._signal(child, message_id, mode)
             yield
         except asyncio.CancelledError:
             if not child.done():
@@ -1019,3 +1049,89 @@ async def _run_subtask_dag(
     for name in subtask_order(dependencies):
         running[name] = asyncio.create_task(run(name))
     return await _gather_subtasks(*running.values())
+
+
+# Agent lanes
+async def _run_agent_lanes(
+    task_id: str, subtasks: list[dict], spec: dict, cap: int, lanes: list[list[str]], backend: str,
+    children: _SubtaskChildren | None,
+) -> list[SubtaskResult]:
+    by_name = {sub["name"]: sub for sub in subtasks}
+    dependencies = {name: sub.get("depends_on", []) for name, sub in by_name.items()}
+    scopes = spec.get("_subtask_scopes", {})
+    ancestors = subtask_ancestors(dependencies) if scopes and spec.get("plan") == "auto" else {}
+    loop = asyncio.get_running_loop()
+    results: dict[str, asyncio.Future[SubtaskResult]] = {
+        name: loop.create_future() for name in subtask_order(dependencies)
+    }
+    slots = _AgentSlots(cap)
+    if children is not None:
+        spec = {**spec, "_parallel_subtasks": True}
+
+    async def prerequisites(name: str) -> list[SubtaskResult]:
+        return [await asyncio.shield(results[need]) for need in dependencies[name]]
+
+    async def run_lane(agent: SubtaskAgent, names: list[str]) -> None:
+        head = names[0]
+        best_of = by_name[head].get("best_of")
+        count = min(cap, best_of["n"]) if best_of else 1
+        head_ready = all(result.passed for result in await prerequisites(head))
+        if head_ready and slots.available < count:
+            await workflow.execute_activity(
+                "coding.record_subtask_progress", SubtaskProgress(task_id, head, "queued", agent=agent), **_QUICK,
+            )
+        last_started = None
+        applied: set[str] = set()
+        async with slots.reserve(count) if head_ready else nullcontext():
+            try:
+                for name in names:
+                    needs = await prerequisites(name)
+                    failed = [result.name for result in needs if not result.passed]
+                    if failed:
+                        result = SubtaskResult(
+                            name, status="blocked", depends_on=dependencies[name], agent_lane=agent.number,
+                            reason="Dependencies did not pass: " + ", ".join(failed),
+                        )
+                    else:
+                        sub = {**by_name[name], "_agent": asdict(agent)}
+                        if needs:
+                            sub["_dependencies"] = [asdict(result) for result in needs]
+                        if ancestors and name in scopes:
+                            sub["_parallel_paths"] = [
+                                paths for other, paths in scopes.items() if other != name
+                                and other not in ancestors[name] and name not in ancestors[other]
+                            ]
+                        if best_of:
+                            sub["_attempt_slots"] = count
+                        last_started = name
+                        handle = await _start_subtask(task_id, sub, spec)
+                        async with children.track(handle, applied=applied) if children is not None else nullcontext():
+                            result = await _collect_subtask(handle, task_id, sub)
+                        result.agent_lane = agent.number
+                        applied.update(result.applied_messages)
+                        result.applied_messages = []
+                    await workflow.execute_activity(
+                        "coding.record_subtask_progress",
+                        SubtaskProgress(task_id, name, "completed", result.passed, result.status == "blocked", agent),
+                        **_QUICK,
+                    )
+                    results[name].set_result(result)
+            finally:
+                if last_started is not None and not best_of:
+                    await workflow.execute_activity(
+                        "coding.subtask_step", SubtaskInput(task_id, last_started, "destroy_sandbox", agent=agent),
+                        **_QUICK, retry_policy=_retry(3),
+                        cancellation_type=workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED,
+                    )
+
+    runners = [asyncio.create_task(run_lane(SubtaskAgent(number, backend, names[0]), names))
+               for number, names in enumerate(lanes, start=1)]
+    try:
+        await asyncio.gather(*runners)
+    except BaseException:
+        for runner in runners:
+            if not runner.done() and not runner.cancelling():
+                runner.cancel()
+        await asyncio.gather(*runners, return_exceptions=True)
+        raise
+    return [future.result() for future in results.values()]

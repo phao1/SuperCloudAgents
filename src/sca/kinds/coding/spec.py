@@ -69,6 +69,12 @@ class SubtaskSpec(BaseModel):
     depends_on: list[str] = Field(default_factory=list, max_length=7)
     paths: list[str] = Field(default_factory=list, max_length=128)
     best_of: SubtaskBestOfSpec | None = None
+    agent: int | None = None
+
+    @field_validator("agent", mode="before")
+    @classmethod
+    def validate_agent_hint(cls, value: object) -> int | None:
+        return value if type(value) is int and 1 <= value <= 8 else None
 
     @field_validator("paths")
     @classmethod
@@ -169,6 +175,8 @@ class CodingSpec(CommonSpec):
         for subtask in data.get("subtasks", []):
             if subtask.get("best_of") is None:
                 subtask.pop("best_of", None)
+            if subtask.get("agent") is None:
+                subtask.pop("agent", None)
         if self.best_of is None:
             data.pop("best_of", None)
         if not self.fork_from_snapshot:

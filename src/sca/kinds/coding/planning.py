@@ -188,6 +188,13 @@ class PlanningActivities:
             )
             sandbox_id = await child.create_sandbox(inp.task_id)
             prompt = planning_prompt(spec.instruction, inp.feedback, spec.prompt_version)
+            if inp.agent_lanes:
+                prompt += (
+                    "\n\nOptionally add an integer agent to suggest a chain's number (1 through the number of "
+                    "chains). A subtask with a single prerequisite can continue that agent's chain. At a fork "
+                    "the first eligible subtask in plan order continues it. A join starts a new chain. "
+                    "Use the same number within a chain and distinct numbers for separate chains."
+                )
             prompt += "\n" + "\n".join([
                 context,
                 *task.result.get("intents", {}).get("notes", []),

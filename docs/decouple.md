@@ -2,7 +2,7 @@
 
 ## 提交子任务
 
-调用 `POST /v1/tasks` 时，可以为每个编码子任务指定 `depends_on` 和 `paths`。依赖名必须来自同一任务，且依赖关系必须无环。每个子任务在其依赖通过验证后，从合并后的依赖提交启动。没有依赖的子任务可以并行。依赖失败或合并冲突时，受影响的子任务以 `blocked` 状态进入原有的人工审核流程。
+调用 `POST /v1/tasks` 时，可以为每个编码子任务指定 `depends_on` 和 `paths`。依赖名必须来自同一任务，且依赖关系必须无环。子任务在依赖通过验证后才启动。依赖失败或合并冲突时，受影响的子任务以 `blocked` 状态进入原有的人工审核流程。
 
 ```bash
 curl -X POST "$SCA_API/v1/tasks" \
@@ -15,9 +15,9 @@ curl -X POST "$SCA_API/v1/tasks" \
       "instruction": "为计算模块增加舍入配置并补齐测试",
       "shared_paths": ["src/calc/options.py"],
       "subtasks": [
-        {"name": "impl", "instruction": "实现舍入配置", "paths": ["src/calc/**"]},
+        {"name": "impl", "instruction": "实现舍入配置", "paths": ["src/calc/**"], "agent": 1},
         {"name": "tests", "instruction": "增加舍入测试", "paths": ["tests/**"],
-         "depends_on": ["impl"]}
+         "depends_on": ["impl"], "agent": 1}
       ]
     }
   }'
@@ -51,8 +51,22 @@ JSON
 curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/dag" -H "Authorization: Bearer $SCA_API_TOKEN"
 ```
 
-在执行图中，同一依赖层的子任务并排显示，等待并发名额的节点标记「排队中」。任务对话会显示规划结果、
-并发上限、子任务开始和完成时的 Agent 标签。运行期间可对多个子任务[发送插话](operations.md#运行中插话)。
+## Agent 泳道
+
+在 Portal 的任务详情打开「执行图 DAG」。如果 A、B、C、D 可以并行，E 只依赖 A，执行图会显示四条泳道，
+其中「Agent 1 · DeepSeek Harness」依次执行 A → E。顶部显示「4 个 agent · 5 个子任务 · 最多并发 2」
+（并发上限为 2 时）。泳道显示运行、排队或完成状态，连线保留子任务之间的依赖。任务对话也会显示对应的 Agent
+标签。运行期间[发送插话](operations.md#运行中插话)会送达每条正在执行的泳道。
+
+分叉时，按计划顺序由第一个可接续的子任务沿用上游泳道。汇合节点开新泳道，并合入它依赖的各个检查点。
+同一泳道连续使用同一个沙箱、Git 分支和并发名额，从上一步已验证的提交继续。OpenCode、DeepSeek Harness
+和 Codex 等支持续接的后端会沿用会话。其余后端会收到上一轮的摘要。子任务级 Best-of-N 单独占一条泳道，
+候选仍共享任务并发名额。可以在计划或手动子任务中用整数 `agent` 建议泳道编号，例如给 A 和 E 都设为 `1`。
+编号范围是 1 至泳道总数。编号冲突或与依赖分组不符时，平台按依赖自动编号。
+
+调用上文的 `GET /v1/tasks/$TASK_ID/dag` 后，从任务节点的 `meta.agent_lanes` 读取泳道编号、标签、状态和
+按执行顺序排列的子任务名。子任务节点的 `meta` 以及子任务事件的 `payload` 包含 `agent_lane` 和 `agent_label`。
+使用 `GET /v1/tasks/$TASK_ID/conversation` 可读取带同样标签的对话条目。此功能沿用现有任务事件，无需迁移。
 
 ## 使用 Best-of-N
 
