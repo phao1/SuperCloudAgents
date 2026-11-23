@@ -3435,3 +3435,24 @@ class Store:
         await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
             result=result, updated_at=func.now(), **columns,
         ))
+
+    # Portal homepage task spend
+    async def task_cost_for_day(self, day: date) -> int:
+        """Sum recorded spend for tasks created on this UTC day."""
+        from datetime import time, timedelta
+
+        from sqlalchemy import Numeric, cast
+
+        if self.tenant_id is None:
+            raise ValueError("Task spend requires a tenant")
+        start = datetime.combine(day, time.min, UTC)
+        cost = tasks.c.usage["cost_micro_usd"]
+        query = select(func.coalesce(func.sum(cast(cost.astext, Numeric)), 0)).where(
+            tasks.c.tenant_id == self.tenant_id,
+            tasks.c.created_at >= start,
+            tasks.c.created_at < start + timedelta(days=1),
+            ~tasks.c.result.contains({"history_imported": True}),
+            func.jsonb_typeof(cost) == "number",
+        )
+        async with self._transaction() as session:
+            return int(await session.scalar(query))

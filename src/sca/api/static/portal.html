@@ -88,7 +88,9 @@ main { width: 100%; max-width: 1550px; margin: 0 auto; padding: 28px clamp(16px,
   display: grid; grid-template-rows: auto 1fr auto; justify-items: start; gap: 12px; padding: 22px;
   border: 1px solid var(--line); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow);
 }
-.feature:first-child { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent), var(--line) 77%); }
+#evolution-examples .feature:first-child, .feature.runtime-current {
+  background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent), var(--line) 77%);
+}
 .feature p { max-width: 40ch; }
 .feature .button { margin-top: 2px; }
 .fields { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; }
@@ -514,7 +516,7 @@ body[data-trace-expanded] { overflow: hidden; }
       <div class="metrics home-metrics" data-access="tenant" hidden>
         <a class="metric" href="#/tasks"><small>运行中的任务</small><strong id="home-running">—</strong><span>最近最多 100 项任务</span></a>
         <a class="metric" href="#/approvals"><small>待审批</small><strong id="home-approvals">—</strong><span>查看审批事项</span></a>
-        <div class="metric" data-access="admin" hidden><small>今日模型费用</small><strong id="home-spend">—</strong><span>UTC 当日</span></div>
+        <div class="metric" data-access="admin" hidden><small>今日任务模型费用</small><strong id="home-spend">—</strong><span>UTC 当日创建任务的已记录费用</span></div>
         <a class="metric" href="#/settings/models"><small>模型状态</small><strong id="home-model-status">—</strong><span>设置 → 模型</span></a>
       </div>
       <div class="home-grid">
@@ -802,7 +804,8 @@ body[data-trace-expanded] { overflow: hidden; }
       <div class="panel"><h2>共享记忆</h2>
         <label>状态<select id="memory-status"><option value="active">已启用</option><option value="proposed">待确认</option><option value="retired">已停用</option><option value="rejected">已拒绝</option></select></label>
         <label>范围筛选<input id="memory-filter" placeholder="留空查看全部范围"></label>
-        <button id="memory-refresh" type="button">刷新记忆</button><div id="memory-list"></div>
+        <button id="memory-refresh" type="button">刷新记忆</button>
+        <div id="memory-list" class="scroll" tabindex="0" role="region" aria-label="共享记忆列表"></div>
       </div>
       <form id="memory-form" class="panel stack" data-access="member" hidden><h2>创建记忆</h2>
         <label>内容<textarea id="memory-text" required maxlength="500"></textarea></label>
@@ -965,7 +968,6 @@ body[data-trace-expanded] { overflow: hidden; }
   <div class="panel-head"><h2 id="evidence-title">事件证据</h2><button id="evidence-close" type="button">关闭</button></div>
   <div id="evidence-body"></div>
 </aside>
-<!-- archive bootstrap -->
 <script src="/portal/task-flow.js"></script>
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
@@ -980,6 +982,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/assets/portal-evolution.js"></script>
 <script src="/portal/assets/portal-settings.js"></script>
 <script src="/portal/assets/portal-projects.js"></script>
+<!-- archive bootstrap -->
 <!-- runtime bootstrap -->
 <script>
 'use strict';

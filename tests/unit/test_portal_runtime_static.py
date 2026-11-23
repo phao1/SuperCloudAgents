@@ -41,6 +41,9 @@ const exporting = {...source, preferred_mode: 'docker',
 const done = {...exporting, current_mode: 'docker', switch: {
   id: 'test-job', status: 'succeeded', step: 'done', log_tail: '切换完成', error: null,
 }};
+const windows = {...source, platform: 'Windows', modes: [source.modes[0], {
+  mode: 'docker', available: false, reason: 'Windows 版仅支持源码模式',
+}]};
 const requests = [
   [endpoint, source], [endpoint + '/switch', {id: 'test-job'}], ['/healthz', {}],
   [endpoint, exporting], ['/healthz', null], ['/healthz', {}], [endpoint, done],
@@ -57,11 +60,23 @@ global.fetch = async (url, options) => {
   return {ok: true, json: async () => data};
 };
 require(process.argv[1]);
+function checkCards(current, buttonText, disabled) {
+  const [source, docker] = target.children[2].children;
+  const [selected, other] = current === 'source' ? [source, docker] : [docker, source];
+  assert.equal(selected.className, 'feature runtime-current');
+  assert.equal(selected.children[0].children[1].textContent, '当前');
+  assert.equal(selected.children.at(-1).textContent, '当前模式');
+  assert.equal(selected.children.at(-1).disabled, true);
+  assert.equal(other.className, 'feature');
+  assert.equal(other.children[0].children.length, 1);
+  assert.equal(other.children.at(-1).textContent, buttonText);
+  assert.equal(other.children.at(-1).disabled, disabled);
+  return other;
+}
 (async () => {
   await window.SCAPortalRuntime.mount(target);
   assert.equal(target.children[1].textContent, '当前运行模式 源码模式');
-  const [native, docker] = target.children[2].children;
-  assert.equal(native.children.at(-1).disabled, true);
+  const docker = checkCards('source', '切换到 Docker 模式', false);
   await docker.children.at(-1).onclick();
   assert.deepEqual(delays, [1000, 2000]);
   assert.equal(target.children[1].textContent, '当前运行模式 Docker 模式');
@@ -72,6 +87,11 @@ require(process.argv[1]);
   requests.push([endpoint, done]);
   await window.SCAPortalRuntime.mount(target);
   assert.equal(target.children[1].textContent, '当前运行模式 Docker 模式');
+  checkCards('docker', '切换到 源码模式', false);
+  requests.push([endpoint, windows]);
+  await window.SCAPortalRuntime.mount(target);
+  const unavailable = checkCards('source', '切换到 Docker 模式', true);
+  assert.equal(unavailable.children[1].children[1].textContent, 'Windows 版仅支持源码模式');
   assert.deepEqual(requests, []);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

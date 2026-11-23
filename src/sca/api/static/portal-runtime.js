@@ -53,13 +53,19 @@ window.SCAPortalRuntime = (() => {
         ? ' · 首选启动模式 ' + labels[info.preferred_mode] : '';
       current.textContent = '当前运行模式 ' + labels[info.current_mode] + preferred;
       choices.replaceChildren(...info.modes.map(({mode, available, reason}) => {
-        const card = node('div', '', 'feature');
-        const choice = node('button', '切换到' + labels[mode]);
+        const isCurrent = mode === info.current_mode;
+        const card = node('div', '', isCurrent ? 'feature runtime-current' : 'feature');
+        const heading = node('div', '', 'runtime-mode-heading');
+        heading.append(node('h3', labels[mode]));
+        if (isCurrent) heading.append(node('span', '当前', 'badge active'));
+        const choice = node('button', isCurrent ? '当前模式' : '切换到 ' + labels[mode]);
         choice.type = 'button';
-        choice.disabled = switching || record?.status === 'running' || mode === info.current_mode || !available;
+        choice.disabled = isCurrent || !available || switching || record?.status === 'running';
         choice.onclick = () => switchMode(mode);
-        card.append(node('h3', labels[mode]), node('p', descriptions[mode]),
-          node('small', available ? '可用' : reason), choice);
+        const detail = node('div');
+        detail.append(node('p', descriptions[mode]));
+        if (!available) detail.append(node('small', reason));
+        card.append(heading, detail, choice);
         return card;
       }));
       status.textContent = record?.status === 'failed' ? record.error
@@ -107,7 +113,7 @@ window.SCAPortalRuntime = (() => {
     }
 
     async function switchMode(mode) {
-      if (switching || !window.confirm('切换到' + labels[mode] + '并重启 Portal？切换时自动迁移历史记录。')) return;
+      if (switching || !window.confirm('切换到 ' + labels[mode] + ' 并重启 Portal？切换时自动迁移历史记录。')) return;
       switching = true;
       render();
       status.textContent = '正在提交切换请求…';

@@ -134,7 +134,16 @@ const portalUI = (() => {
 
   function panel(title, ...content) {
     const node = el('section', undefined, 'panel');
-    node.append(el('h2', title), ...content);
+    node.append(el('h2', title));
+    for (const child of content) {
+      if (child.tagName === 'TABLE') {
+        const view = scroll(title);
+        view.append(child);
+        node.append(view);
+      } else {
+        node.append(child);
+      }
+    }
     return node;
   }
 

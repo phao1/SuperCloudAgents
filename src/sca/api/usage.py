@@ -3,10 +3,12 @@ from datetime import UTC, date, datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
+from pydantic import BaseModel
 
 from sca.api.authz import authorize
 from sca.api.guest_history import history_payload
 from sca.api.tenants import PlatformStore
+from sca.billing.metering import MICRO_USD
 from sca.billing.report import GroupBy, aggregate, billing_csv
 from sca.config import get_settings
 from sca.core.errors import InvalidTaskError
@@ -15,6 +17,7 @@ from sca.core.models import Principal
 router = APIRouter(prefix="/v1")
 UsageReader = Annotated[Principal, Depends(authorize("read"))]
 HistoryReader = Annotated[Principal, Depends(authorize("read", guest=True))]
+UsageAdmin = Annotated[Principal, Depends(authorize("tenant-admin"))]
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +46,20 @@ async def tenant_usage(
 ) -> list[dict[str, Any]]:
     store = request.app.state.store.for_tenant(user.tenant_id)
     return history_payload(user, aggregate(await store.usage_rows(dates.start, dates.end), group_by))
+
+
+class TodayTaskCost(BaseModel):
+    day: date
+    cost_usd: float
+
+
+@router.get("/usage/today")
+async def today_task_cost(request: Request, response: Response, user: UsageAdmin) -> TodayTaskCost:
+    today = datetime.now(UTC).date()
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    cost = await store.task_cost_for_day(today)
+    response.headers["Cache-Control"] = "no-store"
+    return TodayTaskCost(day=today, cost_usd=cost / MICRO_USD)
 
 
 @router.get("/admin/usage")

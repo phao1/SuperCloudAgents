@@ -1,6 +1,7 @@
 import json
 import time
-from datetime import UTC, datetime
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
@@ -9,6 +10,7 @@ import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.engine import make_url
 from typer.testing import CliRunner
 
@@ -18,6 +20,7 @@ from sca.billing.quota import PlanQuotaExceededError
 from sca.cli import app as cli
 from sca.config import Settings
 from sca.core.errors import AuthError
+from sca.db.repo import Store
 from sca.storage.local import LocalObjectStore
 from sca.tenancy.models import TenantSuspendedError
 
@@ -25,7 +28,8 @@ from sca.tenancy.models import TenantSuspendedError
 @pytest.fixture
 async def api(tmp_path, monkeypatch):
     settings = Settings(
-        _env_file=None, data_dir=tmp_path, api_tokens="tenant-fixture:acme:admin",
+        _env_file=None, data_dir=tmp_path,
+        api_tokens="tenant-fixture:acme:admin,viewer-fixture:acme:viewer",
         platform_admin_token="platform-fixture", billing_markup="1.5",
         billing_base_fees_usd={"team": "20"},
     )
@@ -70,6 +74,41 @@ async def test_tenant_admin_cannot_access_platform_and_export_is_scoped(api):
     assert scoped.usage_rows.await_count == 2
     invalid = await client.get("/v1/usage?from=2026-02-04&to=2026-02-01", headers=tenant)
     assert invalid.status_code == 422
+
+
+async def test_today_task_cost_uses_the_admins_tenant_and_utc_day(api, monkeypatch):
+    client, db, scoped = api
+    midnight = datetime(2026, 11, 23, tzinfo=UTC)
+    clock = SimpleNamespace(now=Mock(return_value=midnight + timedelta(hours=12)))
+    monkeypatch.setattr("sca.api.usage.datetime", clock)
+    session = SimpleNamespace(scalar=AsyncMock(return_value=Decimal(4200)))
+
+    @asynccontextmanager
+    async def transaction():
+        yield session
+
+    store = Store(db.sessionmaker).for_tenant("acme")
+    monkeypatch.setattr(store, "_transaction", transaction)
+    scoped.task_cost_for_day = store.task_cost_for_day
+    path = "/v1/usage/today?tenant_id=other"
+    assert (await client.get(path)).status_code == 401
+    assert (await client.get(path, headers={"Authorization": "Bearer viewer-fixture"})).status_code == 403
+    db.for_tenant.assert_not_called()
+
+    response = await client.get(path, headers={"Authorization": "Bearer tenant-fixture"})
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {"day": "2026-11-23", "cost_usd": 0.0042}
+    db.for_tenant.assert_called_once_with("acme")
+    clock.now.assert_called_once_with(UTC)
+    session.scalar.assert_awaited_once()
+    query = session.scalar.await_args.args[0].compile(dialect=postgresql.dialect())
+    for value in ("acme", midnight, midnight + timedelta(days=1), {"history_imported": True}):
+        assert value in query.params.values()
+    assert "tasks.tenant_id =" in str(query)
+    assert "tasks.created_at >=" in str(query) and "tasks.created_at <" in str(query)
+    assert "tasks.state" not in str(query) and "usage_daily" not in str(query)
+    scoped.usage_rows.assert_not_awaited()
 
 
 async def test_submit_errors_keep_distinct_http_statuses(api):

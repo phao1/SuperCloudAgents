@@ -155,6 +155,20 @@ curl "$SCA_API_URL/v1/usage/export.csv?from=2026-11-01&to=2026-11-30" \
 再加该租户当前套餐的月基础费，四舍五入到美分。`SCA_BILLING_BASE_FEES_USD` 接受 JSON
 映射，例如 `{"free":0,"team":29,"enterprise":99}`。默认倍率为 1，基础费为 0。
 
+### Portal 首页费用与窄屏表格
+
+租户管理员可在首页查看「今日任务模型费用」。卡片汇总当前租户在 UTC 当日创建的任务已记录的
+模型费用，包含运行中、待审和已结束的任务。费用随模型轮次记账更新，跨日任务按创建日归属。
+导入的历史任务不计入。团队用量和 CSV 按任务的 UTC 完成日汇总。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/usage/today" -H "Authorization: Bearer $TENANT_TOKEN"
+# 示例响应 {"day":"2026-11-23","cost_usd":0.004}
+```
+
+窄屏上可在共享记忆、工具、团队用量和评测结果的表格区域内横向滚动。用键盘操作时，先将焦点
+移到表格区域，再按左右方向键。
+
 ## Stripe 订阅与付款
 
 1. 将数据库升级到 `0022_payments`。在 Stripe 测试模式下创建按月收费的 USD Price。用数据库管理账号把 Price ID 写入对应套餐。`included_usage_usd` 是月费已包含的网关成本额度，可低于提交额度。省略时沿用 `monthly_cost_limit_usd`，两者均为空时按 0 美元计算。
@@ -295,9 +309,10 @@ curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN
 ## 切换运行模式
 
 在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「设置 → 运行环境」，选择可用模式
-并确认重启。页面会显示导出、停止、启动和导入进度，并在服务恢复后刷新工作区。首次准备 Docker
-沙箱镜像和 OpenCode 构建仍使用 `bash scripts/portal_demo.sh setup --mode docker`。
-Windows 启动脚本使用源码模式，页面会说明 Docker 模式不可用。
+并确认重启。当前模式的卡片标有「当前」，按钮显示「当前模式」。页面会显示导出、停止、启动和
+导入进度，并在服务恢复后刷新工作区。首次准备 Docker 沙箱镜像和 OpenCode 构建仍使用
+`bash scripts/portal_demo.sh setup --mode docker`。Windows 启动脚本使用源码模式，页面会说明
+Docker 模式不可用。
 
 启动模式按 `--mode`、`SCA_RUNTIME_MODE`、`.data/runtime-mode.json` 中的首选模式选择。
 切换失败时，脚本会尝试恢复原模式。`.data/run/runtime-switch.json` 记录当前或最近一次切换的

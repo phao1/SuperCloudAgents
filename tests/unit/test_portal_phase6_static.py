@@ -80,6 +80,7 @@ def test_phase6_portal_navigation_and_local_assets():
     assert source.count('href="#/submit" data-access="member" hidden>新建任务') == 2
     assert 'href="#/evolutions/runs" data-access="eval-admin" hidden>开始演进' in source
     assert '<div id="settings-runtime"></div>' in source
+    assert '<div id="memory-list" class="scroll" tabindex="0" role="region"' in source
     for name in (*ASSETS, *STYLES):
         assert "/portal/assets/" + name in parser.refs
     assert all(not urlsplit(ref).scheme and not urlsplit(ref).netloc for ref in parser.refs)
@@ -137,7 +138,7 @@ const document = {
   createDocumentFragment:()=>el('#fragment'),
 };
 function el(tag,textContent=''){
-  return {tag,textContent,children:[],append(...nodes){this.children.push(...nodes)},
+  return {tag,tagName:tag.toUpperCase(),textContent,children:[],append(...nodes){this.children.push(...nodes)},
     setAttribute(name,value){this[name]=value}};
 }
 function evidenceLink(label,href){return {...el('a',label),href};}
@@ -157,6 +158,12 @@ const markdown = [
   '![图片](https://example.test/illustration.png)',
 ].join('\n');
 const nodes = walk(portalMarkdown.render(markdown));
+const raw = el('table');
+const [, scroll] = portalUI.panel('测试表格', raw).children;
+assert.deepEqual(scroll.children, [raw]);
+assert.equal(scroll.tabIndex, 0);
+assert.equal(scroll.role, 'region');
+assert.equal(scroll['aria-label'], '测试表格');
 for (const tag of ['h1','ol','ul','li','strong','em','table','th','td','pre','code']){
   assert(nodes.some(node=>node.tag===tag), tag);
 }
@@ -460,11 +467,9 @@ global.fetch=async (path,request={})=>{
     preferredModel=JSON.parse(request.body).model;
     return {ok:true,json:async()=>({model:preferredModel})};
   }
-  if(path.startsWith('/v1/usage?')){
+  if(path==='/v1/usage/today'){
     assert(local);
-    const today=new Date().toISOString().slice(0,10);
-    assert.equal(path,`/v1/usage?from=${today}&to=${today}`);
-    return {ok:true,json:async()=>[{cost_usd:.02}]};
+    return {ok:true,json:async()=>({day:at.slice(0,10),cost_usd:.0042})};
   }
   await blocked.get(path);
   const pending=evolutionApproval?[
@@ -547,6 +552,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.deepEqual(calls,['/portal/archive.json']);
     assert.equal($('guest-view-banner').textContent,'只读归档 · 来自仓库中已发布的任务与评测记录');
     assert.equal($('home-page').hidden,false);
+    assert(walk($('home-page')).some(node=>node.className==='scroll'&&node.children[0].tagName==='TABLE'));
     assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.dataset.nav),
       ['home','projects','tasks','history','evals','evolutions','versions','memories','tools','analysis']);
     assert.equal(approvalLink.hidden,true);
@@ -611,9 +617,9 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
   }else if(destination==='local'){
     await waitForStartup();
-    assert.deepEqual(calls.map(path=>path.split('?')[0]),['/v1/portal/config','/v1/approvals','/v1/tasks','/v1/usage','/v1/evolutions']);
+    assert.deepEqual(calls.map(path=>path.split('?')[0]),['/v1/portal/config','/v1/approvals','/v1/tasks','/v1/usage/today','/v1/evolutions']);
     assert.equal($('home-page').hidden,false);
-    assert.equal($('home-spend').textContent,'$0.0200');
+    assert.equal($('home-spend').textContent,'$0.0042');
     assert.equal(approvalLink.hidden,false);
     assert.equal($('approvals-count').textContent,'0');
     assert.equal(approvalLink.getAttribute('aria-label'),'待审批 0 项');
@@ -1138,9 +1144,13 @@ def test_portal_browser_tracks_provider_restart_after_writes(local):
         panel.get_by_role('heading', name=provider['name'], exact=True).wait_for(state='hidden')
 
 
-@pytest.mark.parametrize(("width", "height"), [(1440, 1000), (390, 844)])
-def test_portal_browser_navigation_layout(width, height):
+@pytest.mark.parametrize(("width", "height", "current_mode"), [(1440, 1000, "docker"), (390, 844, "source")])
+def test_portal_browser_navigation_layout(width, height, current_mode):
     title = "检查 Windows 导入的任务、项目、演进记录和审批，验证导入前后的关联与可读性"
+    windows = current_mode == "source"
+    docker_mode = {'mode': 'docker', 'available': not windows}
+    if windows:
+        docker_mode['reason'] = 'Windows 版仅支持源码模式'
 
     def handle(route):
         path = urlsplit(route.request.url).path
@@ -1150,14 +1160,14 @@ def test_portal_browser_navigation_layout(width, height):
             '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'portal_require_token': False,
                                   'local_identity': {'role': 'admin', 'tenant_id': 'eval'}},
             '/v1/portal/access': {'require_token': False, 'local_no_token_active': True},
+            '/v1/usage/today': {'day': '2026-11-22', 'cost_usd': 0.0042},
             '/v1/approvals': {'count': 1, 'items': [
                 {'id': 'task-fixture', 'kind': 'task_result', 'href': '#/tasks/task-fixture/approval',
                  'title': title, 'created_at': '2026-11-22T16:31:00Z'},
             ]},
-            '/v1/portal/runtime': {'current_mode': 'source', 'platform': 'Windows', 'switch': None,
-                                   'modes': [{'mode': 'source', 'available': True},
-                                             {'mode': 'docker', 'available': False,
-                                              'reason': 'Windows 版仅支持源码模式'}]},
+            '/v1/portal/runtime': {'current_mode': current_mode, 'platform': 'Windows' if windows else 'Linux',
+                                   'preferred_mode': 'source' if not windows else None, 'switch': None,
+                                   'modes': [{'mode': 'source', 'available': True}, docker_mode]},
         }.get(path, []))
 
     with portal_browser() as browser:
@@ -1165,6 +1175,7 @@ def test_portal_browser_navigation_layout(width, height):
         page.route('**/*', handle)
         page.goto('http://portal.test/portal')
         page.locator('#local-access-badge').wait_for()
+        page.get_by_text('$0.0042', exact=True).wait_for()
         nav = page.locator('#primary-nav')
         toggle = page.locator('#nav-toggle')
         assert toggle.is_visible() == (width == 390)
@@ -1190,14 +1201,70 @@ def test_portal_browser_navigation_layout(width, height):
         assert nav.is_hidden() == (width == 390)
         page.get_by_role('link', name='运行环境', exact=True).click()
         runtime = page.locator('#settings-runtime')
-        runtime.get_by_text('当前运行模式 源码模式', exact=True).wait_for()
-        runtime.get_by_text('Windows 版仅支持源码模式', exact=True).wait_for()
-        assert runtime.get_by_role('button', name='切换到Docker 模式').is_disabled()
+        current_label, other_label = ('源码模式', 'Docker 模式') if windows else ('Docker 模式', '源码模式')
+        runtime.get_by_text('当前运行模式 ' + current_label, exact=windows).wait_for()
+        current = runtime.locator('.feature').filter(has=page.get_by_role('heading', name=current_label, exact=True))
+        other = runtime.locator('.feature').filter(has=page.get_by_role('heading', name=other_label, exact=True))
+        badge = current.get_by_text('当前', exact=True)
+        badge.wait_for()
+        assert current.get_by_role('button', name='当前模式', exact=True).is_disabled()
+        assert other.get_by_role('button', name='切换到 ' + other_label, exact=True).is_enabled() == (not windows)
+        assert other.get_by_text('当前', exact=True).count() == 0
+        background = '(card) => getComputedStyle(card).backgroundColor'
+        assert current.evaluate(background) == badge.evaluate(background) != other.evaluate(background)
+        if windows:
+            other.get_by_text('Windows 版仅支持源码模式', exact=True).wait_for()
         assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
         for breakpoint in (901, 900):
             page.set_viewport_size({"width": breakpoint, "height": height})
             assert toggle.is_visible() == (breakpoint == 900)
             assert nav.is_visible() == (breakpoint == 901)
+
+
+def test_portal_browser_wide_tables_scroll_inside_narrow_pages():
+    now = '2026-11-22T16:31:00Z'
+    admin = {'role': 'admin', 'tenant_id': 'eval'}
+    fixtures = {
+        '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'local_identity': admin, 'portal_require_token': False},
+        '/v1/memories': [{'id': 'memory', 'status': 'active', 'category': 'convention',
+                          'text': '校验订单输入并保留来源证据', 'scope': 'orders',
+                          'source_task_id': 'task-fixture', 'source_event_seq': 12, 'last_used_at': now}],
+        '/v1/tools': [{'name': 'orders', 'description': '内部订单工具', 'tenant_id': 'eval',
+                       'enabled': True, 'version': 1}],
+        '/v1/tenant': {'id': 'eval', 'display_name': 'Eval', 'status': 'active', 'plan': 'free', 'created_at': now},
+        '/v1/portal/tenant-quota': {'monthly_cost_usd': 0.0042, 'slots_used': 0, 'slots_limit': 1, 'queued': 0},
+        '/v1/tenant/members': [{'email': 'fixture@example.test', 'role': 'member', 'activated_at': now}],
+        '/v1/tenant/billing': {'plan': 'free', 'enabled': False, 'invoices': []},
+        '/v1/usage': [{'day': now[:10], 'tasks': 1, 'turns': 2, 'tokens_in': 4, 'tokens_out': 2,
+                       'sandbox_seconds': 65, 'cost_usd': 0.0042}],
+        '/v1/evals/suites': [{'name': 'fixture-suite', 'cases': ['case-1']}],
+        '/v1/evals/runs/run-fixture': {'id': 'run-fixture', 'suite': 'fixture-suite', 'status': 'running',
+                                      'variant': {'repeat': 8}, 'results': []},
+        '/v1/approvals': {'count': 0, 'items': []},
+    }
+
+    def handle(route):
+        path = urlsplit(route.request.url).path
+        if not serve_portal(route, path):
+            route.fulfill(json=fixtures.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.set_default_timeout(5000)
+        page.route('**/*', handle)
+        page.goto('http://portal.test/portal#/memories')
+        for page_hash, selectors in (
+            ('#/memories', ('#memory-list',)),
+            ('#/tools', ('[aria-label="工具注册表"]',)),
+            ('#/settings/team', ('[aria-label="团队成员"]', '[aria-label="用量明细"]')),
+            ('#/runs/run-fixture', ('#matrix',)),
+        ):
+            page.evaluate('(hash) => { location.hash = hash; }', page_hash)
+            for selector in selectors:
+                region = page.locator(selector)
+                region.locator('table tbody tr').first.wait_for()
+                assert region.evaluate('(node) => { node.scrollLeft = node.scrollWidth; return node.scrollLeft; }') > 0
+            assert page.evaluate('document.documentElement.scrollWidth === innerWidth'), page_hash
 
 
 def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():

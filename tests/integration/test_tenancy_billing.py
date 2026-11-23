@@ -235,6 +235,43 @@ async def test_terminal_metering_and_exports(commercial_api, store):
     assert row["base_fee_usd"] == "3" and row["total_usd"] == "4.00"
 
 
+async def test_today_task_cost_includes_running_and_review_without_double_counting(commercial_api, store):
+    client, _, _ = commercial_api
+    now = datetime.now(UTC)
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    review, running, finished, yesterday, tomorrow, imported = [
+        await new_task(store, "acme") for _ in range(6)
+    ]
+    other = await new_task(store, "other")
+    for task, cost in ((review, 3000), (running, 1000), (finished, 200), (yesterday, 5000),
+                       (tomorrow, 6000), (imported, 7000), (other, 8000)):
+        await store.add_usage(task.id, {"cost_micro_usd": cost})
+    for task in (review, running):
+        await store.set_state(task.id, TaskState.PROVISIONING)
+        await store.set_state(task.id, TaskState.RUNNING)
+    await store.set_state(review.id, TaskState.VERIFYING)
+    await store.set_state(review.id, TaskState.AWAITING_REVIEW)
+    await store.set_state(finished.id, TaskState.CANCELLED)
+    await archive_task(store, store.objects, finished.id)
+    await store.update_result(imported.id, {"history_imported": True})
+    await store.set_state(imported.id, TaskState.CANCELLED)
+    async with store._transaction() as session:
+        for task, created_at in ((review, midnight), (yesterday, midnight - timedelta(microseconds=1)),
+                                 (tomorrow, midnight + timedelta(days=1))):
+            await session.execute(text("UPDATE tasks SET created_at = :created_at WHERE id = :id"),
+                                  {"id": task.id, "created_at": created_at})
+
+    path = "/v1/usage/today"
+    assert (await client.get(path + "?tenant_id=other", headers=TENANT)).json() == {
+        "day": now.date().isoformat(), "cost_usd": 0.0042,
+    }
+    assert (await client.get(path, headers=OTHER)).json()["cost_usd"] == 0.008
+    [settled] = (await client.get("/v1/usage", headers=TENANT)).json()
+    assert settled["cost_usd"] == 0.0002
+    await store.set_state(review.id, TaskState.SUCCEEDED)
+    assert (await client.get(path, headers=TENANT)).json()["cost_usd"] == 0.0042
+
+
 async def test_backfill_reads_archived_histories_and_is_idempotent(store, tmp_path):
     objects = LocalObjectStore(tmp_path)
     store.objects = objects

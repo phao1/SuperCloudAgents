@@ -1,6 +1,7 @@
 'use strict';
 
 window.SCAPortalArchive = (() => {
+  const {panel} = portalUI;
   const sourceRoot = 'https://github.com/phao1/SuperCloudAgents/blob/supercloudagent1122/Milestone/';
   const orderSource = 'portal-run-2026-11-19.md';
   const definitions = {
@@ -23,12 +24,6 @@ window.SCAPortalArchive = (() => {
     platform: ['platform-page', '平台管理', '查看本地归档信息与部署说明。'],
   };
   let archive;
-
-  function panel(title, ...children) {
-    const node = el('div', undefined, 'panel');
-    node.append(el('h2', title), ...children);
-    return node;
-  }
 
   function metrics(...children) {
     const node = el('div', undefined, 'metrics');

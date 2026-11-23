@@ -43,7 +43,6 @@ const portalHome = (() => {
     if (!portalUI.can('history')) return;
     const hash = location.hash, identity = portalIdentity;
     const current = () => hash === location.hash && identity === portalIdentity;
-    const today = new Date().toISOString().slice(0, 10);
     await Promise.all([
       loadRecentTasks().then(tasks => {
         if (!current() || !tasks) return;
@@ -55,10 +54,9 @@ const portalHome = (() => {
         })), '暂无任务。');
       }),
       !identity.guest && (polling || !portalConfig) ? loadConfig() : null,
-      portalUI.can('admin') ? data('/usage?from=' + today + '&to=' + today).then(rows => {
+      portalUI.can('admin') ? data('/usage/today').then(({cost_usd}) => {
         if (!current()) return;
-        const costs = rows.map(row => row.cost_usd).filter(Number.isFinite);
-        $('home-spend').textContent = costs.length || !rows.length ? money(costs.reduce((a, b) => a + b, 0)) : '—';
+        $('home-spend').textContent = Number.isFinite(cost_usd) ? money(cost_usd) : '—';
       }).catch(() => { if (current()) $('home-spend').textContent = '—'; }) : null,
       canShowEvolutions() ? data('/evolutions').then(rows => {
         if (!current()) return;
