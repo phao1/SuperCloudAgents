@@ -6,6 +6,7 @@ from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
+from graphlib import TopologicalSorter
 from math import isfinite
 from typing import Any, Literal
 from uuid import UUID
@@ -276,7 +277,7 @@ class _TaskTrace:
         if event.type == "plan.started":
             lane.node.start(at)
         else:
-            lane.node.meta.update(_fields(p, "reason", "split"))
+            lane.node.meta.update(_fields(p, "reason", "split", "parallelism", "max_parallel_agents"))
             lane.node.close("succeeded" if event.type == "plan.completed" else "failed", at)
             self.root.tail = lane.tail
             self.plan_gate = lane.tail
@@ -534,6 +535,22 @@ class _TaskTrace:
         elif type_ == "subtasks.merged":
             if self.merge is None:
                 self._merge(p.get("subtasks"), at)
+        elif type_ == "subtasks.scheduled":
+            self.root.node.meta.update(_fields(p, "max_parallel_agents"))
+        elif type_ in {"subtask.queued", "subtask.started", "subtask.completed"} and isinstance(
+            name := p.get("subtask"), str,
+        ):
+            node = self._subtask(name).node
+            node.meta.update(_fields(p, "backend", "model"))
+            if type_ == "subtask.queued":
+                node.meta["waiting_for_slot"] = True
+            else:
+                node.meta.pop("waiting_for_slot", None)
+                if type_ == "subtask.started":
+                    node.start(at)
+                else:
+                    node.close(_status(p), at)
+            return node
         elif type_.startswith("user.message"):
             return self._message(event)
         elif type_ == "pr.opened":
@@ -572,6 +589,7 @@ class _TaskTrace:
                             if e.type in {"plan.started", "plan.completed", "plan.rejected"}), None)
         if latest_plan and latest_plan.type == "plan.completed" and latest_plan.payload.get("split"):
             self._declare_subtasks(latest_plan.payload.get("subtasks"))
+            self.root.node.meta.update(_fields(latest_plan.payload, "parallelism", "max_parallel_agents"))
         if latest_plan is None and self.task.spec.get("plan") == "auto" and self.state in (
             TaskState.QUEUED, TaskState.PROVISIONING,
         ):
@@ -664,6 +682,24 @@ class _TaskTrace:
                 self.graph.link(node, target)
             elif self.state in TERMINAL_STATES:
                 self.graph.link(node, self.finish)
+        self._subtask_lanes()
+
+    def _subtask_lanes(self) -> None:
+        nodes = {lane.node.id: lane.node for lane in self.subtasks.values()}
+        if not nodes:
+            return
+        self.root.node.meta["subtask_count"] = len(nodes)
+        dependencies: dict[str, list[str]] = {id_: [] for id_ in nodes}
+        for edge in self.graph.edges.values():
+            if edge.kind == "dependency" and edge.source in nodes and edge.target in nodes:
+                dependencies[edge.target].append(edge.source)
+        levels: dict[str, int] = {}
+        lanes: Counter[int] = Counter()
+        for id_ in TopologicalSorter(dependencies).static_order():
+            level = 1 + max((levels[need] for need in dependencies[id_]), default=-1)
+            levels[id_] = level
+            nodes[id_].meta.update(level=level, lane=lanes[level])
+            lanes[level] += 1
 
     def finalize(self, owned: list[DAGNode]) -> None:
         state = self.state
@@ -771,10 +807,11 @@ TASK_MILESTONES = frozenset({
     "agent.turn_started", "agent.turn_completed", "agent.turn_interrupted",
     "verification.completed", "acceptance.completed", "ci.completed", "review.requested",
     "best_of.started", "best_of.attempt_completed", "best_of.selected",
+    "subtask.started", "subtask.completed",
     "user.message", "user.message.delivered", "user.message.applied",
 })
 TASK_MILESTONE_CONTEXT = TASK_MILESTONES | TURN_EVENTS | {
-    "subtask.started", "subtasks.merged", "review.submitted", "verification.started",
+    "subtask.queued", "subtasks.merged", "subtasks.scheduled", "review.submitted", "verification.started",
     "intents.checked", "scope.violation", "ci.requested", "sandbox.destroyed", "pr.opened", "scm.failed",
 }
 

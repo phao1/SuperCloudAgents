@@ -8,6 +8,7 @@ import contextlib
 import json
 import re
 from collections.abc import Iterable
+from itertools import chain, combinations
 from pathlib import PurePosixPath
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -22,19 +23,13 @@ from sca.host import remove_tree
 from sca.kernel.interjection import with_guidance
 from sca.kinds.coding.activities import CodingActivities, TurnInput
 from sca.kinds.coding.prompts import planning_prompt
-from sca.kinds.coding.spec import SubtaskSpec, path_scope, subtask_order, validate_shared_paths
+from sca.kinds.coding.spec import SubtaskSpec, path_scope, subtask_ancestors, validate_shared_paths
 from sca.kinds.coding.subtask_inputs import PlanningInput
 from sca.kinds.coding.subtasks import ChildActivities, SubtaskActivities
 from sca.orchestration.provider_errors import provider_account_error
 from sca.storage.local import key_for
 
 MAX_PLAN_BYTES = 64 * 1024
-_PLAN_DEPENDENCY_GUIDANCE = (
-    "A split may include ordered work. Each subtask may list prerequisite subtask names in "
-    "depends_on. Keep this graph acyclic. Declare any shared files in top-level shared_paths "
-    "(exact repository paths). Those files may be edited by any subtask and are the exception "
-    "to the overlap rule. All other edits must fall within that subtask's paths."
-)
 
 
 class RejectedPlan(ValueError):
@@ -51,6 +46,7 @@ class Plan(BaseModel):
     reason: str = Field(min_length=1)
     subtasks: list[PlannedSubtask] = Field(default_factory=list, max_length=8)
     shared_paths: list[str] = Field(default_factory=list, max_length=64)
+    parallelism: int | None = Field(default=None, ge=1, le=8)
 
     _validate_shared_paths = field_validator("shared_paths")(validate_shared_paths)
 
@@ -61,7 +57,11 @@ class Plan(BaseModel):
             raise ValueError("split requires 2..8 uniquely named subtasks")
         if not self.split and (self.subtasks or self.shared_paths):
             raise ValueError("split=false requires no subtasks or shared paths")
-        subtask_order({s.name: s.depends_on for s in self.subtasks})
+        ancestors = subtask_ancestors({s.name: s.depends_on for s in self.subtasks})
+        if self.shared_paths and any(
+            a not in ancestors[b] and b not in ancestors[a] for a, b in combinations(names, 2)
+        ):
+            raise ValueError("parallel subtasks cannot declare shared paths")
         return self
 
 
@@ -69,11 +69,28 @@ def validate_plan(data: bytes, files: Iterable[str]) -> Plan:
     if len(data) > MAX_PLAN_BYTES:
         raise RejectedPlan("plan exceeds 64 KiB")
     plan = Plan.model_validate_json(data)
-    specs = [path_scope(sub.paths) for sub in plan.subtasks]
-    shared = set(plan.shared_paths)
-    for file in files:
-        if file not in shared and sum(spec.match_file(file, separators=()) for spec in specs) > 1:
-            raise RejectedPlan(f"overlapping paths: {file}")
+    ancestors = subtask_ancestors({sub.name: sub.depends_on for sub in plan.subtasks})
+    specs = {sub.name: path_scope(sub.paths) for sub in plan.subtasks}
+    parallel = [(a, b) for a, b in combinations(specs, 2)
+                if a not in ancestors[b] and b not in ancestors[a]]
+    if not parallel:
+        return plan
+    positives = {name: [p for p in spec.patterns if p.include] for name, spec in specs.items()}
+    for a, b in parallel:
+        if ({p.regex for p in positives[a]} & {p.regex for p in positives[b]}
+                and not any(p.include is False for p in chain(specs[a].patterns, specs[b].patterns))):
+            raise RejectedPlan(f"overlapping paths between {a} and {b}")
+    # Check explicit new files and simple directory scopes as well as base-commit files.
+    declared = set()
+    for patterns in positives.values():
+        for pattern in patterns:
+            path = pattern.pattern.lstrip("/").removesuffix("**")
+            if path and not set(path).intersection("*?[\\"):
+                declared.add(path + "sca-plan-file" if path.endswith("/") else path)
+    for file in chain(declared, files):
+        matched = {name for name, spec in specs.items() if spec.match_file(file, separators=())}
+        if any(a in matched and b in matched for a, b in parallel):
+            raise RejectedPlan("overlapping paths between parallel subtasks")
     return plan
 
 
@@ -109,7 +126,8 @@ class PlanningActivities:
 
     def all(self) -> list:
         subtasks = SubtaskActivities(self.acts)
-        return [self.plan_task, self.reject_plan, subtasks.prepare_base, subtasks.prepare]
+        return [self.plan_task, self.reject_plan, subtasks.prepare_base, subtasks.prepare,
+                subtasks.record_schedule, subtasks.record_progress]
 
     @activity.defn(name="coding.reject_plan")
     async def reject_plan(self, inp: PlanningInput) -> None:
@@ -171,7 +189,6 @@ class PlanningActivities:
             sandbox_id = await child.create_sandbox(inp.task_id)
             prompt = planning_prompt(spec.instruction, inp.feedback, spec.prompt_version)
             prompt += "\n" + "\n".join([
-                _PLAN_DEPENDENCY_GUIDANCE,
                 context,
                 *task.result.get("intents", {}).get("notes", []),
                 task.result.get("memory_note", ""),
@@ -205,7 +222,9 @@ class PlanningActivities:
             await acts.store.append_event(
                 inp.task_id,
                 EventType.PLAN_COMPLETED,
-                {**result, "attempt": inp.attempt},
+                {**result, "attempt": inp.attempt,
+                 **({"max_parallel_agents": inp.max_parallel_agents}
+                    if plan.split and inp.max_parallel_agents is not None else {})},
                 dedup_key=f"plan{inp.attempt}.completed",
             )
             if plan.split and spec.plan_review:

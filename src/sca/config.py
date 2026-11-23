@@ -346,6 +346,16 @@ class Settings(BaseSettings):
     portal_require_token: bool = False
     eval_api_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
 
+    # Parallel coding subtasks
+    max_parallel_agents: Literal["auto"] | Annotated[int, Field(ge=1, le=8)] = "auto"
+    agent_memory_mb: int = Field(default=700, ge=1)
+
+    @property
+    def effective_max_parallel_agents(self) -> int:
+        if self.max_parallel_agents != "auto":
+            return self.max_parallel_agents
+        return _auto_parallel_agents(self.agent_memory_mb)
+
 
 # Local source mode
 SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"
@@ -364,3 +374,32 @@ def portal_require_token_env(saved: str | None, default: str | None) -> str:
         return "1" if TypeAdapter(bool).validate_python(value) else "0"
     except ValidationError:
         raise ValueError("SCA_PORTAL_REQUIRE_TOKEN 必须是布尔值（例如 0 或 1）。") from None
+
+
+# Parallel coding subtasks
+def _host_memory_mb() -> int:
+    if sys.platform == "win32":
+        import ctypes
+
+        memory_kib = ctypes.c_uint64()
+        if ctypes.windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(memory_kib)):
+            return memory_kib.value // 1024
+        return 0
+    if sys.platform == "darwin":
+        import subprocess
+
+        try:
+            return int(subprocess.check_output(["/usr/sbin/sysctl", "-n", "hw.memsize"],
+                                               timeout=2)) // 1024**2
+        except subprocess.SubprocessError:
+            return 0
+    return os.sysconf("SC_PHYS_PAGES") * os.sysconf("SC_PAGE_SIZE") // 1024**2
+
+
+@lru_cache
+def _auto_parallel_agents(agent_memory_mb: int) -> int:
+    try:
+        memory_slots = (_host_memory_mb() - 1536) // agent_memory_mb
+    except (OSError, ValueError):
+        memory_slots = 1
+    return max(1, min(8, os.cpu_count() or 1, memory_slots))

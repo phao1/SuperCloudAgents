@@ -122,6 +122,10 @@ const portalTasks = (() => {
       ...(v('max_cost_usd') && {max_cost_usd: Number(v('max_cost_usd'))}),
       ...(v('max_tokens') && {max_tokens: Number(v('max_tokens'))}),
     };
+    // Parallel coding subtasks
+    if (planMode !== 'none' && v('max_parallel_agents')) {
+      spec.max_parallel_agents = Number(v('max_parallel_agents'));
+    }
     const backend = spec.agent_backend || defaultBackend;
     if (backend?.startsWith('opencode')) spec.agent_version = optional('agent_version');
     if (backend === 'opencode') {
@@ -198,6 +202,9 @@ const portalTasks = (() => {
     const bestModels = el('datalist');
     bestModels.id = project ? 'project-best-models' : 'best-models';
     const planOptions = fields(
+      // Parallel coding subtasks
+      field('最多并发 agent 数', 'max_parallel_agents', {type: 'number', min: 1, max: 8,
+        placeholder: '自动 · ' + (portalConfig.max_parallel_agents ?? '平台默认值')}),
       field('共享路径（每行一个仓库相对路径）', 'shared_paths', {multiline: true}),
       field('子任务配置（JSON）', 'subtasks', {multiline: true, note: '每项填写 name、instruction，可填 depends_on 与 paths。'}),
       check('规划后等待人工确认', 'plan_review')
@@ -221,7 +228,7 @@ const portalTasks = (() => {
         field('并行尝试数', 'best_n', {choices: [[1, '1 · 单次执行'], ...[2, 3, 4, 5].map(n => [n, String(n)])]}),
         field('任务预算（美元）', 'max_cost_usd', {type: 'number', min: 0, step: 'any'}),
         field('任务预算（Token）', 'max_tokens', {type: 'number', min: 1}),
-        field('任务拆分', 'plan_mode', {choices: [['none', '无'], ['auto', '自动规划'], ['manual', '手动子任务']]}),
+        field('任务拆分', 'plan_mode', {value: 'auto', choices: [['none', '无'], ['auto', '自动规划'], ['manual', '手动子任务']]}),
         field('冠军覆盖', 'champion', {choices: [['', '按租户灰度'], ['yes', '使用当前冠军'], ['no', '使用基线']]}),
         field('沙箱镜像（可选）', 'image'),
         check('复用已准备的工作区快照', 'fork_from_snapshot')
@@ -272,6 +279,7 @@ const portalTasks = (() => {
       const explicit = Number(value(form, 'best_n')) > 1 && ui.items(value(form, 'best_models'));
       return explicit?.length ? explicit : [value(form, 'model') || project?.default_model || portalConfig?.default_model];
     });
+    let savedPlanMode = 'auto';
     const sync = () => {
       const backend = value(form, 'agent_backend') || defaultBackend;
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');
@@ -279,9 +287,16 @@ const portalTasks = (() => {
       for (const input of available.querySelectorAll('input')) input.disabled = backend !== 'opencode';
       prOption.hidden = !ui.checked(form, 'push');
       pr.hidden = prOption.hidden || !ui.checked(form, 'open_pr');
-      bestOptions.hidden = Number(value(form, 'best_n')) < 2;
-      const mode = value(form, 'plan_mode');
+      const bestOf = Number(value(form, 'best_n')) > 1;
+      bestOptions.hidden = !bestOf;
+      const plan = control(form, 'plan_mode');
+      if (bestOf && !plan.disabled) savedPlanMode = plan.value;
+      if (!bestOf && plan.disabled) plan.value = savedPlanMode;
+      if (bestOf) plan.value = 'none';
+      plan.disabled = bestOf;
+      const mode = plan.value;
       planOptions.hidden = mode === 'none';
+      control(form, 'max_parallel_agents').disabled = mode === 'none';
       control(form, 'subtasks').parentElement.hidden = mode !== 'manual';
       control(form, 'plan_review').parentElement.hidden = mode !== 'auto';
     };

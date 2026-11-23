@@ -45,8 +45,38 @@ async def test_overlap_uses_files_at_base_commit(tmp_path):
     assert validate_plan(json.dumps(plan_data()).encode(), files).split
     with pytest.raises(ValueError, match="overlapping"):
         validate_plan(json.dumps(plan_data(["src/**"])).encode(), files)
-    # Potential overlap on nonexistent files is deliberately allowed by the design.
     assert validate_plan(json.dumps(plan_data(["missing/**"])).encode(), files).split
+
+
+def test_plan_allows_transitive_prerequisites_to_share_a_write_scope():
+    data = plan_data(["src/**"])
+    first, last = data["subtasks"]
+    last["depends_on"] = ["middle"]
+    data["subtasks"] = [first, {
+        "name": "middle", "instruction": "update tests", "paths": ["tests/**"], "depends_on": ["one"],
+    }, last]
+    data["parallelism"] = 1
+    assert validate_plan(json.dumps(data).encode(), ["src/one/a.py"]).parallelism == 1
+    last["depends_on"] = []
+    with pytest.raises(ValueError, match="overlapping"):
+        validate_plan(json.dumps(data).encode(), ["src/one/a.py"])
+
+
+@pytest.mark.parametrize("paths", [["/src/one/new.py"], ["src/one/**"], ["/src/**"]])
+def test_plan_rejects_overlapping_new_paths(paths):
+    with pytest.raises(ValueError, match="overlapping"):
+        validate_plan(json.dumps(plan_data(paths)).encode(), [])
+
+
+@pytest.mark.parametrize("hint", [0, 9, "2", True])
+def test_plan_requires_numeric_parallelism_in_range(hint):
+    with pytest.raises(ValidationError, match="parallelism"):
+        validate_plan(json.dumps({**plan_data(), "parallelism": hint}).encode(), [])
+
+
+def test_plan_rejects_shared_paths_for_parallel_subtasks():
+    with pytest.raises(ValidationError, match="parallel subtasks cannot declare shared paths"):
+        validate_plan(json.dumps({**plan_data(), "shared_paths": ["shared.py"]}).encode(), [])
 
 
 @pytest.mark.parametrize("data", [b"{", b"[]", b"null", b"{}"])
@@ -168,7 +198,8 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
         child._run.return_value = (ExecExit(exit_code=1), "")
     monkeypatch.setattr("sca.kinds.coding.planning.ChildActivities", lambda *_: child)
     result = await PlanningActivities(acts).plan_task(
-        PlanningInput("00000000-0000-0000-0000-000000000001", feedback="review feedback")
+        PlanningInput("00000000-0000-0000-0000-000000000001", feedback="review feedback",
+                      max_parallel_agents=2)
     )
     acts.sandbox.destroy.assert_awaited_once_with("planning-sandbox")
     prompt = child.run_agent_turn.call_args.args[0].prompt
@@ -180,6 +211,8 @@ async def test_planning_activity_records_result_and_always_destroys(tmp_path, mo
     if outcome in {"valid", "no_split"}:
         assert result == data
         assert EventType.PLAN_COMPLETED in events
+        completed = store.append_event.call_args_list[events.index(EventType.PLAN_COMPLETED)].args[2]
+        assert completed.get("max_parallel_agents") == (2 if outcome == "valid" else None)
         store.add_artifact.assert_awaited_once()
         assert (EventType.REVIEW_REQUESTED in events) == (outcome == "valid")
     else:

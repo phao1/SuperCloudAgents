@@ -25,7 +25,34 @@ curl -X POST "$SCA_API/v1/tasks" \
 
 `paths` 接受 Git ignore 规则，包含以 `!` 开头的排除规则。任务级 `shared_paths` 填写精确的仓库相对文件路径，允许各子任务修改这些文件。带范围的子任务在每轮检查点比较 Git 树，重命名同时检查旧路径和新路径。越界时丢弃该轮改动，记录含子任务名、轮次和路径的 `scope.violation` 事件，并在 `max_fix_attempts` 额度内用同一会话反馈重试。检查覆盖会进入 Git 补丁的文件改动。
 
-将手动的 `subtasks` 和 `shared_paths` 换成 `"plan": "auto"` 可由规划器生成拆分方案。规划器会收到仓库文件、局部导入、符号和候选测试的摘要。其 `.sca/plan.json` 可填写同样的 `depends_on` 和顶层 `shared_paths`。范围在现有文件上重叠时，需要把重叠文件列入 `shared_paths`。`"plan_review": true` 会先把方案交给人工确认。子任务提示会附上显式共享或被多个子任务使用的 Python 模块的公开函数签名，省略参数默认值和类型注解里的字面量。
+## Portal 自动规划与并发
+
+Portal 的「新建任务」和项目「提交线程」默认使用「自动规划」，可在「任务拆分」选择「无」或「手动子任务」。
+规划和子任务沿用表单选择的 Agent 后端与模型。规划器会读到仓库文件、局部导入、符号和候选测试的摘要，
+并写出 `.sca/plan.json`。单文件修复等小任务可直接执行。可拆分的需求会形成 2 至 8 个子任务，
+用 `depends_on` 指定依赖。能同时运行的子任务须使用互不重叠的写入范围，有依赖关系的子任务可以修改同一文件。
+规划会校验已有文件和明确声明的新路径，执行时也会检查每次提交的实际文件改动。规划无效时退回单任务执行。
+`"plan_review": true` 会先把方案交给人工确认。规划器可提供 `parallelism` 建议，执行图会展示该建议。
+
+「最多并发 agent 数」留空时使用平台值。本机计算默认值时预留 1536 MiB，按 `SCA_AGENT_MEMORY_MB`
+（默认 700）估算每个 Agent 的开销，并受 CPU 数和 1 至 8 的范围约束。可以设置
+`SCA_MAX_PARALLEL_AGENTS=auto` 或填写 1 至 8 的整数。单次任务可以用 `max_parallel_agents` 下调上限，
+子任务内的 Best-of-N 候选共用该任务的名额。API 提交时可显式指定 `"plan": "auto"`，省略 `plan` 时使用 `"none"`。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/portal/config" -H "Authorization: Bearer $SCA_API_TOKEN"
+
+curl -fsS "$SCA_API_URL/v1/tasks" -H "Authorization: Bearer $SCA_API_TOKEN" --json @- <<'JSON'
+{"kind":"coding","spec":{"repo_url":"https://example.org/team/app.git",
+ "instruction":"定义数据模型，并行实现 API 和页面，再补集成测试",
+ "agent_backend":"dsh","model":"deepseek-flash","plan":"auto","max_parallel_agents":2}}
+JSON
+
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/dag" -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+在执行图中，同一依赖层的子任务并排显示，等待并发名额的节点标记「排队中」。任务对话会显示规划结果、
+并发上限、子任务开始和完成时的 Agent 标签。运行期间可对多个子任务[发送插话](operations.md#运行中插话)。
 
 ## 使用 Best-of-N
 

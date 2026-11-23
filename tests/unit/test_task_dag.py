@@ -57,13 +57,15 @@ def test_dependency_diamond_has_stable_pending_nodes():
         owner, ("plan.started", {"attempt": 1}),
         ("agent.turn_started", {"subtask": "plan-1", "turn": 0}),
         ("agent.turn_completed", {"subtask": "plan-1", "turn": 0}),
-        ("plan.completed", {"attempt": 1, "split": True, "subtasks": plan}),
+        ("plan.completed", {"attempt": 1, "split": True, "subtasks": plan,
+                            "parallelism": 3, "max_parallel_agents": 2}),
         ("subtask.started", {"subtask": "schema"}),
         ("agent.turn_started", {"subtask": "schema", "turn": 1}),
         ("agent.turn_completed", {"subtask": "schema", "turn": 1}),
         ("verification.completed", {"subtask": "schema", "turn": 1, "passed": True}),
         ("sandbox.destroyed", {"subtask": "schema"}),
         ("subtask.started", {"subtask": "fx"}),
+        ("subtask.queued", {"subtask": "tax"}),
         ("best_of.started", {"subtask": "fx", "attempts": [{"attempt": i} for i in range(1, 4)]}),
         ("sandbox.destroyed", {"subtask": "fx"}),
         ("workspace.forked", {"subtask": "fx", "best_of_attempt": 2}),
@@ -75,6 +77,15 @@ def test_dependency_diamond_has_stable_pending_nodes():
     assert [node.id for node in nodes(before, "subtask")] == [node.id for node in branches.values()]
     assert {label: node.status for label, node in branches.items()} == {
         "schema": "succeeded", "fx": "running", "tax": "pending", "pricing": "pending",
+    }
+    assert {name: (node.meta["level"], node.meta["lane"]) for name, node in branches.items()} == {
+        "schema": (0, 0), "fx": (1, 0), "tax": (1, 1), "pricing": (2, 0),
+    }
+    assert branches["tax"].meta["waiting_for_slot"] is True
+    assert "waiting_for_slot" not in branches["pricing"].meta
+    root, = nodes(graph, "task")
+    assert {key: root.meta[key] for key in ("max_parallel_agents", "subtask_count", "parallelism")} == {
+        "max_parallel_agents": 2, "subtask_count": 4, "parallelism": 3,
     }
     assert {i.meta["attempt"]: i.status for i in nodes(graph, "attempt")} == {
         1: "pending", 2: "running", 3: "pending",

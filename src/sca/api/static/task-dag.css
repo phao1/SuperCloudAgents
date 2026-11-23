@@ -12,6 +12,7 @@
 .dag-legend .dag-edge-dependency i, .dag-legend .dag-edge-select i { border-top-style: dashed; }
 .dag-legend .dag-edge-spawn i { border-top-style: dotted; }
 .dag-pan-hint { margin-inline-start: auto; }
+.dag-parallel { margin: 4px 0 10px; color: var(--muted); font-size: 13px; }
 .dag-load-status:empty { display: none; }
 .dag-canvas {
   display: block; width: 100%; height: clamp(min(240px, 80vh), var(--dag-height, 240px), 80vh);

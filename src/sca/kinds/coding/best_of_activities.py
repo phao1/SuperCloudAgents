@@ -93,6 +93,17 @@ class AttemptStore(ChildStore):
             dedup_key=f"{self.name}.{dedup_key}" if dedup_key else None,
         )
 
+    async def start_guided_turn(
+        self, task_id: str, start: dict, key: str, message_ids: list[str], interrupted_ids: list[str],
+        *, plan_attempt: int | None = None,
+    ) -> None:
+        await self.update_result(task_id, {"turns": start["turn"]})
+        number = self.attempt.attempt
+        await super().start_guided_turn(
+            task_id, {**start, "best_of_attempt": number, "best_of_candidate": number},
+            key, message_ids, interrupted_ids, plan_attempt=plan_attempt,
+        )
+
 
 class AttemptActivities(ChildActivities):
     def __init__(self, coding: CodingActivities, attempt: Attempt) -> None:

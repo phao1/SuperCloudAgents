@@ -41,6 +41,21 @@ async def project(task, events, *, user=OWNER, after=0, limit=200):
     return await task_page(SimpleNamespace(task_conversation_events=read), task.id, user, after, limit)
 
 
+async def test_conversation_reports_plan_cap_and_labeled_subtask_progress():
+    task, events = history('dsh', [
+        ('plan.completed', {'subtasks': [{'name': name} for name in ('compile', 'test')],
+                            'split': True, 'max_parallel_agents': 2}),
+        ('subtask.started', {'backend': 'dsh'}),
+        ('subtask.completed', {'backend': 'dsh', 'passed': True}),
+    ])
+    page = await project(task, events)
+    plan, start, finish = [item for item in page.items if item.kind.startswith(('plan.', 'subtask.'))]
+    assert plan.text == '规划完成 · 2 个子任务，最多 2 个并发'
+    assert (start.text, finish.text) == ('compile · 开始', 'compile · 完成')
+    assert start.backend == finish.backend == 'dsh'
+    assert start.dag_node_id == finish.dag_node_id == f'task:{task.id}/subtask:compile'
+
+
 def backend_events(backend: str) -> list[AgentEvent]:
     if backend.startswith('opencode'):
         return [event for line in OPENCODE_TRACE.splitlines() for event in parse_opencode_line(line)]

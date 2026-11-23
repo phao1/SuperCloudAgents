@@ -111,7 +111,7 @@ async def test_portal_serves_only_registered_assets(portal_client):
 
 async def test_portal_config_reports_shared_provider_health(portal_client, monkeypatch, tmp_path):
     client, _, _ = portal_client
-    settings = Settings(_env_file=None, data_dir=tmp_path, model_gateway_url='http://gateway')
+    settings = Settings(_env_file=None, data_dir=tmp_path, model_gateway_url='http://gateway', max_parallel_agents=3)
     monkeypatch.setattr('sca.api.portal.get_settings', lambda: settings)
     monkeypatch.setattr('sca.api.portal.gateway_models', AsyncMock(return_value=(True, ['model'])))
     health = ProviderHealth(tmp_path)
@@ -122,6 +122,7 @@ async def test_portal_config_reports_shared_provider_health(portal_client, monke
     headers = bearer('fixture-reader')
     result = (await client.get(path, headers=headers)).json()
     assert result['gateway_reachable'] is True
+    assert result['max_parallel_agents'] == 3
     assert result['gateway_provider_account_error'] == health.read()['account_error']
     assert result['gateway_provider_error']['kind'] == 'unavailable'
     health.record(None)

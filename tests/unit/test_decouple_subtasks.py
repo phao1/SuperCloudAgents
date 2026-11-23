@@ -171,6 +171,7 @@ class Harness:
         self.spec = workflow_spec(spec.model_dump())
         self.started = []
         self.completed = []
+        self.peak_children = 0
         self.block_until = {}
         self.launched = {}
         monkeypatch.setattr(coding_workflow.workflow, "execute_activity", self.execute)
@@ -185,7 +186,9 @@ class Harness:
 
     async def start_child(self, run, *, args, **kwargs):
         name = args[1]["name"]
+        assert set(args[1].get("depends_on", [])) <= set(self.completed)
         self.started.append(name)
+        self.peak_children = max(self.peak_children, len(self.started) - len(self.completed))
         self.launched.setdefault(name, asyncio.Event()).set()
 
         async def child():
@@ -375,6 +378,42 @@ async def test_planning_activity_supplies_graph_and_accepts_shared_paths(build):
     assert "Repository map" in prompt and "Candidate tests" in prompt
     assert "tests/test_common.py" in prompt and "prerequisite subtask names" in prompt
     assert await h.acts.sandbox.list({}) == []
+
+
+async def test_planner_and_subtasks_use_selected_dsh_backend_and_model(build):
+    plan = {"split": True, "reason": "separate modules", "parallelism": 2, "subtasks": [
+        {"name": name, "instruction": "inspect module", "paths": [f"{name}/main.py"]}
+        for name in ("left", "right")
+    ]}
+    command = "\n".join([
+        'if [[ "$(git branch --show-current)" == *-plan-* ]]; then',
+        "mkdir -p .sca", "cat > .sca/plan.json <<'PLAN'", json.dumps(plan), "PLAN", "fi",
+    ])
+    h = build(driver="local", plan="auto", instruction=script(command), agent_backend="dsh",
+              model="fixture-model", use_champion=False, memory_enabled=False, max_parallel_agents=1)
+    models = []
+
+    class ScriptedDsh(FakeBackend):
+        name = "dsh"
+        state_transport = "sync"
+
+        async def run_turn(self, sandbox, sandbox_id, ctx, prompt, **options):
+            models.append(ctx.model)
+            async for event in super().run_turn(sandbox, sandbox_id, ctx, prompt, **options):
+                yield event
+
+    h.acts.backends["dsh"] = ScriptedDsh()
+    h.settings.max_parallel_agents = 2
+    h.spec = await ActivityEnvironment().run(h.acts.load_task, h.task_id)
+    h.spec["_user_interjection"] = False  # This fixture runs activity calls without signal handles.
+    assert h.spec["_max_parallel_agents"] == 1
+    assert await h.run() == {"skip_turn": True, "unresolved": []}
+    assert h.peak_children == 1
+    assert h.events("plan.completed")[0]["max_parallel_agents"] == 1
+    assert models == ["fixture-model"] * 3
+    assert {event["subtask"] for event in h.events("agent.turn_started") if event["backend"] == "dsh"} == {
+        "plan-1", "left", "right",
+    }
 
 
 async def test_impact_endpoint_uses_published_commit_and_durable_bundle(build, monkeypatch):
