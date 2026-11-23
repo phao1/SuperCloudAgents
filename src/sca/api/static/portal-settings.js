@@ -669,16 +669,58 @@ const portalSettings = (() => {
     return view.pending;
   }
 
+  function configureAccess(required) {
+    const visible = typeof required === 'boolean';
+    $('portal-access-control').hidden = !visible;
+    const input = $('portal-require-token');
+    if (visible && !input.disabled) input.checked = required;
+  }
+
+  function bindAccess() {
+    const input = $('portal-require-token');
+    input.onchange = async () => {
+      const identity = portalIdentity, required = input.checked;
+      if (required && identity?.local_no_token && !confirm(
+        '开启后需用 .data/portal.env 中的 SCA_EVAL_API_TOKEN 登录。请在本机终端私下查看。\n\n'
+        + 'PowerShell\nSelect-String SCA_EVAL_API_TOKEN .\\.data\\portal.env\n\n'
+        + 'Bash\ngrep SCA_EVAL_API_TOKEN .data/portal.env'
+      )) {
+        input.checked = false;
+        return;
+      }
+      input.disabled = true;
+      try {
+        const status = await data('/portal/access', {require_token: required}, 'PUT');
+        if (identity !== portalIdentity) return;
+        input.checked = status.require_token;
+        if (status.require_token && identity?.local_no_token) {
+          resetPortalSession();
+          displayConnection('请使用访问令牌连接。', '');
+          syncPortalLogin();
+          await route();
+          await refresh(true);
+          $('token').focus();
+        }
+      } catch (e) {
+        if (identity === portalIdentity) input.checked = !required;
+        error(e);
+      } finally {
+        input.disabled = false;
+      }
+    };
+  }
+
   function clearSensitive() {
     dismissToken?.();
   }
 
   function reset() {
+    configureAccess();
     clearSensitive();
     dismissToken = null;
     for (const page of mounted.keys()) $(page + '-content').replaceChildren();
     mounted.clear();
   }
 
-  return {load, reset, clearSensitive};
+  return {load, reset, clearSensitive, configureAccess, bindAccess};
 })();

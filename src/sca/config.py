@@ -15,6 +15,8 @@ from pydantic import (
     BaseModel,
     Field,
     SecretStr,
+    TypeAdapter,
+    ValidationError,
     ValidationInfo,
     field_validator,
     model_validator,
@@ -340,6 +342,10 @@ class Settings(BaseSettings):
     # DSH request budgets
     dsh_max_output_tokens: int = Field(default=DSH_DEFAULT_MAX_OUTPUT_TOKENS, ge=1, le=2**53 - 1)
 
+    # Local Portal authentication
+    portal_require_token: bool = False
+    eval_api_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
+
 
 # Local source mode
 SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"
@@ -349,3 +355,12 @@ SOURCE_MODE_WARNING = "本地源码模式：任务在本机直接运行，无隔
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+# Local Portal authentication
+def portal_require_token_env(saved: str | None, default: str | None) -> str:
+    value = os.environ.get("SCA_PORTAL_REQUIRE_TOKEN", saved if saved is not None else default or "0")
+    try:
+        return "1" if TypeAdapter(bool).validate_python(value) else "0"
+    except ValidationError:
+        raise ValueError("SCA_PORTAL_REQUIRE_TOKEN 必须是布尔值（例如 0 或 1）。") from None

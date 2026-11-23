@@ -15,6 +15,7 @@ from zipfile import ZipFile
 import httpx
 import pytest
 import yaml
+from fastapi import Request
 
 from sca.agents.local import DSH_PACKAGE, dsh_install_dir, installed_dsh
 from sca.api import portal
@@ -254,6 +255,7 @@ def test_windows_postgres_grants_access_and_uses_a_dedicated_server_log(tmp_path
 def test_windows_configuration_persists_token_and_defaults_to_dsh(tmp_path, capsys, monkeypatch):
     monkeypatch.delenv("SCA_AGENT_BACKEND", raising=False)
     monkeypatch.delenv("SCA_DEFAULT_MODEL", raising=False)
+    monkeypatch.delenv("SCA_PORTAL_REQUIRE_TOKEN", raising=False)
     monkeypatch.setenv("PORTAL_TOKEN", "local-token-fixture")
     stack = portal_source.WindowsSource(tmp_path)
     stack.runtime.mkdir(parents=True)
@@ -262,8 +264,13 @@ def test_windows_configuration_persists_token_and_defaults_to_dsh(tmp_path, caps
     assert config["SCA_AGENT_BACKEND"] == "dsh"
     assert config["SCA_DEFAULT_MODEL"] == "deepseek-flash"
     assert config["SCA_API_TOKENS"] == "local-token-fixture:eval:admin"
+    assert config["SCA_PORTAL_REQUIRE_TOKEN"] == "0"
     monkeypatch.delenv("PORTAL_TOKEN")
     assert stack.set_configuration() == config
+    monkeypatch.setenv("SCA_PORTAL_REQUIRE_TOKEN", "true")
+    assert stack.set_configuration()["SCA_PORTAL_REQUIRE_TOKEN"] == "1"
+    monkeypatch.delenv("SCA_PORTAL_REQUIRE_TOKEN")
+    assert stack.set_configuration()["SCA_PORTAL_REQUIRE_TOKEN"] == "1"
     assert capsys.readouterr() == ("", "")
 
 
@@ -283,7 +290,13 @@ def test_windows_up_migrates_before_starting_api_and_worker(tmp_path, monkeypatc
     monkeypatch.setattr(stack, "environment", lambda config: env)
     monkeypatch.setattr(stack, "start_postgres", lambda: starts.append("postgres"))
     monkeypatch.setattr(stack, "start_gateway", lambda env: starts.append("gateway"))
-    monkeypatch.setattr(stack, "start", lambda name, *args: starts.append(name))
+    def start(name, argv, *args):
+        if name == "api":
+            assert argv == [stack.python, "-m", "sca.api.portal_server", "--no-proxy-headers",
+                            "--host", "127.0.0.1", "--port", "8000"]
+        starts.append(name)
+
+    monkeypatch.setattr(stack, "start", start)
     monkeypatch.setattr(stack, "wait", lambda *args: None)
     monkeypatch.setattr(stack, "owned", lambda service: 1)
     stack.data.mkdir()
@@ -479,20 +492,28 @@ def test_file_lock_can_retry_after_contention(tmp_path):
         unlock_file(second)
 
 
-def test_source_smoke_uses_fake_and_checks_patch(tmp_path):
+@pytest.mark.parametrize("require_token", [False, True])
+def test_source_smoke_uses_fake_and_checks_patch(tmp_path, require_token):
     from uuid import uuid4
 
     task_id = uuid4()
     task = f"/v1/tasks/{task_id}"
+    origin = "http://127.0.0.1:8000"
 
     def respond(request):
         match request.url.path:
             case "/v1/portal/config":
                 return httpx.Response(200, json={"sandbox_driver": "local",
                     "gateway_reachable": True, "temporal_reachable": True})
+            case "/v1/portal/access":
+                return httpx.Response(200, json={"require_token": require_token,
+                                                 "local_no_token_active": not require_token})
             case "/portal":
+                assert "Authorization" not in request.headers
                 return httpx.Response(200, html="<title>SuperCloudAgents</title>")
             case "/v1/tasks":
+                assert request.headers.get("Authorization") == ("Bearer fixture" if require_token else None)
+                assert request.headers.get("Origin") == (None if require_token else origin)
                 spec = json.loads(request.content)["spec"]
                 assert spec["agent_backend"] == "fake" and "sca-fake" in spec["instruction"]
                 assert spec["auto_finish"] and spec["verify_command"] == "grep -qx ready result.txt"
@@ -506,7 +527,8 @@ def test_source_smoke_uses_fake_and_checks_patch(tmp_path):
             case _:
                 raise AssertionError(request.url.path)
 
-    with httpx.Client(base_url="http://unit", transport=httpx.MockTransport(respond)) as client:
+    with httpx.Client(base_url=origin, transport=httpx.MockTransport(respond),
+                      headers={"Authorization": "Bearer fixture"}) as client:
         assert source_smoke.smoke(client, tmp_path / "repo with spaces", 1) == task_id
 
 
@@ -572,7 +594,8 @@ async def test_portal_config_reports_installed_backends_and_warning(tmp_path, mo
     monkeypatch.setattr(portal, "gateway_models", AsyncMock(return_value=(True, ["deepseek-flash"])))
     monkeypatch.setattr(portal, "temporal_reachable", AsyncMock(return_value=True))
     user = Principal(tenant_id="eval", subject="demo")
-    request = SimpleNamespace(client=SimpleNamespace(host="127.0.0.1"))
+    request = Request({"type": "http", "client": ("127.0.0.1", 43120),
+                       "app": SimpleNamespace(state=SimpleNamespace())})
     response = await portal.config(request, user)
     assert response["warning"] == SOURCE_MODE_WARNING
     assert response["sandbox_driver"] == "local"

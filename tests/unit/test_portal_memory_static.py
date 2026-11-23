@@ -63,9 +63,10 @@ def test_memory_and_report_content_uses_text_nodes():
 def test_analysis_upload_submission_and_report_reuse_task_view():
     source = PORTAL.read_text()
     assert 'accept=".csv,.json" multiple required' in source
-    assert "new FormData();form.append('file',file)" in source
-    assert "fetch('/v1/files',{method:'POST',headers:{Authorization:'Bearer '+portalToken}" in source
-    assert 'inputs.push((await response.json()).id)' in source
+    assert 'inputs.push((await portalUI.upload(file)).id)' in source
+    ui = PORTAL.with_name('portal-ui.js').read_text()
+    assert 'new FormData()' in ui and "form.append('file', file)" in ui
+    assert "fetch('/v1/files'," in ui and "method: 'POST', headers: authHeaders()" in ui
     assert "kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}" in source
     assert 'await openTask(task.id)' in source
     assert 'await portalTasks.report(t,artifacts)' in source

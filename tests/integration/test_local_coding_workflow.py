@@ -40,7 +40,8 @@ async def test_fake_coding_task_with_local_sandbox(
         _env_file=None, data_dir=tmp_path / "data", sandbox_driver="local", agent_backend="fake",
         task_queue=f"source-test-{uuid4()}", maintenance_schedule=False,
         model_gateway_url="http://127.0.0.1:1",
-        api_tokens="fixture-token:eval:admin", api_token="fixture-token",
+        api_tokens="fixture-token:eval:admin", api_token="fixture-token", eval_api_token="fixture-token",
+        portal_require_token=False,
     )
     demo_config = tmp_path / "demo-config"
     demo_config.write_text("DEEPSEEK_API_KEY=REPLACE_ME\n", encoding="utf-8")
@@ -48,12 +49,12 @@ async def test_fake_coding_task_with_local_sandbox(
     monkeypatch.setattr(api_app, "get_settings", lambda: settings)
     monkeypatch.setattr("sca.config.get_settings", lambda: settings)
     orchestrator = TemporalOrchestrator(local_temporal.client, settings.task_queue)
-    app = api_app.create_app(store=store, orchestrator=orchestrator)
+    app = api_app.create_app(store=store, orchestrator=orchestrator, local_portal_port=8000)
     async with (
         await build_worker(local_temporal.client, settings, store),
         httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": "Bearer " + settings.api_token},
+            transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000",
+            headers={"Origin": "http://127.0.0.1:8000"},
         ) as client,
         asyncio.timeout(45),
     ):

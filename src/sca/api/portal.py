@@ -12,7 +12,7 @@ from uuid import UUID, uuid4
 
 import httpx
 from dotenv import set_key
-from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, SecretStr
 from sqlalchemy import func, select
@@ -20,7 +20,18 @@ from temporalio.service import RPCError
 
 from sca.admission.order import tenant_slot_limit
 from sca.agents.opencode_prompt import PROMPT_PATH, PROMPT_SUITE
-from sca.api.authz import ForbiddenError, GuestPrincipal, authorize, platform_admin_store, principal
+from sca.api.authz import (
+    ForbiddenError,
+    GuestPrincipal,
+    LocalPortalPrincipal,
+    PortalAccessSetting,
+    authorize,
+    local_portal_admin,
+    local_portal_host,
+    platform_admin_store,
+    portal_token_required,
+    principal,
+)
 from sca.api.evals import can_rescore
 from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
@@ -178,6 +189,7 @@ async def config(request: Request,
             and bool(_restart_gateway_command(os.environ.get("SCA_PORTAL_LOCAL_CONFIG")))
             and _local_client(request),
             "model_docker_mode": os.environ.get("SCA_RUNTIME_MODE") == "docker",
+            **_portal_access_config(request, user),
             **(_source_config(settings) if settings.sandbox_driver == "local" else {})}
 
 
@@ -322,3 +334,46 @@ def gateway_restarts(request: Request) -> GatewayRestarts:
     if not hasattr(state, "gateway_restarts"):
         state.gateway_restarts = GatewayRestarts()
     return state.gateway_restarts
+
+
+# Local Portal authentication
+class PortalAccessStatus(PortalAccessSetting):
+    local_no_token_active: bool
+
+
+def _can_manage_portal_access(request: Request, user: Principal) -> bool:
+    return (user.tenant_id == "eval" and user.role == "admin" and not user.scopes
+            and local_portal_host(request) is not None)
+
+
+def _portal_access_config(request: Request, user: Principal) -> dict:
+    if not _can_manage_portal_access(request, user):
+        return {}
+    config: dict = {"portal_require_token": portal_token_required(request.app.state.settings)}
+    if isinstance(user, LocalPortalPrincipal):
+        config["local_identity"] = PortalIdentity(tenant_id=user.tenant_id, subject=user.subject, role=user.role)
+    return config
+
+
+@router.get("/v1/portal/access")
+async def get_portal_access(request: Request, response: Response) -> PortalAccessStatus:
+    response.headers["Cache-Control"] = "no-store"
+    required = local_portal_host(request) is None or portal_token_required(request.app.state.settings)
+    active = not required and await local_portal_admin(request) is not None
+    return PortalAccessStatus(require_token=required, local_no_token_active=active)
+
+
+@router.put("/v1/portal/access")
+async def set_portal_access(
+    body: PortalAccessSetting, request: Request, response: Response,
+    user: Annotated[Principal, Depends(authorize("tenant-admin"))],
+) -> PortalAccessStatus:
+    if not _can_manage_portal_access(request, user):
+        raise ForbiddenError("仅本机 Portal 的 eval 管理员可修改访问令牌开关。")
+    active = not body.require_token and await local_portal_admin(request) is not None
+    try:
+        body.save(request.app.state.settings)
+    except OSError:
+        raise HTTPException(503, "无法保存本机 Portal 访问设置。") from None
+    response.headers["Cache-Control"] = "no-store"
+    return PortalAccessStatus(require_token=body.require_token, local_no_token_active=active)

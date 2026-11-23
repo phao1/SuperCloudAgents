@@ -123,7 +123,8 @@ async def demo_api(monkeypatch, tmp_path):
     config = tmp_path / "provider.env"
     config.write_text("DEEPSEEK_API_KEY=REPLACE_ME\n")
     monkeypatch.setenv("SCA_PORTAL_LOCAL_CONFIG", str(config))
-    settings = Settings(_env_file=None, data_dir=tmp_path, guest_view="local", guest_tenant=None)
+    settings = Settings(_env_file=None, data_dir=tmp_path, guest_view="local", guest_tenant=None,
+                        portal_require_token=True, eval_api_token="fixture")
     monkeypatch.setattr("sca.api.app.get_settings", lambda: settings)
     now, task_id, other_id = datetime.now(UTC), uuid4(), uuid4()
     task = Task(id=task_id, tenant_id="eval", kind="coding", state=TaskState.CANCELLED,
@@ -163,9 +164,9 @@ async def demo_api(monkeypatch, tmp_path):
     )
     objects = LocalObjectStore(tmp_path / "objects")
     await objects.put(key_for(task_id, "changes.patch"), patch)
-    app = create_app(store=store, object_store=objects, orchestrator=SimpleNamespace(),
+    app = create_app(store=store, object_store=objects, orchestrator=SimpleNamespace(), local_portal_port=8000,
                      authenticator=StaticTokenAuthenticator({"fixture": "eval:admin", "viewer": "eval:viewer"}))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
         yield client, scoped, task_id, other_id
 
 

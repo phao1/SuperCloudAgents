@@ -71,7 +71,9 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 ### Portal 快速启动
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
-用首次启动时生成的令牌登录。令牌保存在 `.data/portal.env`，终端显示保存位置。
+默认以 `eval` 管理员身份进入，顶部显示「本机免令牌」。可在「概览 → 工作空间连接」开启
+「需要访问令牌」。需要登录时，从 `.data/portal.env` 私下查找 `SCA_EVAL_API_TOKEN`。
+[访问开关与 API](docs/operations.md#本机-portal-访问令牌)
 
 ```bash
 # Docker 模式，首次安装并启动
@@ -114,9 +116,10 @@ curl -fsS http://127.0.0.1:8000/v1/portal/config
 curl -fsS http://127.0.0.1:8000/v1/tasks
 ```
 
-在浏览器打开 `http://127.0.0.1:8000/portal`。新会话默认进入演示租户 `eval` 的任务历史，
-无需输入令牌或模型密钥。顶部「只读访客模式 · 登录」可切换到令牌登录。尚未接入模型时可查看轨迹和补丁，
-登录后可在概览添加模型以恢复提交。[访客模式配置与风险](docs/operations.md#只读访客模式)
+在浏览器打开 `http://127.0.0.1:8000/portal`，从「所有线程」查看演示租户 `eval` 的历史。
+尚未接入模型时也能查看轨迹和补丁，可在概览添加模型以恢复提交。开启「需要访问令牌」后，
+可在只读访客模式查看已脱敏的历史，具体范围由 `SCA_GUEST_VIEW` 控制。
+[访客模式配置与风险](docs/operations.md#只读访客模式)
 
 从 Linux 服务器把任务、项目、评测和演进记录带到 Windows 源码实例时，使用
 [历史导出与导入](docs/history-transfer.md)。
@@ -147,7 +150,7 @@ make portal-setup
 ```
 
 首次运行自动创建 `.env` 和随机网关密钥，并准备数据库、镜像、OpenCode 2.3.0
-缺陷基线后启动 Portal。连接管理员令牌后，可在概览页填写 DeepSeek API Key；
+缺陷基线后启动 Portal。打开本机 Portal 后，可在概览页填写 DeepSeek API Key。
 密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
 脚本打印 `http://127.0.0.1:8000/portal` 和登录令牌的保存位置。可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
@@ -165,7 +168,8 @@ bash scripts/portal_demo.sh down --all # 同时停止 Compose，保留数据库�
 
 启动配置保存在 `.data/portal.env`，PID 与日志在 `.data/run/`，OpenCode 缓存、源码和版本在
 `.data/opencode/`。不要分享 `.env`、`.data/portal.env` 或日志。远程访问使用
-`ssh -L 8000:127.0.0.1:8000 host`，然后在本地浏览器打开 Portal。演示使用真实模型，会产生费用。
+`ssh -L 8000:127.0.0.1:8000 host`，然后在本地浏览器打开 Portal。该转发按本机访问处理。
+演示使用真实模型，会产生费用。
 
 ## Phase 2
 

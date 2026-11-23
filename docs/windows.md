@@ -43,9 +43,16 @@ winget install -e --id Microsoft.VCRedist.2015+.x64
 Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz'
 ```
 
-打开 <http://127.0.0.1:8000/portal>，点击右上角「登录」。初次启动生成的令牌保存在
-`.data/portal.env` 的 `SCA_EVAL_API_TOKEN` 中，可在本机私下查看。也可以在首启前通过
-`PORTAL_TOKEN` 提供自选令牌，仅允许字母、数字、下划线和连字符。以下命令会隐藏输入。
+打开 <http://127.0.0.1:8000/portal>。默认本机免令牌，以 `eval` 管理员身份进入工作空间。
+在「概览 → 工作空间连接」打开「需要访问令牌」，随后用 `.data/portal.env` 中的
+`SCA_EVAL_API_TOKEN` 登录。在本机 PowerShell 私下运行以下命令查看令牌。
+
+```powershell
+Select-String SCA_EVAL_API_TOKEN .\.data\portal.env
+```
+
+也可以在首启前通过 `PORTAL_TOKEN` 提供自选令牌，仅允许字母、数字、下划线和连字符。
+以下命令会隐藏输入。[访问开关与优先级](operations.md#本机-portal-访问令牌)
 
 ```powershell
 $env:PORTAL_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Portal 登录令牌' -AsSecureString)).Password
@@ -53,7 +60,7 @@ $env:PORTAL_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Portal �
 Remove-Item Env:PORTAL_TOKEN
 ```
 
-登录后在「概览」填写 DeepSeek API Key 并保存，Portal 会重启本机 LiteLLM 网关。
+在「概览」填写 DeepSeek API Key 并保存，Portal 会重启本机 LiteLLM 网关。
 也可以在启动前将密钥填入仓库根目录的 `.env`；脚本会复用现有配置。在获取密钥前可以
 查看历史记录。请妥善保存 `.env` 和 `.data/portal.env`。
 
@@ -91,6 +98,9 @@ Windows 本机可用 `export-history <zip>` 导出。[历史归档内容与高�
    启动脚本会应用 DSH 演进所需的迁移 `0025`。
 
 ### API 提交示例
+
+PowerShell 脚本发起写请求时继续使用 `SCA_EVAL_API_TOKEN`。免令牌开启时，本机的普通 GET
+查询可以省略令牌，例如 `Invoke-RestMethod http://127.0.0.1:8000/v1/tasks`。
 
 ```powershell
 $token = [System.Net.NetworkCredential]::new('', (Read-Host 'Portal 登录令牌' -AsSecureString)).Password
@@ -155,15 +165,16 @@ Remove-Variable token, headers
 - 端口 7233、4000 或 8000 被占用时，先停止占用端口的服务，再运行 `up`。
   `logs postgres` 同时显示 `.data/run/postgres.log` 的初始化及 `pg_ctl` 输出和
   `.data/run/postgres-server.log` 的数据库进程输出。工具版本需与 `.data/pg/PG_VERSION` 匹配。
-- 网关启动失败时查看 `.data/run/litellm.log`。若 Portal 提示密钥未配置，使用同一个
-  登录令牌在「概览」保存密钥后重试。`restart-gateway` 可加载从 `.env` 手工更新的密钥。
+- 网关启动失败时查看 `.data/run/litellm.log`。若 Portal 提示密钥未配置，在「概览」保存密钥后重试。
+  `restart-gateway` 可加载从 `.env` 手工更新的密钥。
 - 源码模式可选 OpenCode、Codex 或 Pi。用 `SCA_AGENT_BACKEND` 选择默认后端。
   OpenCode 首次选用时下载本机发布包。Codex 需要将 `codex.exe` 加入 `PATH`，
   Pi 可通过 `npm install -g @earendil-works/pi-coding-agent@1.5.2` 安装。
   OpenCode 脑手分离和构建固化需要 Docker。
 - 使用源码模式烟测时，在当前 PowerShell 中提供 `PORTAL_TOKEN`，然后运行
   `.\.venv\Scripts\python.exe scripts/source_smoke.py`。烟测使用 `fake` 后端，
-  检查 Portal HTML、文件补丁和验证结果，无需模型密钥。
+  检查 Portal HTML、文件补丁和验证结果。免令牌开启时，烟测从同一 Origin 无令牌提交任务。
+  全程无需模型密钥。
 
 ### 源码模式持续集成
 

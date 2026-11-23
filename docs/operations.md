@@ -52,17 +52,46 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 已受理的任务可继续。删除使用 `DELETE /v1/admin/tenants/{id}`，会关闭租户访问并吊销其
 数据库令牌，保留历史任务、用量和租户标识。
 
+## 本机 Portal 访问令牌
+
+源码和 Docker 演示启动脚本默认允许本机浏览器以 `eval` 管理员身份免令牌访问。打开
+`http://127.0.0.1:8000/portal`，在「概览 → 工作空间连接」打开「需要访问令牌」后，
+新请求立即需要令牌才能以管理员身份操作。用 Bash 的 `grep SCA_EVAL_API_TOKEN .data/portal.env`
+或 PowerShell 的 `Select-String SCA_EVAL_API_TOKEN .\.data\portal.env` 在本机私下查看令牌。
+
+启动默认值是 `SCA_PORTAL_REQUIRE_TOKEN=0`。启动脚本优先使用进程环境中的值，其次是
+`.data/portal.env` 已保存的值，再其次是 `.env`，并将结果保存到 `.data/portal.env`。
+运行时开关保存在 `.data/portal-access.json`，优先于启动默认值。配置文件损坏时要求令牌。
+
+免令牌只对启动脚本验证过的回环监听生效，API 使用 `--no-proxy-headers`。Host 须为
+`127.0.0.1:8000`、`localhost:8000` 或 `[::1]:8000`。有代理转发头的请求要求令牌；
+对外反向代理请使用普通 API 启动方式。`ssh -L 8000:127.0.0.1:8000 host` 按本机访问处理。
+浏览器写请求须同源。本机脚本发起写请求时继续使用令牌，免令牌开启时普通 GET 可以省略令牌。
+
+```bash
+API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/access"
+curl -fsS -X PUT "$API/v1/portal/access" \
+  -H "Authorization: Bearer $SCA_EVAL_API_TOKEN" \
+  -H 'Content-Type: application/json' -d '{"require_token":true}'
+```
+
+`GET /v1/portal/access` 返回 `require_token` 和 `local_no_token_active`，后者表示当前连接是否可用
+免令牌方式。现有只读访客配置仍独立生效。若希望开启令牌后连历史浏览也要求令牌，启动前设置
+`SCA_GUEST_VIEW=off`。[访客范围](#只读访客模式)
+
 ## 只读访客模式
 
-`SCA_GUEST_VIEW` 默认 `local`，允许从回环地址直接连接的无令牌 `GET` 请求读取历史。
-设为 `off` 要求使用令牌。`SCA_GUEST_TENANT` 指定访客可访问的唯一租户，独立部署默认是
+本机免令牌管理员权限未生效时，`SCA_GUEST_VIEW` 决定是否允许无令牌读取访客历史。
+默认 `local` 允许从回环地址直接连接的 `GET` 请求，设为 `off` 可关闭访客历史。
+`SCA_GUEST_TENANT` 指定访客可访问的唯一租户，独立部署默认是
 `default`，通过 `portal_demo.sh` 启动时默认是保存演示任务、评测和演进记录的 `eval`。
 已有演示安装用 `bash scripts/portal_demo.sh up --mode docker` 或 `--mode source` 启动即可使用该默认值。
 运行中的 Portal 先执行 `bash scripts/portal_demo.sh down`。显式配置的 `SCA_GUEST_TENANT` 优先。
 
 访客可查看任务、执行图、插话记录、事件（含流式更新）、文本制品和补丁、评测及演进历史（`eval`），
 以及租户用量。访客历史会遮盖邮箱、常见凭证和账单标识，插话记录中的 `actor` 显示为 `[redacted]`。
-项目工作区及其 API、知识文档、二进制制品、原始终端及所有写操作均需使用令牌。
+项目工作区及其 API、知识文档、二进制制品、原始终端及所有写操作需要工作空间身份。
 
 **危险：`SCA_GUEST_VIEW=all` 会把指定租户的历史对所有能连接 API 的人开放，包括无令牌的远程用户。**
 任务指令、轨迹和补丁可能包含业务数据。只对允许公开的历史使用此模式，并显式设置
@@ -85,8 +114,8 @@ curl -fsS "$API/v1/tasks/$TASK_ID/messages"
 
 访客的配置响应包含 `guest_view: true`、`guest_tenant` 和 `model_configured`。
 演示环境没有 DeepSeek 密钥时，Docker 和源码模式均以空模型列表启动 LiteLLM。此时用令牌提交
-任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在 Portal 概览用本机
-`eval` 管理员令牌登录并保存密钥会重启网关。手工更新 `.env` 后可用
+任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在本机 Portal 概览
+保存密钥会重启网关。手工更新 `.env` 后可用
 `bash scripts/portal_demo.sh restart-gateway` 应用变更。
 
 ## 套餐与用量
@@ -235,7 +264,7 @@ Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/tempor
 保存会重启本机网关。 [Temporal 发布包](https://github.com/temporalio/cli/releases/tag/v1.5.0) [LiteLLM 版本](https://pypi.org/project/litellm/1.110.2/)
 
 脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
-源码模式的登录令牌位于 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。
+源码模式默认本机免令牌，登录所需的令牌位于 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。
 停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
 `bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
 

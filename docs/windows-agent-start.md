@@ -26,7 +26,7 @@
 3. 在仓库根目录运行 .\scripts\portal_source.ps1 up，等待退出并确认成功。
    首次运行会准备 Python 环境和原生依赖，并启动 PostgreSQL、Temporal、LiteLLM、Worker 和 API。
    用 Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz' 确认 status 为 ok，报告脚本打印的 Portal 地址 http://127.0.0.1:8000/portal。
-   请我在本机私下从 .data\portal.env 取 SCA_EVAL_API_TOKEN，在 Portal 点击「登录」后输入。
+   本机浏览器默认免令牌，可以直接使用 Portal。在「概览 → 工作空间连接」可开启「需要访问令牌」。若已开启，请我在本机 PowerShell 私下用 Select-String SCA_EVAL_API_TOKEN .\.data\portal.env 查看并登录。
    令牌、模型密钥和包含它们的请求体不得出现在聊天、命令行参数、日志或最终报告中。
 
 4. 先问我选哪种模型接入，等我选择后再配置。
@@ -37,7 +37,8 @@
       Anthropic 兼容服务填写基址，由网关请求 /v1/messages。在「概览 → 模型接入」填写供应商及模型并保存，等 Portal 显示网关已重启。
       使用 API 时通过 POST /v1/portal/providers 保存，收到 202 后用 GET /v1/portal/providers/restarts/{restart.id} 等到 succeeded。状态为 failed 时先检查服务日志。
    用「测试连接」或 POST /v1/portal/providers/test（请求体为 {"model":"平台模型名"}）测试所选模型。随后用 GET /v1/models 核对可用模型。
-   如果用 PowerShell，从本机隐藏输入取得登录令牌，只输出模型 ID。
+   本机免令牌时，PowerShell 的 GET 可以省略认证头，例如 (Invoke-RestMethod 'http://127.0.0.1:8000/v1/models').data | Select-Object -ExpandProperty id。
+   PowerShell 脚本发起写请求时继续使用 SCA_EVAL_API_TOKEN。已开启「需要访问令牌」时，受保护的 GET 也需要令牌。需要令牌时，请我通过本机隐藏输入提供它，只输出模型 ID。
    $token = [System.Net.NetworkCredential]::new('', (Read-Host 'Portal 登录令牌' -AsSecureString)).Password
    $headers = @{ Authorization = "Bearer $token" }
    (Invoke-RestMethod -Uri 'http://127.0.0.1:8000/v1/models' -Headers $headers).data | Select-Object -ExpandProperty id

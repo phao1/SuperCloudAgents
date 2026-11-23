@@ -204,7 +204,7 @@ const portalUI = (() => {
     const form = new FormData();
     form.append('file', file);
     const response = await fetch('/v1/files', {
-      method: 'POST', headers: {Authorization: 'Bearer ' + portalToken},
+      method: 'POST', headers: authHeaders(),
       body: form, signal: AbortSignal.timeout(120000),
     });
     if (!response.ok) throw await apiFailure(response);

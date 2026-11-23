@@ -19,6 +19,7 @@ help() {
   export-history   使用当前模式的数据库和对象存储导出历史 ZIP
   import-history   将历史 ZIP 导入本机源码模式
 也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
+本机 Portal 默认免令牌，可在概览打开「需要访问令牌」。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
 源码模式需要本机 PostgreSQL、Node.js 和 npm。两种模式均需 Python 3.12 和 Git。
@@ -173,10 +174,18 @@ save_mode() {
 import sys
 from pathlib import Path
 
-from dotenv import set_key
+from dotenv import dotenv_values, set_key
+
+from sca.config import portal_require_token_env
 
 portal = Path(".data/portal.env")
+name = "SCA_PORTAL_REQUIRE_TOKEN"
+try:
+    required = portal_require_token_env(dotenv_values(portal).get(name), dotenv_values(".env").get(name))
+except ValueError as exc:
+    raise SystemExit(str(exc)) from None
 set_key(portal, "SCA_RUNTIME_MODE", sys.argv[1], export=True)
+set_key(portal, name, required, export=True)
 portal.chmod(0o600)
 PY
 }
@@ -329,7 +338,7 @@ up() {
         fail '请先运行 down，再启动普通模式的 Portal。'
     fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then start_stripe_sim; fi
-    start api "$ROOT/.venv/bin/uvicorn" sca.api.app:create_app --factory --no-proxy-headers --host 127.0.0.1 --port 8000
+    start api "$PY" -m sca.api.portal_server --no-proxy-headers --host 127.0.0.1 --port 8000
     start worker "$PY" -m sca.orchestration.worker
     local ready=0
     for ((i=0; i<60; i++)); do
@@ -342,7 +351,7 @@ up() {
     [[ $ready == 1 ]] || fail 'API 启动超时，请查看 .data/run/ 日志。'
     echo 'Portal: http://127.0.0.1:8000/portal'
     if [[ "$SCA_RUNTIME_MODE" == source || -n ${SCA_EVAL_API_TOKEN:-} ]]; then
-        echo '登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。'
+        echo '如需令牌，请在本机查看 .data/portal.env 的 SCA_EVAL_API_TOKEN。'
     fi
     if [[ ${SCA_STRIPE_SIMULATOR:-0} == 1 ]]; then
         echo "远程访问: ssh -L 8000:127.0.0.1:8000 -L $STRIPE_SIM_PORT:127.0.0.1:$STRIPE_SIM_PORT host"
@@ -400,7 +409,7 @@ settings = dict(
     # The brain backend runs `docker exec` itself; reuse the wrapper that falls back to `sg docker`.
     SCA_OPENCODE_BRAIN_DOCKER_PREFIX=json.dumps([str(Path(".data/run/docker").resolve())]),
 )
-for key in ("SCA_STRIPE_SIM_SECRET_KEY", "SCA_STRIPE_SIM_WEBHOOK_SECRET",
+for key in ("SCA_PORTAL_REQUIRE_TOKEN", "SCA_STRIPE_SIM_SECRET_KEY", "SCA_STRIPE_SIM_WEBHOOK_SECRET",
             "SCA_STRIPE_SIM_TEAM_PRICE_ID", "SCA_STRIPE_SIM_ENTERPRISE_PRICE_ID"):
     if previous.get(key):
         settings[key] = previous[key]
