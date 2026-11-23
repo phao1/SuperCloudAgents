@@ -1,7 +1,13 @@
 """Bounded, backend-neutral starts for the Portal status strip."""
 
 from sca.core.models import AgentEvent
-from sca.history.privacy import clean_text
+
+
+def clean_text(value: str) -> str:
+    # Imported lazily: the secrets module loads requests, which Temporal workflow sandboxes reject.
+    from sca.history.privacy import clean_text as clean
+
+    return clean(value)
 
 
 def operation_id(value: object) -> str | None:
