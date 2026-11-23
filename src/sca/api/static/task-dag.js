@@ -8,6 +8,9 @@ const SCATaskDAG = (() => {
     pending: '待执行', running: '运行中', succeeded: '已完成',
     failed: '失败', cancelled: '已取消', skipped: '已跳过', queued: '排队中', stopped: '已停止', paused: '已暂停',
   };
+  function nodeStatus(node) {
+    return node.status === 'pending' && node.meta?.waiting_for_slot ? statusLabels.queued : statusLabels[node.status];
+  }
   const kindLabels = {
     task: '任务', plan: '规划', subtask: '子任务', attempt: '候选', execution: '执行', turn: 'Agent 轮次',
     tool_group: '工具', verification: '验证', fix: '修复轮次', interjection: '插话',
@@ -233,13 +236,38 @@ const SCATaskDAG = (() => {
       target.remaining++;
       links.push(edge);
     }
-    const ready = [...nodes.values()].filter(node => !node.remaining), layers = [];
+    const groups = new Map(), ready = [], layers = [];
+    for (const item of nodes.values()) {
+      const node = item.node;
+      if (node.kind !== 'subtask' || !Number.isInteger(node.meta?.level)) continue;
+      const key = `${node.task_id}/${node.meta.level}`;
+      if (!groups.has(key)) groups.set(key, {size: 0, ready: []});
+      item.group = groups.get(key);
+      item.group.size++;
+    }
+    function enqueue(item) {
+      const group = item.group;
+      if (!group) {
+        ready.push(item);
+        return;
+      }
+      // An expanded prerequisite can add steps before just one member of the level.
+      group.ready.push(item);
+      if (group.ready.length === group.size) {
+        const rank = Math.max(...group.ready.map(peer => peer.rank));
+        for (const peer of group.ready.sort((a, b) => a.node.meta.lane - b.node.meta.lane)) {
+          peer.rank = rank;
+          ready.push(peer);
+        }
+      }
+    }
+    for (const item of nodes.values()) if (!item.remaining) enqueue(item);
     for (let index = 0; index < ready.length; index++) {
       const current = ready[index];
       (layers[current.rank] ??= []).push(current);
       for (const {target} of current.outgoing) {
         target.rank = Math.max(target.rank, current.rank + 1);
-        if (--target.remaining === 0) ready.push(target);
+        if (--target.remaining === 0) enqueue(target);
       }
     }
     const edges = links.filter(({source, target}) => !source.remaining && !target.remaining);
@@ -466,6 +494,9 @@ const SCATaskDAG = (() => {
   function create(panel, fetchGraph, {project = projectGraph} = {}) {
     const svg = panel.querySelector('svg'), world = svg.querySelector('.dag-world');
     const status = panel.querySelector('.dag-load-status'), detail = panel.querySelector('.dag-detail');
+    const parallel = element('p', undefined, 'dag-parallel');
+    parallel.hidden = true;
+    if (project === projectGraph) status.before?.(parallel);
     const panHint = panel.querySelector('.dag-pan-hint');
     const orientationButtons = [...panel.querySelectorAll('[data-dag-orientation]')];
     const graphics = new Map(), pointers = new Map();
@@ -555,7 +586,7 @@ const SCATaskDAG = (() => {
     }
 
     function drawingNode({node, x, y, width, height}, path) {
-      const state = statusLabels[node.status];
+      const state = nodeStatus(node);
       const summary = node.summary;
       const activity = summary ? `${summary.turns} 轮 · ${summary.tools} 工具 · ${summary.verification} 验证`
         : metricLine(node);
@@ -624,7 +655,7 @@ const SCATaskDAG = (() => {
       function fact(label, value) {
         facts.append(element('dt', label), element('dd', value ?? '—'));
       }
-      fact('状态', statusLabels[node.status]);
+      fact('状态', nodeStatus(node));
       fact('开始', describeTime(node.started_at));
       fact('结束', describeTime(node.finished_at));
       fact('时长', node.duration_s == null ? null : node.duration_s.toFixed(2) + ' 秒');
@@ -641,6 +672,7 @@ const SCATaskDAG = (() => {
         fact('验证', verification);
       }
       if (meta.depends_on?.length) fact('依赖', meta.depends_on.join('、'));
+      if (meta.parallelism != null) fact('规划建议并发数', meta.parallelism);
       if (meta.model) fact('模型', meta.model);
       if (meta.merge_status) fact('合并状态', meta.merge_status);
       if (meta.output_dir) fact('输出目录', meta.output_dir);
@@ -711,6 +743,16 @@ const SCATaskDAG = (() => {
       }
       signature = nextSignature;
       snapshot = dag;
+      if (project === projectGraph) {
+        const meta = dag.nodes.find(node => node.kind === 'task')?.meta;
+        const count = meta?.subtask_count;
+        parallel.hidden = !count;
+        parallel.textContent = count ? [
+          meta.max_parallel_agents && `并发上限 ${meta.max_parallel_agents} 个 agent`,
+          `共 ${count} 个子任务`,
+          meta.parallelism && `规划建议 ${meta.parallelism} 个并发`,
+        ].filter(Boolean).join(' · ') : '';
+      }
       redraw();
     }
 
@@ -806,6 +848,7 @@ const SCATaskDAG = (() => {
       expanded.clear();
       needsFit = 'initial';
       pathKey.textContent = '';
+      parallel.hidden = true;
       status.textContent = '';
       detail.replaceChildren();
       detail.hidden = true;

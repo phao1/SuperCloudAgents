@@ -27,6 +27,14 @@ def subtask_order(dependencies: Mapping[str, Sequence[str]]) -> list[str]:
         raise ValueError("subtask dependencies contain a cycle") from exc
 
 
+def subtask_ancestors(dependencies: Mapping[str, Sequence[str]]) -> dict[str, set[str]]:
+    ancestors: dict[str, set[str]] = {}
+    for name in subtask_order(dependencies):
+        needs = dependencies[name]
+        ancestors[name] = set(needs).union(*(ancestors[need] for need in needs))
+    return ancestors
+
+
 def path_scope(paths: Sequence[str]) -> pathspec.PathSpec:
     return pathspec.GitIgnoreSpec.from_lines(paths)
 
@@ -167,6 +175,8 @@ class CodingSpec(CommonSpec):
             data.pop("fork_from_snapshot", None)
         if self.output_dir is None:
             data.pop("output_dir", None)
+        if self.max_parallel_agents is None:
+            data.pop("max_parallel_agents", None)
         return data
 
     def checks(self) -> list[str]:
@@ -187,3 +197,6 @@ class CodingSpec(CommonSpec):
 
     # Task output directories
     output_dir: str | None = Field(default=None, min_length=1)
+
+    # Parallel coding subtasks
+    max_parallel_agents: int | None = Field(default=None, strict=True, ge=1, le=8)

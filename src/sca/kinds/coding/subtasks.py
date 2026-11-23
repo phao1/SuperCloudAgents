@@ -27,7 +27,12 @@ from sca.kinds.coding.activities import (
     branch_name,
 )
 from sca.kinds.coding.spec import path_scope
-from sca.kinds.coding.subtask_inputs import SubtaskInput, SubtaskPreparationInput
+from sca.kinds.coding.subtask_inputs import (
+    SubtaskInput,
+    SubtaskPreparationInput,
+    SubtaskProgress,
+    SubtaskSchedule,
+)
 from sca.workspace.git import GitWorkspace
 from sca.workspace.merge import MERGED_STATUSES, SubtaskResult, merge_subtasks
 
@@ -173,7 +178,8 @@ class ChildActivities(CodingActivities):
             return {}
         if inp.action == "run_agent_turn":
             result = await self.run_agent_turn(
-                TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id)
+                TurnInput(inp.task_id, inp.turn, inp.prompt, inp.session_id,
+                          inp.interjectible, inp.guidance)
             )
         else:
             result = await getattr(self, inp.action)(StepInput(inp.task_id, inp.turn))
@@ -185,6 +191,15 @@ class ChildActivities(CodingActivities):
         base = (self._parent._task_dir(task_id) if self._parent is not None
                 else self.settings.task_dir(task_id))
         return base / "sub" / self.name
+
+    async def record_started(self, task_id: str) -> None:
+        spec = await self._spec(task_id)
+        await self.store.append_event(
+            task_id, EventType.SUBTASK_STARTED,
+            {"backend": self._backend(spec).name, "model": spec.model or self.settings.default_model,
+             **self._activity_route()},
+            dedup_key="started",
+        )
 
     def _workspace(self, task_id: str) -> GitWorkspace:
         return GitWorkspace(self._task_dir(task_id), f"{branch_name(task_id)}-{self.name}")
@@ -277,6 +292,7 @@ class ChildActivities(CodingActivities):
         self, ws: GitWorkspace, scope: dict, approved: str, commit: str,
     ) -> dict | None:
         matcher = path_scope(scope["paths"])
+        parallel = [path_scope(paths) for paths in scope.get("parallel_paths", [])]
         shared = set(scope["shared_paths"])
         disallowed = []
         for raw in await changed_paths(ws.mirror, approved, commit):
@@ -285,7 +301,8 @@ class ChildActivities(CodingActivities):
             except UnicodeDecodeError:
                 disallowed.append(display_path(raw))
                 continue
-            if path not in shared and not matcher.match_file(path, separators=()):
+            if (path not in shared and not matcher.match_file(path, separators=())
+                    or any(other.match_file(path, separators=()) for other in parallel)):
                 disallowed.append(path)
         if disallowed:
             return {"paths": sorted(disallowed), "reason": "outside_scope"}
@@ -344,6 +361,26 @@ class SubtaskActivities:
     def __init__(self, acts: CodingActivities) -> None:
         self.acts = acts
 
+    # Parallel coding subtasks
+    @activity.defn(name="coding.record_subtask_schedule")
+    async def record_schedule(self, inp: SubtaskSchedule) -> None:
+        await self.acts.store.append_event(
+            inp.task_id, "subtasks.scheduled", {"max_parallel_agents": inp.max_parallel_agents},
+            dedup_key="subtasks.scheduled",
+        )
+
+    @activity.defn(name="coding.record_subtask_progress")
+    async def record_progress(self, inp: SubtaskProgress) -> None:
+        if inp.stage == "queued":
+            payload = {}
+        else:
+            spec = await self.acts._spec(inp.task_id)
+            payload = {"backend": self.acts._backend(spec).name, "passed": inp.passed,
+                       **({"status": "blocked"} if inp.blocked else {})}
+        await ChildStore(self.acts.store, inp.name).append_event(
+            inp.task_id, f"subtask.{inp.stage}", payload, dedup_key=inp.stage,
+        )
+
     @activity.defn(name="coding.prepare_subtask_base")
     async def prepare_base(self, task_id: str) -> None:
         # Prepare once before fan-out so children do not concurrently restore the parent mirror.
@@ -373,7 +410,8 @@ class SubtaskActivities:
         await child.store.update_result(task_id, {
             "base_sha": base,
             "branch": ws.branch,
-            "scope": {"paths": inp.scopes.get(inp.name, []), "shared_paths": inp.shared_paths},
+            "scope": {"paths": inp.scopes.get(inp.name, []), "shared_paths": inp.shared_paths,
+                      **({"parallel_paths": inp.parallel_paths} if inp.parallel_paths else {})},
         })
         hints = ""
         if inp.scopes or inp.shared_paths:
@@ -382,9 +420,7 @@ class SubtaskActivities:
                     ws.mirror, base, acts.settings.data_dir / "layers", parent.tenant_id
                 )
                 hints = contract_hints(index, inp.scopes, inp.shared_paths)
-        await child.store.append_event(
-            task_id, EventType.SUBTASK_STARTED, child._activity_route(), dedup_key="started"
-        )
+        await child.record_started(task_id)
         await child.create_sandbox(task_id)
         return {"contracts": hints}
 

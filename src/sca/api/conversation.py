@@ -440,7 +440,17 @@ def _task_progress(
             return '开始规划子任务'
         case 'plan.completed':
             count = len(p.get('subtasks') or [])
-            return f'规划完成 · {count} 个子任务' if count else '规划完成 · 采用单任务执行'
+            if not count:
+                return '规划完成 · 采用单任务执行'
+            cap = p.get('max_parallel_agents')
+            return f'规划完成 · {count} 个子任务' + (f'，最多 {cap} 个并发' if type(cap) is int else '')
+        case 'subtask.started' | 'subtask.completed':
+            name = one_line(_display(user, p.get('subtask'), 50))
+            if event.type == 'subtask.started':
+                status = '开始'
+            else:
+                status = '已阻塞' if p.get('status') == 'blocked' else ('完成' if p.get('passed') else '失败')
+            return f'{name} · {status}' if name else None
         case 'plan.rejected':
             reason = one_line(_display(user, p.get('reason'), 220))
             return '子任务规划未通过' + (f' · {reason}' if reason else '')
@@ -553,6 +563,8 @@ async def task_page(store: Store, task_id: UUID, user: Principal, after: int, li
             kind = 'receipt' if event.type.startswith('user.message.') else event.type
             status = event.type.rsplit('.', 1)[-1] if kind == 'receipt' else None
             source = ConversationItem(kind=kind, text=text, message_id=p.get('message_id'),
+                                      backend=_agent_identity(event, task, node, user)['backend']
+                                      if kind.startswith('subtask.') else None,
                                       status=p.get('status', status), **common)
         else:
             continue

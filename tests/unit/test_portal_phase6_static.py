@@ -30,6 +30,15 @@ TENANT_PORTAL_CONFIG = {
 GUEST_PORTAL_CONFIG = {"guest_view": True, "guest_tenant": "eval", "model_configured": False}
 
 
+def test_task_form_defaults_to_auto_planning_with_configured_cap_placeholder():
+    source = (STATIC / 'portal-tasks.js').read_text(encoding='utf-8')
+    assert re.search(r"field\('任务拆分', 'plan_mode', \{value: 'auto'", source)
+    assert "['none', '无']" in source
+    assert "field('最多并发 agent 数', 'max_parallel_agents', {type: 'number', min: 1, max: 8" in source
+    assert "placeholder: '自动 · ' + (portalConfig.max_parallel_agents" in source
+    assert "spec.max_parallel_agents = Number(v('max_parallel_agents'))" in source
+
+
 class PortalAssets(HTMLParser):
     def __init__(self):
         super().__init__()

@@ -212,9 +212,7 @@ class CodingActivities(KernelActivities):
         child = ChildActivities(self, inp.name)
         await self._ensure_state(inp.task_id)
         if inp.action == "prepare":
-            await child.store.append_event(
-                inp.task_id, EventType.SUBTASK_STARTED, child._activity_route(), dedup_key="started"
-            )
+            await child.record_started(inp.task_id)
             await child._ensure_state(inp.task_id)
             parent = await self.store.get_task(inp.task_id)
             ws = child._workspace(inp.task_id)

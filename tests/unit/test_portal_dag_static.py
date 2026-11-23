@@ -89,6 +89,29 @@ def test_task_dag_panel_uses_local_assets_and_the_existing_stream():
         assert f".dag-edge-{kind}" in css
 
 
+def test_subtask_peers_stay_in_one_level_when_one_prerequisite_is_expanded():
+    run_node("""
+const assert = require('node:assert/strict');
+const {layout, projectGraph} = require(process.argv[1]);
+const lane = (id, level, column) => ({id, kind: 'subtask', task_id: 'task', meta: {level, lane: column}});
+const dag = {
+  nodes: [lane('a', 0, 0), lane('b', 0, 1), lane('c', 1, 0), lane('d', 1, 1),
+    {id: 'turn', kind: 'turn', meta: {parent: 'a'}},
+  ],
+  edges: [{from: 'a', to: 'turn', kind: 'sequence'}, {from: 'turn', to: 'c', kind: 'sequence'},
+    {from: 'a', to: 'c', kind: 'dependency'}, {from: 'b', to: 'd', kind: 'dependency'}],
+};
+for (const direction of ['vertical', 'horizontal']) {
+  const positions = Object.fromEntries(layout(projectGraph(dag, new Set(['a'])), direction)
+    .nodes.map(item => [item.node.id, item]));
+  const along = direction === 'vertical' ? 'y' : 'x';
+  assert.equal(positions.a[along], positions.b[along]);
+  assert.equal(positions.c[along], positions.d[along]);
+  assert(positions.turn[along] < positions.c[along]);
+}
+""")
+
+
 def test_dag_layout_layers_branches_without_overlap_and_routes_long_edges():
     run_node("""
 const assert = require('node:assert/strict');

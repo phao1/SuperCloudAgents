@@ -32,6 +32,7 @@ class DeliverMessages:
     turn: int
     planning: bool = False
     pending_only: bool = False
+    message_ids: list[str] | None = None
 
 
 @dataclass
@@ -112,6 +113,19 @@ class Interjections:
             self.acknowledge([*notified, *(message.id for message in messages)])
             if not self.pending:
                 return messages
+
+    async def deliver_notified(self, task_id: str, turn: int) -> list[Guidance]:
+        self.live_receipts = True
+        messages: list[Guidance] = []
+        while self._notices:
+            ids = list(self._notices)
+            messages.extend(await workflow.execute_activity(
+                "deliver_task_messages", DeliverMessages(task_id, turn, message_ids=ids),
+                result_type=list[Guidance], **_QUICK,
+            ))
+            self.acknowledge(ids)
+        self._read_requested = False
+        return messages
 
     def turn_guidance(self, messages: list[Guidance], *, plan_attempt: int | None = None) -> TurnGuidance | None:
         if not self.live_receipts:

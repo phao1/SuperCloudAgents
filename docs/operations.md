@@ -394,8 +394,10 @@ Ctrl/Cmd+Enter 打断并发送，Shift+Enter 换行。任务验证、等待审�
 
 自管 LiteLLM 时，请启用金额预留和 `general_settings.fail_closed_budget_enforcement`，并为已定价模型配置费率。
 平台自带配置已启用该选项。[LiteLLM 密钥封禁](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/management_endpoints/key_management_endpoints.py#L7472-L7575)
-审核中的插话会发起修改并重新提交审核。并行子任务或 Best-of-N 尝试期间收到的消息，会在合并或选定
-候选后交给主任务。恢复执行仍受任务的用量及费用上限约束。
+审核中的插话会发起修改并重新提交审核。并行子任务期间，插话会发给正在运行的子任务和其 Best-of-N 候选，
+同一批稍后启动的子任务也会收到。排队消息进入下一轮，打断消息会让各自正在运行的轮次重新开始。
+消息由首个按指引完成轮次的子任务确认。仍待处理的消息会在合并后交给主任务。
+独立的 Best-of-N 任务会在选定候选后处理插话。恢复执行仍受任务的用量及费用上限约束。
 
 ```bash
 curl -fsS -X POST "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \

@@ -385,6 +385,10 @@ class KernelActivities:
                 "review_idle_release_s": self.settings.review_idle_release_s,
                 "turn_heartbeat_timeout_s": self.settings.turn_heartbeat_timeout_s,
                 "_deferred_turn_spend": isinstance(self.gateway, DeferredSpendGateway),
+                # Parallel coding subtasks. Carry the host decision in the recorded load result.
+                **({"_max_parallel_agents": min(
+                    self.settings.effective_max_parallel_agents, spec.get("max_parallel_agents") or 8,
+                )} if task.kind == "coding" and (spec.get("plan") == "auto" or spec.get("subtasks")) else {}),
             }
         except _NON_RETRYABLE as e:
             raise _non_retryable(e) from e
@@ -1492,7 +1496,13 @@ class KernelActivities:
 
     @activity.defn
     async def deliver_task_messages(self, inp: DeliverMessages) -> list[Guidance]:
-        if inp.pending_only:
+        if inp.message_ids is not None:
+            from uuid import UUID
+
+            # Another subtask may already have applied a message addressed to both agents.
+            ids = set(inp.message_ids)
+            rows = [row for row in await self.store.list_task_messages(UUID(inp.task_id)) if str(row.id) in ids]
+        elif inp.pending_only:
             rows = await self.store.pending_task_messages(inp.task_id)
         else:
             rows = await self.store.deliver_task_messages(inp.task_id, inp.turn, planning=inp.planning)

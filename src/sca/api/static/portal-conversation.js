@@ -216,15 +216,23 @@ const portalConversation = (() => {
     }
 
     function updateTask(task, events) {
-      const turnEvent = events.findLast(({type, payload}) => {
-        if (!['agent.turn_started', 'agent.turn_completed', 'agent.turn_interrupted', 'agent.error'].includes(type)) return false;
-        if (type === 'agent.error' && !payload.attempt) return false;
-        return payload.interjectible || (!payload.best_of_attempt && !payload.best_of_candidate
-          && (!payload.subtask || (payload.turn === 0 && /^plan-\d+$/.test(payload.subtask))));
-      });
-      const running = task.state === 'RUNNING' && turnEvent?.type === 'agent.turn_started';
-      setState(finishedTask(task.state) ? '任务已结束' : '', false, running, turnEvent?.payload.following_guidance);
-      const update = events.findLast(({type}) => type.startsWith('user.message') || type.startsWith('agent.turn_'));
+      const turns = new Map();
+      for (const {type, payload} of events) {
+        const candidate = payload.best_of_attempt ?? payload.best_of_candidate;
+        const lane = `${payload.subtask ?? ''}/${candidate ?? ''}`;
+        if (type === 'agent.turn_started') {
+          const mainOrPlanner = candidate == null && (!payload.subtask
+            || (payload.turn === 0 && /^plan-\d+$/.test(payload.subtask)));
+          if (payload.interjectible || mainOrPlanner) turns.set(lane, payload.following_guidance);
+        } else if (['agent.turn_completed', 'agent.turn_interrupted'].includes(type)
+            || (type === 'agent.error' && payload.attempt)) {
+          turns.delete(lane);
+        }
+      }
+      const running = task.state === 'RUNNING' && turns.size > 0;
+      setState(finishedTask(task.state) ? '任务已结束' : '', false, running, [...turns.values()].some(Boolean));
+      const update = events.findLast(({type}) => type.startsWith('user.message') || type.startsWith('agent.turn_')
+        || type.startsWith('plan.') || type.startsWith('subtask.'));
       if (update && update.seq !== lastUpdate) {
         lastUpdate = update.seq;
         void refresh(true);
@@ -338,7 +346,9 @@ const portalConversation = (() => {
         row.classList.add('conversation-system');
         body.classList.add('conversation-chip');
         const decision = ['review.submitted', 'approval.decision'].includes(item.kind);
-        body.append(item.dag_node_id ? locate(item.dag_node_id, item.text) : el('span', item.text));
+        const label = item.kind.startsWith('subtask.') && item.backend
+          ? `${ui.backendLabel(item.backend)} · ${item.text}` : item.text;
+        body.append(item.dag_node_id ? locate(item.dag_node_id, label) : el('span', label));
         if (decision) {
           body.classList.add('conversation-approval-chip');
           body.append(el('span', '·'));
