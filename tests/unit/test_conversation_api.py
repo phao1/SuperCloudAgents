@@ -24,7 +24,10 @@ def auth(role):
 
 @pytest.fixture
 async def api(monkeypatch, tmp_path):
-    settings = Settings(_env_file=None, guest_view='local', guest_tenant='eval', data_dir=tmp_path)
+    monkeypatch.setenv('SCA_RUNTIME_MODE', 'source')
+    monkeypatch.delenv('SCA_PORTAL_LOCAL_CONFIG', raising=False)
+    settings = Settings(_env_file=None, guest_view='local', guest_tenant='eval', data_dir=tmp_path,
+                        portal_require_token=True, eval_api_token='admin')
     monkeypatch.setattr('sca.api.app.get_settings', lambda: settings)
     evolution_id = uuid4()
     header = {'id': evolution_id, 'status': 'running', 'config': {}}
@@ -80,9 +83,44 @@ async def api(monkeypatch, tmp_path):
     store = SimpleNamespace(for_tenant=lambda tenant: scoped, tenant_deleted=AsyncMock(return_value=False),
         sessionmaker=SimpleNamespace(kw={'bind': SimpleNamespace(url=make_url('postgresql+asyncpg://localhost/sca'))}))
     app = create_app(store=store, authenticator=SimpleNamespace(authenticate=authenticate),
-                     orchestrator=SimpleNamespace(client=temporal))
+                     orchestrator=SimpleNamespace(client=temporal), local_portal_port=8000)
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
         yield client, header, entries, handle, task, events
+
+
+async def test_local_conversations_and_guest_history_follow_the_portal_access_switch(api):
+    client, row, _, handle, task, events = api
+    task_chat = f'/v1/tasks/{task.id}/conversation'
+    evolution = f'/v1/evolutions/{row["id"]}'
+    access = '/v1/portal/access'
+    origin = {'Origin': 'http://127.0.0.1:8000'}
+    events.append(Event(task_id=task.id, seq=1, type='user.message', created_at=NOW, payload={
+        'mode': 'queue', 'text': 'Check with owner@example.org', 'actor': 'operator@example.org',
+    }))
+
+    enabled = await client.put(access, headers=auth('admin'), json={'require_token': False})
+    assert enabled.json()['local_no_token_active'] is True
+    for path in (task_chat, evolution + '/conversation'):
+        local = await client.get(path)
+        token = await client.get(path, headers=auth('member'))
+        assert local.status_code == token.status_code == 200
+        assert local.json() == token.json() and local.json()['items']
+        assert (await client.get(path, headers={'Host': 'portal.example:8000'})).status_code == 401
+
+    message = {'text': 'Check with owner@example.org'}
+    assert (await client.post(evolution + '/messages', json=message)).status_code == 401
+    assert (await client.post(evolution + '/messages', headers=origin, json=message)).status_code == 202
+
+    disabled = await client.put(access, headers=origin, json={'require_token': True})
+    assert disabled.json()['local_no_token_active'] is False
+    for path in (task_chat, evolution + '/conversation'):
+        response = await client.get(path)
+        assert response.status_code == 200
+        messages = [item for item in response.json()['items'] if item['kind'] == 'message']
+        assert len(messages) == 1 and messages[0]['text'] == 'Check with [redacted]'
+        assert 'actor' not in messages[0]
+    assert (await client.post(evolution + '/messages', headers=origin, json=message)).status_code == 401
+    handle.signal.assert_awaited_once()
 
 
 async def test_evolution_message_auth_scope_terminal_and_receipt(api):

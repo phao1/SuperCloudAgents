@@ -184,7 +184,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 
 @pytest.mark.parametrize("destination", [
     "guest", "local", "projects", "task", "evolution", "approvals", "result-approval", "evolution-approval",
-    "archive",
+    "local-result-approval", "local-evolution-approval", "archive",
 ])
 def test_portal_route_bootstrap(tmp_path, destination):
     responses = {}
@@ -218,11 +218,12 @@ const assert=require('node:assert/strict');
 const destination=process.argv[2];
 const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
-const local=destination==='local';
-const resultApproval=destination==='result-approval';
-const evolutionApproval=destination==='evolution-approval';
+const local=destination==='local'||destination.startsWith('local-');
+const resultApproval=destination.endsWith('result-approval');
+const evolutionApproval=destination.endsWith('evolution-approval');
 const taskApproval=destination==='approvals'||resultApproval;
-const task={id:'task-id',kind:'coding',state:taskApproval?'AWAITING_REVIEW':'SUCCEEDED',spec:{},result:
+const awaitingReview=taskApproval||destination==='evolution';
+const task={id:'task-id',kind:'coding',state:awaitingReview?'AWAITING_REVIEW':'SUCCEEDED',spec:{},result:
   resultApproval?{verification_passed:true,memory_proposals:['memory']} : {}};
 const at='2026-11-22T00:00:00Z';
 const approvalHref='#/tasks/'+task.id+'/approval';
@@ -244,15 +245,15 @@ const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_ch
 const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
 const candidateHref='#/evolutions/runs/'+evolution.id+'/approval/'+candidate.id;
-const location={hash:{guest:'#/projects/private-project',local:'#/projects',projects:'#/projects',task:'#/tasks/'+task.id,
-  evolution:'#/evolutions',approvals:'#/approvals','result-approval':'#/approvals',
-  'evolution-approval':'#/approvals',archive:''}[destination]};
+const location={hash:taskApproval||evolutionApproval?'#/approvals':{
+  guest:'#/projects/private-project',local:'#/projects',projects:'#/projects',task:'#/tasks/'+task.id,
+  evolution:'#/evolutions',archive:''}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
-const storage=new Map(!guest&&!local?[['sca-portal-token','fixture-member']]:[]);
+const token=evolutionApproval?'fixture-admin':'fixture-member';
+const storage=new Map(!guest&&!local?[['sca-portal-token',token]]:[]);
 const localStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
 const evalAdmin={tenant_id:'eval',role:'admin',subject:'static-token'};
 let required=false, acceptWarning=false, warningText='', switchWrites=0;
-const confirm=text=>{warningText=text;return acceptWarning};
 class Element {
   constructor(id) {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
@@ -309,11 +310,12 @@ const document={
   querySelectorAll:selector=>({'main > section':sections,'[data-access]':[...controls,approvalLink],'.sidebar nav a':links})[selector]||[],
 };
 const window=globalThis;
+window.confirm=text=>{warningText=text;return acceptWarning};
 const listeners=new Map();
 window.addEventListener=(name,listener)=>listeners.set(name,listener);
 const setInterval=()=>assert.equal(archived,false);
 let graphsDestroyed=0;
-const fixtureDAG=['task','evolution','evolution-approval'].includes(destination)?{
+const fixtureDAG=['task','evolution'].includes(destination)||evolutionApproval?{
   projectEvolution:()=>null,
   create(panel, fetchGraph, options){
     if(panel.id==='evolution-dag')assert.equal(options.project,SCATaskDAG.projectEvolution);
@@ -334,6 +336,7 @@ const releaseProjects=destination==='projects'?block('/v1/projects'):null;
 const releaseTask=destination==='task'?block(taskPath):null;
 const releaseConfig=destination==='task'?block('/v1/portal/config'):null;
 const releaseRecent=destination==='task'?block('/v1/tasks?limit=100'):null;
+let holdInbox;
 global.fetch=async (path,request={})=>{
   const auth=request.headers?.Authorization;
   calls.push(path);
@@ -351,10 +354,12 @@ global.fetch=async (path,request={})=>{
     }
     return {ok:true,json:async()=>({require_token:required,local_no_token_active:!required})};
   }
-  if(['/v1/portal/whoami','/v1/projects'].includes(path)){
-    assert.equal(auth,local?(required?'Bearer fixture-admin':undefined):'Bearer fixture-member');
+  const tenantAuth=local?(required?'Bearer fixture-admin':undefined):'Bearer '+token;
+  if(['/v1/portal/whoami','/v1/projects','/v1/approvals',taskPath+'/review',evolutionPath+'/approve'].includes(path)
+    ||path.startsWith(harvestPath)){
+    assert.equal(auth,tenantAuth);
   }
-  if(path==='/v1/approvals')assert.equal(auth,local?(required?'Bearer fixture-admin':undefined):'Bearer fixture-member');
+  if(path.includes('/conversation?'))assert.equal(auth,guest?undefined:tenantAuth);
   if(path===taskPath+'/review'){
     reviewRequests.push(JSON.parse(request.body));
     task.state='RUNNING';
@@ -379,7 +384,7 @@ global.fetch=async (path,request={})=>{
   ]:taskApproval&&task.state==='AWAITING_REVIEW'?[{href:approvalHref,id:task.id,
     kind:resultApproval?'task_result':'task_plan',title:'校验任务',created_at:at}]:[];
   const fixtures={
-    '/v1/portal/whoami':local?evalAdmin:{tenant_id:'eval',role:evolutionApproval?'admin':'member'},
+    '/v1/portal/whoami':local||evolutionApproval?evalAdmin:{tenant_id:'eval',role:'member'},
     '/v1/portal/config':local?(
       auth?{...config.tenant,portal_require_token:required}:
       required?config.guest:{...config.tenant,portal_require_token:false,local_identity:evalAdmin}
@@ -389,7 +394,7 @@ global.fetch=async (path,request={})=>{
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
     '/v1/memories?status=proposed':[{id:'memory',text:'检查空输入',scope:'repo',category:'convention'}],
     [taskPath]:task,
-    [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}},...(!taskApproval?[]:[
+    [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}},...(!awaitingReview?[]:[
       {seq:2,type:'review.requested',payload:resultApproval?{verification_passed:true}
         :{plan:{subtasks:[{name:'verify',instruction:'覆盖边界条件'}]}}},
     ])],
@@ -415,6 +420,11 @@ global.fetch=async (path,request={})=>{
     [evolutionPath+'/conversation?limit=100']:{items:[],cursor:'e:0',has_more:false},
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
+  if(path==='/v1/approvals'&&holdInbox){
+    const waiting=holdInbox;
+    holdInbox=null;
+    await waiting;
+  }
   return {ok:true,json:async()=>fixtures[path]||[]};
 };
 '''
@@ -432,6 +442,11 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.hash),
       ['#/tasks','#/history','#/evals','#/memories','#/evolutions']);
     assert.equal(approvalLink.hidden,true);
+    location.hash='#/approvals';
+    await listeners.get('hashchange')();
+    assert.equal($('approvals-page').hidden,true);
+    assert.equal($('overview').hidden,false);
+    assert.deepEqual(calls,['/portal/archive.json']);
 
     $('memory-status').value='active';
     location.hash='#/memories';
@@ -473,10 +488,12 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('guest-view-banner').hidden,true);
     assert.equal($('model-not-configured').hidden,true);
     assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
-  }else if(local){
+  }else if(destination==='local'){
     await waitForStartup();
-    assert.deepEqual(calls,['/v1/portal/config','/v1/projects']);
+    assert.deepEqual(calls,['/v1/portal/config','/v1/approvals','/v1/projects']);
     assert.equal($('projects-home').hidden,false);
+    assert.equal(approvalLink.hidden,false);
+    assert.equal($('approvals-count').textContent,' (0)');
     assert.equal($('local-access-badge').hidden,false);
     assert.equal($('connect-form').hidden,true);
     assert.equal($('guest-view-banner').hidden,true);
@@ -504,6 +521,8 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('connect-form').hidden,false);
     assert.equal($('portal-access-control').hidden,true);
     assert.equal($('guest-view-banner').hidden,false);
+    assert.equal(approvalLink.hidden,true);
+    assert.equal($('approvals-count').textContent,'');
     await assert.rejects(api('/tasks',{}),/请先登录/);
 
     $('token').value='fixture-admin';
@@ -554,6 +573,8 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     location.hash='#/evolutions/runs/'+evolution.id;
     await route();
     assert(walk($('evolution-content')).includes($('evolution-dag')));
+    const card=walk($('evolution-content')).find(node=>node.id==='candidate-approval-'+candidate.id);
+    assert(walk(card).some(node=>node.textContent==='等待人工审批 · 只读'));
     assert(!['停止演进','批准','拒绝'].some(label=>content().includes(label)));
     assert(calls.includes(evolutionPath+'/dag'));
     assert(calls.includes(evolutionPath+'/conversation?limit=100'));
@@ -577,7 +598,20 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     location.hash='#/tasks/'+task.id;
     await route();
     assert(calls.includes(taskPath+'/dag'));
+    assert(calls.includes(taskPath+'/conversation?limit=100'));
     assert.equal($('task-dag').hidden,false);
+    const chat=walk($('task-conversation'));
+    const taskCard=chat.find(node=>node.id==='task-approval');
+    assert(walk(taskCard).some(node=>node.textContent==='等待人工审核 · 只读'));
+    assert(!approve(taskCard));
+    assert(chat.find(node=>node.className==='stack conversation-composer').hidden);
+    location.hash='#/approvals';
+    await route();
+    assert.equal(approvalLink.hidden,true);
+    assert.equal($('approvals-page').hidden,true);
+    assert.equal($('connect-prompt').hidden,false);
+    assert.equal($('connect-prompt').querySelector('p').textContent,'请先在概览连接 Portal 工作空间。');
+    assert(!calls.includes('/v1/approvals'));
   }else if(taskApproval){
     await waitForStartup();
     assert.equal(approvalLink.hidden,false);
@@ -651,10 +685,25 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await route();
     const publication=content().find(node=>node.id==='harvest-approval-'+harvest.id);
     assert(publication.scrolled);
-    global.confirm=()=>true;
-    await walk(publication).find(node=>node.textContent==='批准发布').onclick();
-    await nextTick();
-    assert(content().some(node=>node.id===publication.id&&walk(node).some(child=>child.textContent==='已批准')));
+    const publish=walk(publication).find(node=>node.textContent==='批准发布');
+    await publish.onclick();
+    assert.equal(harvest.status,'pending');
+    acceptWarning=true;
+    let releaseInbox;
+    holdInbox=new Promise(resolve=>{releaseInbox=resolve});
+    const staleInbox=portalApprovals.refresh(true);
+    try {
+      await nextTick();
+      await publish.onclick();
+      await nextTick();
+      assert.deepEqual(reviewRequests,[{candidate_id:candidate.id},{}]);
+      const updated=content().find(node=>node.id===publication.id);
+      assert(walk(updated).some(node=>node.textContent==='已批准'));
+      assert.equal($('approvals-count').textContent,' (0)');
+    } finally {
+      releaseInbox();
+      await staleInbox;
+    }
     assert.equal($('approvals-count').textContent,' (0)');
   }else{
     assert.deepEqual(new Set(calls),new Set([
@@ -1041,8 +1090,10 @@ def test_portal_browser_first_render(destination):
             return
         fixtures = {
             "/v1/portal/whoami": {"tenant_id": "eval", "role": "member"},
+            "/v1/approvals": {"count": 0, "items": []},
             "/v1/projects": [project],
             task_path: {"id": task_id, "kind": "coding", "state": "SUCCEEDED", "spec": {}, "result": {}},
+            task_path + "/conversation": {"items": [], "cursor": "0", "has_more": False},
             task_path + "/dag": {"nodes": [], "edges": []},
         }
         route.fulfill(json=fixtures.get(path, []))
@@ -1058,8 +1109,10 @@ def test_portal_browser_first_render(destination):
             card.get_by_role("link", name="默认项目", exact=True).wait_for(timeout=3000)
             assert card.get_by_text("1,030", exact=True).is_visible()
             page.wait_for_function("!refreshing")
+            page.get_by_text("(0)", exact=True).wait_for(timeout=3000)
             page.evaluate("refresh()")
-            assert requests == ["/v1/portal/whoami", "/v1/projects"]
+            assert requests[0] == "/v1/portal/whoami"
+            assert sorted(requests[1:]) == ["/v1/approvals", "/v1/projects"]
         else:
             page.get_by_role("heading", name=task_id, exact=True).wait_for(timeout=3000)
             assert task_path + "/events" in requests

@@ -418,10 +418,11 @@ const portalApprovals = (() => {
       reset();
       identity = viewer;
     }
-    if (pending || (!force && Date.now() < nextFetch)) return pending;
+    if (!force && (pending || Date.now() < nextFetch)) return pending;
     nextFetch = Date.now() + 12000;
+    // A refresh after a decision supersedes any inbox request started before it.
     const request = data('/approvals').then(({count, items}) => {
-      if (portalIdentity !== viewer) return;
+      if (pending !== request || portalIdentity !== viewer) return;
       $('approvals-count').textContent = ' (' + count + ')';
       const list = el('ul', undefined, 'approval-inbox');
       for (const row of items) {
@@ -434,7 +435,9 @@ const portalApprovals = (() => {
       $('approvals-list').replaceChildren(items.length ? list : el('p', '当前没有待审批事项。', 'empty-state'));
       portalUI.setMessage($('approvals-status'), '');
     }).catch(error => {
-      if (portalIdentity === viewer) portalUI.setMessage($('approvals-status'), error.message, true);
+      if (pending === request && portalIdentity === viewer) {
+        portalUI.setMessage($('approvals-status'), error.message, true);
+      }
     }).finally(() => {
       if (pending === request) pending = undefined;
     });

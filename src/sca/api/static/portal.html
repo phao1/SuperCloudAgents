@@ -2551,7 +2551,7 @@ async function showRoute({page,current,parts}){
   const [target,title,description]=pages[current];
   for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
   $('connect-prompt').hidden=current===page;
-  $('connect-prompt').querySelector('p').textContent=portalIdentity
+  $('connect-prompt').querySelector('p').textContent=portalIdentity&&!portalIdentity.guest
     ?'当前令牌无法访问此页面，请切换到具有相应权限的令牌。':'请先在概览连接 Portal 工作空间。';
   $('page-title').textContent=title;
   $('page-description').textContent=description;
