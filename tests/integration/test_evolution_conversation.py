@@ -54,7 +54,7 @@ async def test_messages_persist_with_rls_and_budget_receipts(postgres, store, ap
                      orchestrator=SimpleNamespace(client=client))
     path = f'/v1/evolutions/{evolution_id}'
     headers = {'Authorization': 'Bearer member'}
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as http:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as http:
         for requested, total in ((1, None), (.1, .2)):
             response = await http.post(path + '/messages', headers=headers, json={
                 'mode': 'budget', 'remaining_budget_usd': requested,

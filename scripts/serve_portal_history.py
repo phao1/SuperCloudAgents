@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-HOST = "127.0.0.1"
 ROOT = Path(__file__).resolve().parents[1]
+if __name__ == "__main__":
+    # The archive viewer runs from a source checkout before SCA is installed.
+    sys.path.insert(0, str(ROOT / "src"))
+
+from sca.api.local_request import local_guest_request
+
+HOST = "127.0.0.1"
 STATIC = ROOT / "src" / "sca" / "api" / "static"
 HISTORY = ROOT / "Milestone" / "history"
 HTML_TYPE = "text/html; charset=utf-8"
@@ -152,6 +159,9 @@ class HistoryHandler(BaseHTTPRequestHandler):
         self.serve_page(send_body=False)
 
     def serve_page(self, *, send_body: bool) -> None:
+        if not local_guest_request(self.client_address[0], self.headers.items()):
+            self.send_error(HTTPStatus.FORBIDDEN)
+            return
         try:
             target = urlsplit(self.path)
         except ValueError:

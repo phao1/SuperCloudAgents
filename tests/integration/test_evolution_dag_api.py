@@ -66,7 +66,7 @@ async def test_evolution_dag_and_guest_access_with_rls(postgres, store, api_stor
             authenticator=StaticTokenAuthenticator({"admin": "eval:admin", "reader": "eval:viewer",
                                                     "outside": "other:admin"}),
         )
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000")
 
     evolution = f"/v1/evolutions/{evolution_id}"
     champion = f"/v1/champions/{champion_id}"

@@ -97,7 +97,7 @@ curl -fsS -X PUT "$API/v1/portal/access" \
 任务指令、轨迹和补丁可能包含业务数据。只对允许公开的历史使用此模式，并显式设置
 `SCA_GUEST_VIEW_ACKNOWLEDGE_RISK=1`，否则服务拒绝启动。
 
-`local` 使用 TCP 对端地址判断连接来源。`X-Forwarded-For` 和 `Forwarded` 不参与判断。
+`local` 和归档查看器要求回环 TCP 对端、唯一的回环 `Host`（`127.0.0.1`、`localhost` 或 `[::1]`，端口不限）且无代理转发头，并拒绝非回环 `Origin` 和 `Sec-Fetch-Site` 为 `cross-site` 或 `same-site` 的请求。可通过 `ssh -L` 转发后使用本机回环地址访问。
 脚本和 `make api` 使用 Uvicorn 的 `--no-proxy-headers`。自定义启动命令也应保留这一参数。
 **若反向代理通过回环地址连接 API，所有经该代理转发的访问都会被视为本地连接。** 对外服务请设置
 `SCA_GUEST_VIEW=off`，或让代理通过非回环地址连接 API。
