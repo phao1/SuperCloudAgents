@@ -126,6 +126,8 @@ class EventType(StrEnum):
     PLAN_REJECTED = "plan.rejected"
     REVIEW_REQUESTED = "review.requested"
     REVIEW_SUBMITTED = "review.submitted"
+    # Task output directories
+    OUTPUT_WRITTEN = "output.written"
 
 
 class Event(BaseModel):

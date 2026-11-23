@@ -1,6 +1,8 @@
 import asyncio
 import json
+import shlex
 import sys
+from dataclasses import asdict
 from types import SimpleNamespace
 
 import httpx
@@ -9,8 +11,10 @@ from temporalio import workflow
 from test_best_of import LocalWorkflow
 
 from sca.agents.fake import FakeBackend
+from sca.api import conversation
+from sca.api.authz import GuestPrincipal
 from sca.config import Settings
-from sca.core.models import TaskState
+from sca.core.models import Principal, TaskState
 from sca.core.task_dag import build_task_dag
 from sca.kernel.activities import KernelActivities
 from sca.kernel.kind import KindDeps
@@ -19,6 +23,7 @@ from sca.kinds.coding.spec import CodingSpec
 from sca.kinds.coding.workflow import CodingBeforeTurn
 from sca.sandbox.local import LocalSandboxProvider
 from sca.storage.local import LocalObjectStore, key_for
+from sca.workspace.output import prepare_output
 from scripts.dag_demo import FILES, GRAPH, run_demo, submission
 from tests.best_of_harness import TASK_ID, FakeStore
 
@@ -72,6 +77,17 @@ def test_demo_submits_queues_guidance_and_waits_for_second_review():
 class DemoStore(FakeStore):
     pending = None
 
+    async def set_state(self, task_id, state, reason=None, *, wait_for_messages=False,
+                        write_output=None):
+        if wait_for_messages and self.pending:
+            return await self.get_task(task_id)
+        if write_output:
+            assert state == TaskState.SUCCEEDED
+            result = await write_output(self.task)
+            self.task.result.update(result)
+            await self.append_event(task_id, "output.written", result, dedup_key="output.written")
+        return await super().set_state(task_id, state, reason, wait_for_messages=wait_for_messages)
+
     async def pending_task_messages(self, task_id):
         return [] if self.pending is None else [SimpleNamespace(id="m1", text=self.pending)]
 
@@ -91,15 +107,21 @@ class DemoStore(FakeStore):
             "message_id": "m1", "turn": self.delivered_turn,
         })
 
+    async def task_conversation_events(self, task_id, after, limit, types, context):
+        events = await self.list_events(task_id, limit=10_000)
+        return self.task, [e for e in events if e.seq > after and e.type in types][:limit], [
+            e for e in events if e.type in context
+        ]
+
 
 class DemoWorkflow(LocalWorkflow):
-    def __init__(self, tmp_path, spec, monkeypatch):
+    def __init__(self, tmp_path, spec, monkeypatch, *, transport="mount"):
         # Match a tenant with a cost cap on a worker without a model gateway.
         self.store = DemoStore(CodingSpec.model_validate({**spec, "max_cost_usd": 1}).model_dump())
         self.sandboxes = tmp_path / "local-sandboxes"
         self.objects = LocalObjectStore(tmp_path / "objects")
         settings = Settings(_env_file=None, data_dir=tmp_path / "data", sandbox_driver="local",
-                            repo_cache=False, pip_cache=False)
+                            state_transport=transport, repo_cache=False, pip_cache=False)
         agent = FakeBackend()
         agent.state_transport = settings.state_transport
         deps = KindDeps(settings, self.store, LocalSandboxProvider(self.sandboxes), agent, self.objects)
@@ -111,10 +133,18 @@ class DemoWorkflow(LocalWorkflow):
         monkeypatch.setattr(workflow, "start_child_workflow", self.start_child)
 
     async def start_child(self, run, *, args, **kwargs):
-        execution = CodingBeforeTurn().run(*args) if run == "coding.before_turn" else self.execute_child(
-            run, args=args, **kwargs,
-        )
-        return asyncio.create_task(execution)
+        if run != "coding.before_turn":
+            return asyncio.create_task(self.execute_child(run, args=args, **kwargs))
+        planner = CodingBeforeTurn()
+
+        async def signal(name, args):
+            assert name == "submit_review"
+            await planner.submit_review(*args)
+            self.signal.set()
+
+        execution = asyncio.create_task(planner.run(*args))
+        execution.signal = signal
+        return execution
 
     async def interject(self):
         self.store.pending = "Record the operator acknowledgement before final approval."
@@ -194,3 +224,80 @@ async def test_nested_candidates_cannot_adopt_an_out_of_scope_patch(tmp_path, be
     root = demo.coding._workspace(str(TASK_ID)).workspace
     assert (root / "app.txt").read_text() == "broken\n"
     assert not (root / FILES["fx"]).exists()
+
+
+@pytest.mark.parametrize(("mode", "auto_finish"), [
+    ("none", False), ("none", True), ("plan-review", True), ("verification-fails", True),
+])
+async def test_output_delivery_follows_the_final_review_or_auto_finish(
+    tmp_path, monkeypatch, mode, auto_finish,
+):
+    settings = Settings(_env_file=None, data_dir=tmp_path / "data")
+    directory, branch, target = prepare_output(settings, str(tmp_path / "output"), "Deliver code", None)
+    output = tmp_path / "output"
+    plan = mode == "plan-review"
+    commands = "printf 'app\n' > app.txt"
+    if plan:
+        subtasks = [
+            {"name": "app", "instruction": "Create the app", "paths": ["app.txt"]},
+            {"name": "docs", "instruction": "Write the docs", "paths": ["docs.txt"]},
+        ]
+        encoded = shlex.quote(json.dumps({"split": True, "reason": "Independent work", "subtasks": subtasks}))
+        commands = (
+            'case "$(git branch --show-current)" in\n'
+            f'  *-plan-*) mkdir -p .sca && printf %s {encoded} > .sca/plan.json ;;\n'
+            "  *-app) printf 'app\n' > app.txt ;;\n"
+            "  *-docs) printf 'docs\n' > docs.txt ;;\n"
+            "esac"
+        )
+    demo = DemoWorkflow(tmp_path, {
+        "repo_url": directory, "output_dir": directory, "base_ref": branch,
+        "instruction": f"Deliver code\n\n```sca-fake\n{commands}\n```",
+        "plan": "auto" if plan else "none", "plan_review": plan,
+        "agent_backend": "fake", "auto_finish": auto_finish, "memory_enabled": False,
+        "max_fix_attempts": 0, "verify_command": "false" if mode == "verification-fails" else None,
+    }, monkeypatch, transport="sync" if auto_finish else "mount")
+    task = demo.store.task
+    task.tenant_id = "eval"
+    task.result["output_target"] = asdict(target)
+    execution = asyncio.create_task(demo.run(timeout_s=DEMO_TIMEOUT_S))
+    try:
+        if not auto_finish or plan:
+            await asyncio.wait_for(demo.store.states[TaskState.AWAITING_REVIEW].wait(), DEMO_TIMEOUT_S)
+            assert not (output / "app.txt").exists()
+            assert demo.events("output.written") == []
+            await demo.store.append_event(TASK_ID, "review.submitted", {"decision": "approve"})
+            await demo.submit_review(str(TASK_ID), "approve", None)
+        if mode == "verification-fails":
+            assert await execution == TaskState.FAILED
+            assert not (output / "app.txt").exists()
+            assert demo.events("output.written") == []
+            return
+        assert await execution == TaskState.SUCCEEDED
+    finally:
+        if not execution.done():
+            execution.cancel()
+        await asyncio.gather(execution, return_exceptions=True)
+    assert (output / "app.txt").read_text() == "app\n"
+    if plan:
+        assert (output / "docs.txt").read_text() == "docs\n"
+        assert len(demo.events("plan.completed")) == 1
+        assert len(demo.events("subtasks.merged")) == 1
+    assert not (output / ".sca").exists()
+    written, = demo.events("output.written")
+    assert written["output_commit"] == task.result["output_commit"]
+    assert written["output_branch"] == "main"
+    events = await demo.store.list_events(TASK_ID, 1000)
+    dag = build_task_dag(task, events, [])
+    node, = [node for node in dag.nodes if node.kind == "output"]
+    assert node.label == "代码已写入" and node.status == "succeeded"
+    assert any(edge.source == node.id and edge.target.endswith("/finish:finish") for edge in dag.edges)
+    assert node.meta["output_dir"] == directory
+    for user, expected_path in [
+        (Principal(tenant_id="eval", subject="fixture"), directory),
+        (GuestPrincipal(tenant_id="eval"), "本机目录"),
+    ]:
+        chat = await conversation.task_page(demo.store, TASK_ID, user, 0, 1000)
+        item, = [item for item in chat.items if item.kind == "output.written"]
+        assert item.dag_node_id == node.id
+        assert item.text == f"代码已写入 {expected_path}（提交 {written['output_commit'][:7]}）"

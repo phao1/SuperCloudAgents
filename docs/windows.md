@@ -88,12 +88,14 @@ Windows 本机可用 `export-history <zip>` 导出。[历史归档内容与高�
 
 ## 运行任务与演进
 
-1. 在「首页」或「任务」点击「新建任务」，选择 DeepSeek Harness。填写仓库地址、基线分支、任务要求和验证命令。
-   仓库可使用本机绝对路径，例如 `C:/work/demo`。平台的准备和验证命令由 Git Bash
-   执行，使用相对于任务工作目录的路径，例如 `python -m pytest -q`。在「冠军覆盖」选择
-   「使用当前冠军」，可应用同一 DSH 版本和模型的冠军指引。
+1. 在「首页」或「任务」点击「新建任务」，填写任务指令，例如「创建 Flask 商店，包含商品列表和购物车」，
+   并选择 DeepSeek Harness。新项目可填绝对输出目录，例如 `C:/work/flask-shop`。留空则生成到
+   `~/sca-projects/<项目名>-<短 ID>`。任务默认先自动规划。已有仓库的任务可填写仓库地址和基线分支。
+   准备和验证命令由 Git Bash 执行，请使用相对于任务工作目录的路径。在「冠军覆盖」选择
+   「使用当前冠军」可应用同一 DSH 版本和模型的冠军指引。
 2. 提交后进入任务详情，在「执行图 DAG」和「对话」查看进展。需要人工确认时，在对话顶部
-   审阅规划或任务结果。卡片可打开最终补丁和「任务证据 → 任务审核」。
+   审阅规划或任务结果。批准后，输出目录会出现代码和提交。勾选「完成后无需人工审核，直接写入」
+   可在验证通过后自动交付。路径可从任务标题下复制，写入记录可在对话和 DAG 的「结果」阶段查看。
 3. 在首页点击「开始演进」，或打开「自动演进 → 演进记录」。选择 DeepSeek Harness、评测套件、模型和预算，再提交运行。
    首次建议用内置套件 `dsh-smoke` 和 `deepseek-flash`，按下方参数试跑预计花费 ¥1–2。
    基线版本留空时使用 `SCA_DSH_VERSION`。打开演进记录查看执行图与评测结果。
@@ -131,6 +133,32 @@ $task = @{
 } | ConvertTo-Json -Depth 4
 Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8000/v1/tasks' -Headers $headers `
     -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($task))
+```
+
+用同一令牌新建 Flask 商店。第一条请求写到自选目录，第二条写到默认目录。
+
+```powershell
+$api = 'http://127.0.0.1:8000'
+$spec = @{
+    instruction = '用 Flask 创建商店，包含商品列表、购物车、测试和启动说明。入口为 app.py'
+    agent_backend = 'dsh'
+    model = 'deepseek-flash'
+    output_dir = 'C:/work/flask-shop'
+    plan = 'auto'
+    verify_command = 'python -m compileall -q app.py'
+    auto_finish = $true
+}
+
+function Submit-Shop {
+    $body = @{ kind = 'coding'; spec = $spec } | ConvertTo-Json -Depth 4
+    Invoke-RestMethod -Method Post -Uri "$api/v1/tasks" -Headers $headers `
+        -ContentType 'application/json; charset=utf-8' -Body ([Text.Encoding]::UTF8.GetBytes($body))
+}
+
+$chosen = Submit-Shop
+$spec.Remove('output_dir')
+$default = Submit-Shop
+Invoke-RestMethod -Uri "$api/v1/tasks/$($default.id)" -Headers $headers
 ```
 
 使用同一租户管理员令牌提交 `dsh-smoke` 演进并查看执行图。

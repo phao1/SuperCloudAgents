@@ -9,6 +9,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from sca.api.authz import GuestPrincipal
 from sca.api.guest_history import history_payload
 from sca.core.models import Event, Principal, Task, TaskState
 from sca.core.task_dag import (
@@ -462,6 +463,13 @@ def _task_progress(
             return '进入规划审核' if 'plan' in p else '进入人工审核'
         case 'review.submitted':
             return REVIEW_DECISIONS.get(p.get('decision'))
+        case 'output.written':
+            directory = ('本机目录' if isinstance(user, GuestPrincipal)
+                         else _display(user, p.get('output_dir'), 32767))
+            commit = _display(user, p.get('output_commit'), 64)[:7]
+            branch = _display(user, p.get('output_branch'), 256)
+            text = f'代码已写入 {directory}（提交 {commit}）'
+            return f'{text} · 结果分支 {branch}' if p.get('output_on_side_branch') else text
         case 'user.message.delivered' | 'user.message.applied':
             return _task_control_receipt(event)
     return None

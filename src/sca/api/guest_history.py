@@ -16,6 +16,7 @@ _PRIVATE_FIELD = re.compile(
 _PRIVATE_OBJECTS = {
     "actor", "created_by", "updated_by", "reviewed_by", "approved_by",
     "env", "environment", "headers", "raw", "database_url", "connection_string",
+    "output_dir", "output_target",
 }
 _EMAIL_LOCAL = r"[\w.!#$%&'*+/=?^`{|}~-]"
 _PRIVATE_TEXT = re.compile(
@@ -59,7 +60,8 @@ def _text(value: str) -> str:
 
 def _payload(value: Any) -> Any:
     if isinstance(value, dict):
-        return {_text(key): _payload(item) for key, item in value.items() if not _private_field(key, item)}
+        return {_text(key): _payload(item) for key, item in value.items()
+                if not _private_field(key, item) and not (key == "repo_url" and value.get("output_dir"))}
     if isinstance(value, list):
         return [_payload(item) for item in value]
     if isinstance(value, str):

@@ -151,8 +151,10 @@ def portal_token_required(settings: Settings) -> bool:
 def local_portal_host(request: Request) -> str | None:
     # Only the Portal launcher can attest to the listening address and proxy configuration.
     port = getattr(request.app.state, "local_portal_port", None)
+    if port is None:
+        return None
     server = request.scope.get("server")
-    if (port is None or not server or server[1] != port or not is_loopback(server[0])
+    if (not server or server[1] != port or not is_loopback(server[0])
             or not request.client or not is_loopback(request.client.host)):
         return None
     host = unproxied_host(request.headers.items())
@@ -161,7 +163,7 @@ def local_portal_host(request: Request) -> str | None:
     return host
 
 
-def _local_portal_request(request: Request) -> bool:
+def _local_portal_request(request: Request, *, allow_originless: bool = False) -> bool:
     host = local_portal_host(request)
     if host is None:
         return False
@@ -172,7 +174,8 @@ def _local_portal_request(request: Request) -> bool:
         return False
     if fetch_sites and fetch_sites not in (["same-origin"], ["none"]):
         return False
-    return request.method in {"GET", "HEAD"} or bool(origins) or fetch_sites == ["same-origin"]
+    return (allow_originless or request.method in {"GET", "HEAD"} or bool(origins)
+            or fetch_sites == ["same-origin"])
 
 
 async def local_portal_admin(request: Request) -> LocalPortalPrincipal | None:
@@ -196,3 +199,12 @@ async def _request_principal(request: Request, authorization: str | None, *, gue
         if guest and (guest_user := await _guest_principal(request)):
             return guest_user
     return await request.app.state.authenticator.authenticate(_bearer(authorization))
+
+
+# Task output directories
+def can_use_output_dir(request: Request, user: Principal) -> bool:
+    settings = getattr(request.app.state, "settings", None)
+    return (user.tenant_id == "eval" and user.role == "admin" and not user.scopes
+            and getattr(settings, "sandbox_driver", None) in {"docker", "local"}
+            and _default_history_tenant() == "eval"
+            and _local_portal_request(request, allow_originless=True))

@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from datetime import UTC, date, datetime
@@ -238,7 +239,8 @@ class Store:
             project = await self._thread_project(session, tenant_id, project_id)
             from sca.projects import prepare_thread_spec
 
-            spec = prepare_thread_spec(kind, spec, project, validate_spec)
+            # Task output directory admission can import an existing Git working tree.
+            spec = await asyncio.to_thread(prepare_thread_spec, kind, spec, project, validate_spec)
             active = await session.scalar(
                 select(func.count())
                 .select_from(tasks)
@@ -371,6 +373,7 @@ class Store:
     async def set_state(
         self, task_id: str | UUID, new_state: TaskState, reason: str | None = None,
         *, model_provider_error: dict | None = None, wait_for_messages: bool = False,
+        write_output: Callable[[Task], Awaitable[dict]] | None = None,
     ) -> Task:
         async with self._transaction() as session:
             row = await self._task(session, task_id, True)
@@ -383,6 +386,9 @@ class Store:
                 return Task.model_validate(dict(row))
             # Model provider errors are committed with the terminal reason.
             result = {**row["result"], "admission": {}}
+            # Task output directories
+            if write_output is not None and new_state == TaskState.SUCCEEDED:
+                result.update(await self._record_output(session, row, write_output))
             if model_provider_error is not None and new_state == TaskState.FAILED:
                 result["model_provider_error"] = model_provider_error
             updated = (
@@ -3456,3 +3462,15 @@ class Store:
         )
         async with self._transaction() as session:
             return int(await session.scalar(query))
+
+    # Task output directories
+    async def _record_output(
+        self, session: AsyncSession, row: RowMapping,
+        write_output: Callable[[Task], Awaitable[dict]],
+    ) -> dict:
+        from sca.core.models import EventType
+
+        # Publish under the task lock after checking messages, before SSE can see a terminal state.
+        output = await write_output(Task.model_validate(dict(row)))
+        await self._event(session, row["id"], EventType.OUTPUT_WRITTEN, output, "output.written")
+        return output

@@ -212,6 +212,10 @@ pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; }
 }
 #evidence-body { display: grid; gap: 10px; }
 .task-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.task-heading:has(#task-output:not([hidden])) { flex-wrap: wrap; }
+#task-output { display: flex; align-items: center; gap: 8px; flex-basis: 100%; min-width: 0; }
+#task-output-path { flex: 1; min-width: 0; }
+#task-output button { white-space: nowrap; }
 #swimlane {
   position: sticky; top: 0; z-index: 5; min-width: 0;
   border: 1px solid var(--line); border-radius: 9px; background: var(--panel);
@@ -644,7 +648,14 @@ body[data-trace-expanded] { overflow: hidden; }
           <a id="task-project-link" href="#/projects">项目</a><span aria-hidden="true"> › </span>
           <span aria-current="page">线程</span>
         </nav>
-        <header class="task-heading"><h2 id="task-title"></h2><span id="task-state" class="badge"></span><span id="task-imported" class="badge" hidden>导入</span></header>
+        <header class="task-heading">
+          <h2 id="task-title"></h2><span id="task-state" class="badge"></span><span id="task-imported" class="badge" hidden>导入</span>
+          <div id="task-output" hidden>
+            <label for="task-output-path">输出目录</label><input id="task-output-path" readonly>
+            <button id="task-output-copy" type="button">复制目录</button>
+            <span id="task-output-copy-status" class="status-text" role="status"></span>
+          </div>
+        </header>
         <p id="task-extras-status" class="status-text portal-message" role="status"></p>
         <div class="panel" hidden><h2>拉取请求与工单</h2><div id="task-delivery" class="stack"></div></div>
         <div class="panel" hidden><h2>工具与冠军</h2><div id="task-tools-champion" class="stack"></div></div>
@@ -2295,6 +2306,14 @@ function renderTaskDiagnostics(patch=''){
 function renderTaskState(t){
   $('task-title').textContent=[taskCase(t),t.id,t.state_reason].filter(Boolean).join(' · ');
   $('task-imported').hidden=t.result?.history_imported!==true;
+  const output=t.result?.output_dir||t.spec?.output_dir||'';
+  const path=$('task-output-path'),copyStatus=$('task-output-copy-status');
+  $('task-output').hidden=!output;
+  if(path.value!==output){path.value=output;copyStatus.textContent=''}
+  $('task-output-copy').onclick=async()=>{
+    const copied=await portalUI.copy(output,path);
+    if(path.value===output)copyStatus.textContent=copied?'已复制目录':'已选中目录，请使用复制快捷键';
+  };
   const state=$('task-state');
   state.textContent=t.state==='QUEUED'&&t.result?.admission?.position
     ?'排队第 '+t.result.admission.position+' 位':statusText(t.state);

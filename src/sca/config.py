@@ -346,6 +346,13 @@ class Settings(BaseSettings):
     portal_require_token: bool = False
     eval_api_token: SecretStr | None = Field(default=None, repr=False, exclude=True)
 
+    # Task output directories
+    projects_dir: Path = Field(default_factory=lambda: Path.home() / "sca-projects")
+
+    @property
+    def projects_root(self) -> Path:
+        return self.projects_dir.expanduser().resolve()
+
 
 # Local source mode
 SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"
