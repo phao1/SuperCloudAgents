@@ -129,10 +129,15 @@ class CodingTaskWorkflow(TaskWorkflow):
         if self._scm_review and decision and not wait_for_messages:
             await self._sync_scm(task_id, decision)
         # Earlier histories return None from set_state and need no further activity.
-        enabled = await workflow.execute_activity(
-            "set_state", SetStateInput(task_id, state, reason, model_provider_error, wait_for_messages),
-            **_QUICK,
-        )
+        inp = SetStateInput(task_id, state, reason, model_provider_error, wait_for_messages)
+        if (state == "SUCCEEDED" and (self._task_spec or {}).get("output_dir")
+                and workflow.patched("coding-output-directory")):
+            enabled = await workflow.execute_activity(
+                "coding.write_output", inp,
+                start_to_close_timeout=timedelta(minutes=5), retry_policy=_retry(3),
+            )
+        else:
+            enabled = await workflow.execute_activity("set_state", inp, **_QUICK)
         if enabled == MESSAGES_PENDING:
             return False
         # The database rejects approval under the task lock if guidance is waiting.
@@ -181,6 +186,8 @@ class CodingTaskWorkflow(TaskWorkflow):
         return await super()._run(task_id)
 
     async def _run_best_of(self, task_id: str, spec: dict) -> str:
+        if spec.get("output_dir"):
+            self._task_spec = spec
         if spec.get("_user_interjection"):
             self._interjections.enable()
         self._admission = spec.get("_admission", False)

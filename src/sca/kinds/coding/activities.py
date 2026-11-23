@@ -21,6 +21,7 @@ from sca.core.models import (
     ExecExit,
     RepoCredential,
     SandboxAdditions,
+    Task,
     TaskState,
     tail,
 )
@@ -174,6 +175,7 @@ class CodingActivities(KernelActivities):
             self.record_ci,
             self.sync_scm,
             self.write_ticket_outcome,
+            self.write_output,
         ]
 
     @activity.defn(name="coding.prepare_mirror")
@@ -187,7 +189,7 @@ class CodingActivities(KernelActivities):
         else:
             prepared = await ws.prepare(
                 spec.repo_url,
-                spec.base_ref,
+                task.result.get("output_target", {}).get("base", spec.base_ref),
                 mirror_only=True,
                 credential=await self._repo_credential(task.tenant_id, spec.repo_url),
                 tenant_id=task.tenant_id,
@@ -288,7 +290,7 @@ class CodingActivities(KernelActivities):
             enabled = self._snapshots_enabled(spec)
             prepared = await ws.prepare(
                 spec.repo_url,
-                spec.base_ref,
+                task.result.get("output_target", {}).get("base", spec.base_ref),
                 mirror_only=enabled,
                 tenant_id=task.tenant_id,
                 credential=await self._repo_credential(task.tenant_id, spec.repo_url),
@@ -687,6 +689,26 @@ class CodingActivities(KernelActivities):
                     {"name": name, "type": source["type"], **status},
                     dedup_key=f"intents.ticket_writeback.{name}.{status.get('completed', False)}",
                 )
+
+    # Task output directories
+    @activity.defn(name="coding.write_output")
+    async def write_output(self, inp: SetStateInput) -> str | None:
+        from sca.workspace.output import write_output
+
+        ws = self._workspace(inp.task_id)
+        if not ws.mirror.is_dir():
+            await self._ensure_state(inp.task_id)
+
+        async def deliver(task: Task) -> dict:
+            if (self.settings.sandbox_driver not in {"docker", "local"} or task.tenant_id != "eval"
+                    or "output_target" not in task.result
+                    or task.result.get("history_imported") or not task.spec.get("output_dir")
+                    or task.spec["output_dir"] != task.spec.get("repo_url")):
+                raise InvalidTaskError("仅本机部署支持输出目录")
+            return await asyncio.to_thread(write_output, self.settings, task, ws.mirror)
+
+        return await self._set_task_state(inp, write_output=deliver)
+
 
 class ScmStateActivities(KernelActivities):
     @activity.defn(name="set_state")

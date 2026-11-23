@@ -26,6 +26,7 @@ from sca.api.authz import (
     LocalPortalPrincipal,
     PortalAccessSetting,
     authorize,
+    can_use_output_dir,
     local_portal_admin,
     local_portal_host,
     platform_admin_store,
@@ -200,6 +201,8 @@ async def config(request: Request,
             and bool(_restart_gateway_command(os.environ.get("SCA_PORTAL_LOCAL_CONFIG")))
             and _local_client(request),
             "model_docker_mode": os.environ.get("SCA_RUNTIME_MODE") == "docker",
+            **({"projects_dir": request.app.state.settings.projects_root.as_posix()}
+               if can_use_output_dir(request, user) else {}),
             **_portal_access_config(request, user),
             **(_source_config(settings) if settings.sandbox_driver == "local" else {})}
 

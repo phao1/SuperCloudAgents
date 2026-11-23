@@ -306,6 +306,37 @@ curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN
 
 配置接口返回 `sandbox_driver: "local"`、`warning` 和 `unavailable_agent_backends`。
 
+## 新项目输出目录
+
+Docker 演示与源码模式的本机 `eval` 管理员可在「新建任务」选择 Agent 和模型，填写任务指令，
+并把仓库地址留空。填入绝对输出目录，或使用 `~/sca-projects/<项目名>-<短 ID>`。
+可通过 `SCA_PROJECTS_DIR` 修改默认根目录，重启后用 `GET /v1/portal/config` 查询 `projects_dir`。
+服务会初始化目录中的 Git 仓库，并把已有文件纳入基线。已有 Git 工作区须处于干净状态并检出分支。
+
+新项目默认先自动规划，可选择审核规划。最终批准或启用 `auto_finish` 后，平台将结果提交到本机目录。
+如果工作区已有改动或分支已移动，平台保留当前文件，并把提交放到任务的 `sca/<短 ID>` 分支。
+任务响应中的 `result.output_dir`、`result.output_commit` 和 `result.output_branch` 可用于定位结果。
+
+下面用 DeepSeek Harness 提交两个 Flask 商店任务。为 `/home/you/flask-shop` 换上本机的绝对路径。
+示例使用本机免令牌模式。要求令牌时，传入 `Authorization: Bearer <eval 管理员令牌>`。
+
+```bash
+curl -fsS http://127.0.0.1:8000/v1/tasks -H 'Origin: http://127.0.0.1:8000' --json @- <<'JSON'
+{"kind":"coding","spec":{"instruction":"用 Flask 创建商店，包含商品列表、购物车和启动说明。入口为 app.py",
+ "agent_backend":"dsh","model":"deepseek-flash","output_dir":"/home/you/flask-shop",
+ "plan":"auto","verify_command":"python -m compileall -q app.py"}}
+JSON
+
+curl -fsS http://127.0.0.1:8000/v1/tasks -H 'Origin: http://127.0.0.1:8000' --json @- <<'JSON'
+{"kind":"coding","spec":{"instruction":"用 Flask 创建商店，包含商品列表、购物车和启动说明。入口为 app.py",
+ "agent_backend":"dsh","model":"deepseek-flash","plan":"auto","auto_finish":true,
+ "verify_command":"python -m compileall -q app.py"}}
+JSON
+```
+
+第一个任务可在 Portal 批准，也可用 `POST /v1/tasks/{id}/review` 提交 `{"decision":"approve"}`。
+通过 `GET /v1/tasks/{id}` 查看提交结果。[Windows PowerShell 示例](windows.md#api-提交示例)
+
 ## 切换运行模式
 
 在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「设置 → 运行环境」，选择可用模式

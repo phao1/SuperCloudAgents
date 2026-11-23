@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 import json
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -363,7 +363,7 @@ class KernelActivities:
             spec = task_spec.model_dump()
             task = await self.store.get_task(task_id)
             await self._pin_champion(task, spec)
-            if spec.get("auto_finish") and "plan_review" in spec:
+            if spec.get("auto_finish") and "plan_review" in spec and not spec.get("output_dir"):
                 spec["plan_review"] = False
             selected_version = spec.get("prompt_version") or EvaluationSettings().default_prompt_version
             await self.store.update_result(task_id, {
@@ -642,6 +642,12 @@ class KernelActivities:
 
     @activity.defn
     async def set_state(self, inp: SetStateInput) -> str | None:
+        return await self._set_task_state(inp)
+
+    # Task output directories
+    async def _set_task_state(
+        self, inp: SetStateInput, *, write_output: Callable[[Task], Awaitable[dict]] | None = None,
+    ) -> str | None:
         try:
             previous_state = None
             if inp.state in TERMINAL_STATES:
@@ -650,6 +656,8 @@ class KernelActivities:
             metadata = {"model_provider_error": inp.model_provider_error} if inp.model_provider_error else {}
             if inp.wait_for_messages:
                 metadata["wait_for_messages"] = True
+            if write_output is not None:
+                metadata["write_output"] = write_output
             task = await self.store.set_state(inp.task_id, TaskState(inp.state), inp.reason, **metadata)
             if inp.wait_for_messages and task.state != inp.state:
                 return MESSAGES_PENDING

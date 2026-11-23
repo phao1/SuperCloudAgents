@@ -16,6 +16,7 @@ from sca.api.auth import (
 )
 from sca.api.authz import ForbiddenError
 from sca.api.routes import router
+from sca.api.tasks_admission import OutputDirectoryForbiddenError
 from sca.api.tasks_admission import router as admission_router
 from sca.billing.quota import PlanQuotaExceededError
 from sca.config import Settings, get_settings
@@ -114,6 +115,8 @@ def create_app(
             NotFoundError: (404, "not_found"),
             ConflictError: (409, "conflict"),
             InvalidTaskError: (422, "validation_error"),
+            # Task output directories
+            OutputDirectoryForbiddenError: (403, "forbidden"),
         }[type(exc)]
         return JSONResponse({"error": {"code": code, "message": str(exc)}}, status_code=status)
 
@@ -126,6 +129,7 @@ def create_app(
         NotFoundError,
         ConflictError,
         InvalidTaskError,
+        OutputDirectoryForbiddenError,
     ):
         app.add_exception_handler(error, domain_error)
 

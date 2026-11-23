@@ -11,7 +11,7 @@ const SCATaskDAG = (() => {
   const kindLabels = {
     task: '任务', plan: '规划', subtask: '子任务', attempt: '候选', execution: '执行', turn: 'Agent 轮次',
     tool_group: '工具', verification: '验证', fix: '修复轮次', interjection: '插话',
-    merge: '汇合', review: '人工审核', pr: 'PR', ci: 'CI', finish: '结束',
+    merge: '汇合', review: '人工审核', pr: 'PR', ci: 'CI', output: '写入代码', finish: '结束',
     evolution: '演进', generation: '代', candidate: '候选', eval_run: '评测',
     case_task: '用例任务', promotion: '晋升决定', champion: '冠军',
   };
@@ -23,7 +23,7 @@ const SCATaskDAG = (() => {
     candidate: 'branch', attempt: 'branch', subtask: 'branch',
     verification: 'check', ci: 'check', eval_run: 'check', case_task: 'check',
     promotion: 'decision', merge: 'decision', review: 'decision',
-    champion: 'result', finish: 'result',
+    champion: 'result', output: 'result', finish: 'result',
   };
   const typeLabels = {stage: '阶段', branch: '候选 / 子任务', work: '执行 / 插话',
     check: '评测 / 验证', decision: '决策 / 审核', result: '结果'};
@@ -344,7 +344,7 @@ const SCATaskDAG = (() => {
     if (graph.orientation !== 'vertical') return [];
     const titles = {
       task: '启动', plan: '规划', subtask: '子任务执行', attempt: '候选执行',
-      verification: '验证', merge: '汇合与选择', review: '审核', ci: '持续集成', pr: '交付', finish: '结果',
+      verification: '验证', merge: '汇合与选择', review: '审核', ci: '持续集成', pr: '交付', output: '结果', finish: '结果',
     };
     const levels = new Map(), bands = [];
     for (const item of graph.nodes) addToList(levels, item.layerStart, item);
@@ -643,6 +643,9 @@ const SCATaskDAG = (() => {
       if (meta.depends_on?.length) fact('依赖', meta.depends_on.join('、'));
       if (meta.model) fact('模型', meta.model);
       if (meta.merge_status) fact('合并状态', meta.merge_status);
+      if (meta.output_dir) fact('输出目录', meta.output_dir);
+      if (meta.output_branch) fact('结果分支', meta.output_branch);
+      if (meta.output_commit) fact('提交', meta.output_commit);
       if (meta.split) fact('评测分组', {dev: '开发集', holdout: '留出集'}[meta.split]);
       if (meta.decision) {
         if (node.kind === 'candidate' || node.kind === 'promotion') {

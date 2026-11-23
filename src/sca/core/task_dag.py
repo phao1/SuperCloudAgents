@@ -17,7 +17,7 @@ from sca.core.models import TERMINAL_STATES, Event, Task, TaskState
 Status = Literal["pending", "running", "succeeded", "failed", "cancelled", "skipped"]
 NodeKind = Literal[
     "task", "plan", "subtask", "attempt", "turn", "tool_group", "verification", "fix",
-    "interjection", "merge", "review", "pr", "ci", "finish",
+    "interjection", "merge", "review", "pr", "ci", "output", "finish",
 ]
 EdgeKind = Literal["sequence", "dependency", "spawn", "select", "merge"]
 TOOL_EVENTS = {"agent.tool", "agent.command", "agent.file_change"}
@@ -538,6 +538,13 @@ class _TaskTrace:
             return self._message(event)
         elif type_ == "pr.opened":
             self._pr(p, at)
+        elif type_ == "output.written":
+            node = self._node(self.root, "output", "代码已写入分支" if p.get("output_on_side_branch")
+                              else "代码已写入", "directory",
+                              **_fields(p, "output_dir", "output_commit", "output_branch"))
+            node.start(at)
+            node.close("succeeded", at)
+            return self.graph.advance(self.root, node)
         elif type_ == "scm.failed" and self.task.spec.get("pull_request") and p.get("phase") != "terminal":
             self._pr(p, at, "failed")
         else:
@@ -772,6 +779,7 @@ TASK_MILESTONES = frozenset({
     "verification.completed", "acceptance.completed", "ci.completed", "review.requested",
     "best_of.started", "best_of.attempt_completed", "best_of.selected",
     "user.message", "user.message.delivered", "user.message.applied",
+    "output.written",
 })
 TASK_MILESTONE_CONTEXT = TASK_MILESTONES | TURN_EVENTS | {
     "subtask.started", "subtasks.merged", "review.submitted", "verification.started",

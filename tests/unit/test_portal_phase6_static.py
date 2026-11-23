@@ -94,6 +94,28 @@ def test_phase6_portal_navigation_and_local_assets():
         assert not re.search(r"innerHTML|outerHTML|insertAdjacentHTML|document\.write", text)
 
 
+def test_new_project_form_shows_output_and_defaults_to_planning():
+    source = (STATIC / "portal-tasks.js").read_text(encoding="utf-8")
+    builder = source.split("async function loadSubmit(", 1)[1].split("function taskPath(", 1)[0]
+    fields = builder.split("const form = ui.form(", 1)[1].split("pushOptions,", 1)[0]
+    ordered = ("'instruction'", "'agent_backend'", "'model'", "outputField,", "'repo_url'")
+    assert [fields.index(name) for name in ordered] == sorted(fields.index(name) for name in ordered)
+    assert fields.count("required: true") == 1
+    assert "'instruction', {required: true" in fields
+    assert "portalConfig.projects_dir" in builder and "'/<项目名>'" in builder
+    assert "outputField.hidden = autoFinish.hidden = existingRepo || !projectsDir" in builder
+    assert "pushOptions.hidden = !existingRepo" in builder
+    assert "existingRepo || !bestOptions.hidden ? 'none' : 'auto'" in builder
+    assert "check('规划后等待人工确认', 'plan_review')" in builder
+    assert "check('完成后无需人工审核，直接写入', 'auto_finish')" in builder
+    assert "control(form, 'plan_mode').onchange" in builder
+
+    renderer = (STATIC / "portal.html").read_text(encoding="utf-8")
+    assert 'id="task-output-copy"' in renderer
+    assert "t.result?.output_dir||t.spec?.output_dir" in renderer
+    assert "portalUI.copy(output,path)" in renderer
+
+
 def test_project_dialog_visibility_uses_the_native_open_state():
     page = (STATIC / "portal.html").read_text()
     dialog = re.search(r'<dialog\b[^>]*id="project-dialog"[^>]*>', page)

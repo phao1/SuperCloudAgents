@@ -165,6 +165,8 @@ class CodingSpec(CommonSpec):
             data.pop("best_of", None)
         if not self.fork_from_snapshot:
             data.pop("fork_from_snapshot", None)
+        if self.output_dir is None:
+            data.pop("output_dir", None)
         return data
 
     def checks(self) -> list[str]:
@@ -182,3 +184,6 @@ class CodingSpec(CommonSpec):
             if self.auto_finish and (pr.open_on == "approve" or pr.merge_on_approve):
                 raise ValueError("opening or merging a pull request on approval requires human review")
         return self
+
+    # Task output directories
+    output_dir: str | None = Field(default=None, min_length=1)

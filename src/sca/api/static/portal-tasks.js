@@ -108,7 +108,7 @@ const portalTasks = (() => {
     return {source: {type, name, params, ...(reference && {[value('reference_type')]: reference})}, file};
   }
 
-  function submitFields(form, intentList, defaultBackend) {
+  function submitFields(form, intentList, defaultBackend, hasRepo) {
     const v = name => ui.value(form, name);
     const c = name => ui.checked(form, name);
     const optional = name => v(name) || undefined;
@@ -117,8 +117,11 @@ const portalTasks = (() => {
       repo_url: optional('repo_url'), base_ref: optional('base_ref'), instruction: v('instruction'),
       verify_commands: ui.lines(v('verify_commands')), setup_command: optional('setup_command'),
       model: optional('model'), agent_backend: optional('agent_backend'),
-      image: optional('image'), push: c('push'), fork_from_snapshot: c('fork_from_snapshot'),
+      image: optional('image'), push: hasRepo && c('push'), fork_from_snapshot: c('fork_from_snapshot'),
       plan: planMode === 'auto' ? 'auto' : 'none',
+      ...(!ui.control(form, 'output_dir').disabled && {
+        output_dir: optional('output_dir'), auto_finish: c('auto_finish'),
+      }),
       ...(v('max_cost_usd') && {max_cost_usd: Number(v('max_cost_usd'))}),
       ...(v('max_tokens') && {max_tokens: Number(v('max_tokens'))}),
     };
@@ -169,6 +172,7 @@ const portalTasks = (() => {
     if (!current()) return;
     const {check, control, field, fields, value} = ui;
     const primaryRepo = project?.repos[0];
+    const projectsDir = portalConfig.projects_dir;
     const defaultBackend = project?.default_backend || portalConfig.default_agent_backend;
     const defaultModel = project?.default_model || portalConfig.default_model;
     const available = el('div', undefined, 'stack');
@@ -189,6 +193,7 @@ const portalTasks = (() => {
       field('PR 说明', 'pr_body', {multiline: true, wide: true, maxLength: 20000})
     );
     const prOption = check('创建拉取请求（PR）', 'open_pr');
+    const pushOptions = disclosure('推送与拉取请求', check('推送任务分支', 'push'), prOption, pr);
     const bestOptions = fields(
       field('选择方式', 'best_select', {choices: [['verify_then_cost', '按验证结果与费用自动选择'], ['human', '人工选择']]}),
       field('尝试模型（可选，逗号分隔）', 'best_models'),
@@ -202,21 +207,29 @@ const portalTasks = (() => {
       field('子任务配置（JSON）', 'subtasks', {multiline: true, note: '每项填写 name、instruction，可填 depends_on 与 paths。'}),
       check('规划后等待人工确认', 'plan_review')
     );
+    const outputField = field('输出目录（可选）', 'output_dir', {
+      placeholder: '留空则生成到 ' + (projectsDir || '~/sca-projects') + '/<项目名>',
+    });
+    const autoFinish = check('完成后无需人工审核，直接写入', 'auto_finish');
+    const hasRepo = () => Boolean(primaryRepo || value(form, 'repo_url'));
+    let planChosen = false;
     const form = ui.form([
       fields(
-        field('仓库地址（可选）', 'repo_url',
-          {placeholder: primaryRepo?.repo_url || '留空则新建空仓库；也可填 Git URL 或服务端仓库路径'}),
-        field('基线分支、标签或提交（可选）', 'base_ref', {placeholder: primaryRepo?.base_ref || 'main'}),
         field(project ? '线程指令' : '任务指令', 'instruction', {required: true, multiline: true, wide: true}),
-        field('准备命令（可选）', 'setup_command'),
-        portalModels.field('模型（可选）', 'model', {placeholder: defaultModel}),
-        field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
         field('Agent 后端', 'agent_backend', {choices: ui.backendChoices({
           ...portalConfig, default_agent_backend: defaultBackend,
         })}),
+        portalModels.field('模型（可选）', 'model', {placeholder: defaultModel}),
+        outputField,
+        field('仓库地址（可选）', 'repo_url',
+          {placeholder: primaryRepo?.repo_url || (projectsDir ? '留空则新建项目' : 'Git URL 或服务端仓库路径')}),
+        field('基线分支、标签或提交（可选）', 'base_ref'),
+        autoFinish,
+        field('准备命令（可选）', 'setup_command'),
+        field('验证命令（每行一条，最多 16 条）', 'verify_commands', {multiline: true, wide: true}),
         field('OpenCode 版本（可选）', 'agent_version', {placeholder: '平台默认版本'})
       ),
-      disclosure('推送与拉取请求', check('推送任务分支', 'push'), prOption, pr),
+      pushOptions,
       disclosure('Best-of-N 与执行设置', fields(
         field('并行尝试数', 'best_n', {choices: [[1, '1 · 单次执行'], ...[2, 3, 4, 5].map(n => [n, String(n)])]}),
         field('任务预算（美元）', 'max_cost_usd', {type: 'number', min: 0, step: 'any'}),
@@ -230,7 +243,7 @@ const portalTasks = (() => {
       disclosure('设计意图与工单', ui.actions(addKind, add), list),
       versionsList,
     ], project ? '提交线程' : '提交任务', async form => {
-      const {spec, intents} = submitFields(form, list, defaultBackend);
+      const {spec, intents} = submitFields(form, list, defaultBackend, hasRepo());
       const identity = portalIdentity;
       spec.intents = [];
       for (const {source, file} of intents) {
@@ -247,6 +260,7 @@ const portalTasks = (() => {
       const task = await data('/tasks', {kind: 'coding', spec, ...(project && {project_id: project.id})});
       if (identity !== portalIdentity) return;
       form.reset();
+      planChosen = false;
       for (const input of available.querySelectorAll('input')) input.checked = false;
       list.replaceChildren();
       add.disabled = false;
@@ -274,18 +288,26 @@ const portalTasks = (() => {
     });
     const sync = () => {
       const backend = value(form, 'agent_backend') || defaultBackend;
+      const existingRepo = hasRepo();
+      outputField.hidden = autoFinish.hidden = existingRepo || !projectsDir;
+      control(form, 'output_dir').disabled = outputField.hidden;
+      pushOptions.hidden = !existingRepo;
+      control(form, 'base_ref').placeholder = existingRepo ? primaryRepo?.base_ref || 'main' : '当前分支';
       control(form, 'agent_version').disabled = !backend?.startsWith('opencode');
       control(form, 'champion').disabled = backend !== 'opencode' && backend !== 'dsh';
       for (const input of available.querySelectorAll('input')) input.disabled = backend !== 'opencode';
       prOption.hidden = !ui.checked(form, 'push');
       pr.hidden = prOption.hidden || !ui.checked(form, 'open_pr');
       bestOptions.hidden = Number(value(form, 'best_n')) < 2;
+      if (!planChosen) control(form, 'plan_mode').value = existingRepo || !bestOptions.hidden ? 'none' : 'auto';
       const mode = value(form, 'plan_mode');
       planOptions.hidden = mode === 'none';
       control(form, 'subtasks').parentElement.hidden = mode !== 'manual';
       control(form, 'plan_review').parentElement.hidden = mode !== 'auto';
     };
-    for (const name of ['agent_backend', 'push', 'open_pr', 'best_n', 'plan_mode']) control(form, name).onchange = sync;
+    for (const name of ['agent_backend', 'push', 'open_pr', 'best_n']) control(form, name).onchange = sync;
+    control(form, 'repo_url').oninput = sync;
+    control(form, 'plan_mode').onchange = () => { planChosen = true; sync(); };
     sync();
     target.replaceChildren(form);
     available.append(el('small', '正在读取可用工具…'));
