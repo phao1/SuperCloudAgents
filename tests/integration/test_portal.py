@@ -39,7 +39,9 @@ async def test_portal_and_config(api_store, tmp_path, monkeypatch):
     transport = httpx.ASGITransport(app=app, client=("192.0.2.1", 50000))
     async with httpx.AsyncClient(transport=transport, base_url='http://test') as c:
         page = await c.get('/portal')
-        assert page.status_code == 200 and '自演进闭环' in page.text
+        assert page.status_code == 200 and '/portal/assets/portal-nav.js' in page.text
+        nav = await c.get('/portal/assets/portal-nav.js')
+        assert nav.status_code == 200 and '自演进闭环' in nav.text
         architecture = await c.get('/portal/architecture')
         assert architecture.status_code == 200 and 'data-node-id="task_entry"' in architecture.text
         task_flow = await c.get('/portal/task-flow.js')
