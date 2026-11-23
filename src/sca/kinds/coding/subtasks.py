@@ -36,6 +36,7 @@ from sca.kinds.coding.subtask_inputs import (
     SubtaskProgress,
     SubtaskSchedule,
 )
+from sca.live_heartbeat import LaneScope
 from sca.workspace.git import GitWorkspace
 from sca.workspace.merge import MERGED_STATUSES, SubtaskResult, merge_subtasks
 
@@ -171,6 +172,9 @@ class ChildActivities(CodingActivities):
     @property
     def workspace_name(self) -> str:
         return self.lane.workspace if self.lane else self.name
+
+    def _live_scope(self) -> LaneScope:
+        return self.name, None
 
     @property
     def scope(self) -> str:
@@ -418,6 +422,10 @@ class SubtaskActivities:
 
     @activity.defn(name="coding.prepare_scoped_subtask")
     async def prepare(self, inp: SubtaskPreparationInput) -> dict:
+        async with self.acts._live_task(inp.task_id, "workspace", scope=(inp.name, None)):
+            return await self._prepare(inp)
+
+    async def _prepare(self, inp: SubtaskPreparationInput) -> dict:
         task_id = inp.task_id
         acts = self.acts
         await acts._ensure_state(task_id)

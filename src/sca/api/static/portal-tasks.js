@@ -443,6 +443,20 @@ const portalTasks = (() => {
         path: taskPath(task), type: 'task', canWrite: () => ui.can('member'),
         active: () => portalIdentity === identity && openTaskIs(task.id),
         focus: id => taskDag?.focus(id),
+        logLink: () => {
+          const terminalPanel = $('task-terminal-panel');
+          const target = terminalPanel.hidden ? $('timeline') : terminalPanel;
+          const link = evidenceLink('查看日志', '#' + target.id);
+          link.onclick = event => {
+            event.preventDefault();
+            const visible = terminalPanel.hidden ? $('timeline') : terminalPanel;
+            const heading = visible === terminalPanel ? visible.querySelector('h2') : visible.previousElementSibling;
+            if (heading) heading.tabIndex = -1;
+            portalApprovals.focus(heading);
+            if (visible === terminalPanel) void startTerminal(currentTask);
+          };
+          return link;
+        },
       });
       conversation = {id: task.id, identity, panel};
     }

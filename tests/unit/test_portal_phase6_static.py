@@ -342,6 +342,9 @@ const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_ch
   agent_version:'fake',model:'fake',solidify_builds:[{version:'built',status:'succeeded',regression_status:'completed'}]};
 const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
+const liveFixture=(state,operation,finished=false)=>({state,finished,running:state==='RUNNING',
+  as_of:at,started_at:at,elapsed_s:0,phase:{operation,started_at:at},
+  last_activity_at:at,stall_warn_s:120,agents:[],cost_usd:0});
 const candidateHref='#/evolutions/runs/'+evolution.id+'/approval/'+candidate.id;
 const location={hash:taskApproval||evolutionApproval?'#/approvals':{
   guest:'#/projects/private-project',home:'',models:'#/settings/models',local:'',projects:'#/projects',
@@ -536,6 +539,8 @@ global.fetch=async (path,request={})=>{
       {seq:3,type:'review.requested',payload:{plan:{subtasks:[]}}},
     ]:[],
     [taskPath+'/artifacts']:artifacts,
+    [taskPath+'/live']:liveFixture(task.state,finishedTask(task.state)?'finished'
+      :task.state==='AWAITING_REVIEW'?'review':'agent',finishedTask(task.state)),
     [taskPath+'/conversation?limit=100']:taskApproval?{items:[
       {id:'run',kind:'operations',backend:'dsh',activity:{turn_seq:1,
         operations:[{kind:'command',name:'pwd',exit_code:0,output_tail:'C:/w'}],files:[]},created_at:at},
@@ -559,6 +564,7 @@ global.fetch=async (path,request={})=>{
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
     [harvestPath]:[harvest],
     [evolutionPath+'/dag']:{nodes:[{kind:'evolution',cost_usd:liveSpend}],edges:[]},
+    [evolutionPath+'/live']:liveFixture(evolution.status,'review'),
     [evolutionPath+'/conversation?limit=100']:{items:[],cursor:'e:0',has_more:false},
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
   };
@@ -803,6 +809,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(!['停止演进','批准','拒绝'].some(label=>content().includes(label)));
     assert(calls.includes(evolutionPath+'/dag'));
     assert(calls.includes(evolutionPath+'/conversation?limit=100'));
+    assert(calls.includes(evolutionPath+'/live'));
     assert(content().some(label=>label.includes('已用 $0.0042')));
     liveSpend=.0064;
     await refresh();
@@ -824,6 +831,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await route();
     assert(calls.includes(taskPath+'/dag'));
     assert(calls.includes(taskPath+'/conversation?limit=100'));
+    assert(calls.includes(taskPath+'/live'));
     assert.equal($('task-dag').hidden,false);
     const chat=walk($('task-conversation'));
     const taskCard=chat.find(node=>node.id==='task-approval');
@@ -1064,7 +1072,11 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(!calls.some(path=>path.startsWith(taskPath+'/artifacts/')));
   }
   assert.equal($('error').textContent,'');
-})().finally(()=>clearTimeout(deadline)).catch(error=>{console.error(error);process.exitCode=1});
+})().finally(()=>{
+  portalTasks.resetTask();
+  portalEvolution.reset();
+  clearTimeout(deadline);
+}).catch(error=>{console.error(error);process.exitCode=1});
 '''
     nav = PortalAssets()
     nav.feed(source)

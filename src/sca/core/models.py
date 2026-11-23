@@ -129,6 +129,9 @@ class EventType(StrEnum):
     # Task output directories
     OUTPUT_WRITTEN = "output.written"
 
+    # Live conversation
+    AGENT_ACTIVITY = "agent.activity"
+
 
 class Event(BaseModel):
     task_id: UUID
@@ -268,6 +271,9 @@ class AgentEventType(StrEnum):
     USAGE = "usage"
     ERROR = "error"
     TURN_COMPLETED = "turn_completed"
+
+    # Live conversation
+    ACTIVITY = "activity"
 
 
 class AgentEvent(BaseModel):

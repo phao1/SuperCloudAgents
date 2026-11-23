@@ -27,6 +27,8 @@ def test_transcript():
     assert "-    return sum(xs) / len(xs) + 1" in patch.data["changes"][0]["patch"]
     assert sum(e.data["cached_input_tokens"] for e in events if e.type == "usage") == 23936
     assert any(e.type == "tool" and e.data["name"] == "read" for e in events)
+    retries = [event.data["retry_attempt"] for event in events if event.data.get("operation") == "model_retry"]
+    assert retries == [2, 3]
 
 
 @pytest.mark.parametrize(

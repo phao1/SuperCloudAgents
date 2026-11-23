@@ -413,7 +413,7 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  await assert.rejects(api('/portal/config'),/权限不足/);
  global.fetch=async()=>({status:401});
  await assert.rejects(api('/portal/config'),/认证失败/);
-})().catch(e=>{console.error(e);process.exitCode=1});
+})().finally(()=>portalTasks.resetTask()).catch(e=>{console.error(e);process.exitCode=1});
 '''
     path = tmp_path / 'portal.cjs'
     static = Path('src/sca/api/static')

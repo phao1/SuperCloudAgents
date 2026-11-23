@@ -363,6 +363,9 @@ class Settings(BaseSettings):
             return self.max_parallel_agents
         return _auto_parallel_agents(self.agent_memory_mb)
 
+    # Live conversation
+    stall_warn_s: int = Field(default=120, gt=0)
+
 
 # Local source mode
 SOURCE_OPENCODE_VERSION = "2.3.0-sca.0"

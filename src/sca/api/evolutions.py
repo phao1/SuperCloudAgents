@@ -1,6 +1,7 @@
 """Admin API for eval-tenant evolution and champion rollback."""
 
 import asyncio
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated
 from uuid import UUID, uuid4
@@ -16,6 +17,8 @@ from sca.api.authz import authorize
 from sca.api.conversation import ConversationPage, evolution_message, evolution_page
 from sca.api.evals import require_eval
 from sca.api.guest_history import history_payload
+from sca.api.live_evolution import evolution_live
+from sca.api.live_status import LiveSnapshot
 from sca.api.model_access import require_model
 from sca.config import get_settings
 from sca.core.models import Principal
@@ -141,6 +144,21 @@ async def evolution_dag(evolution_id: UUID, request: Request, user: EvolutionHis
     except NoResultFound:
         raise HTTPException(404, '演进记录不存在') from None
     return history_payload(user, build_evolution_dag(history).model_dump())
+
+
+@router.get('/evolutions/{evolution_id}/live', response_model_exclude_none=True)
+async def read_evolution_live(
+    evolution_id: UUID, request: Request, response: Response, user: ConversationReader,
+) -> LiveSnapshot:
+    store = scoped(request, user)
+    try:
+        history = await store.get_evolution_dag_history(evolution_id)
+    except NoResultFound:
+        raise HTTPException(404, '演进记录不存在') from None
+    settings = request.app.state.settings
+    snapshot = await evolution_live(store, history, settings.data_dir, datetime.now(UTC), settings.stall_warn_s)
+    response.headers['Cache-Control'] = 'no-store'
+    return LiveSnapshot.model_validate(history_payload(user, snapshot.model_dump(exclude_none=True)))
 
 
 class Decision(BaseModel):

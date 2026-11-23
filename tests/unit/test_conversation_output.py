@@ -1,5 +1,5 @@
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -51,7 +51,7 @@ async def test_conversation_reports_plan_cap_and_labeled_subtask_progress():
     page = await project(task, events)
     plan, start, finish = [item for item in page.items if item.kind.startswith(('plan.', 'subtask.'))]
     assert plan.text == '规划完成 · 2 个子任务，最多 2 个并发'
-    assert (start.text, finish.text) == ('compile · 开始', 'compile · 完成')
+    assert (start.text, finish.text) == ('子任务 compile 开始', '子任务 compile 完成')
     assert start.backend == finish.backend == 'dsh'
     assert start.dag_node_id == finish.dag_node_id == f'task:{task.id}/subtask:compile'
 
@@ -67,6 +67,40 @@ async def test_conversation_projects_lane_labels_for_progress_and_replies():
     items = [item for item in page.items if item.kind in ('reply', 'subtask.started', 'subtask.completed')]
     assert len(items) == 3
     assert all(item.agent_lane == 2 and item.agent_label == lane['agent_label'] for item in items)
+
+
+async def test_task_milestones_and_commands_keep_their_timings_across_pages():
+    task, events = history('dsh', [
+        ('plan.started', {'subtask': None, 'attempt': 1}),
+        ('plan.completed', {'subtask': None, 'attempt': 1}),
+        ('subtask.queued', {}),
+        ('subtask.started', {}),
+        ('sandbox.created', {'duration_s': 1.5}),
+        ('setup.completed', {'command': 'pip install -r requirements.txt', 'duration_s': 2.2, 'exit_code': 0}),
+        ('agent.turn_started', {}),
+        ('agent.activity', {'operation': 'command', 'status': 'started', 'call_id': 'test'}),
+        ('agent.command', {'command': 'pytest -q', 'exit_code': 1, 'call_id': 'test'}),
+        ('agent.turn_completed', {'cost_usd': .003}),
+        ('agent.activity', {'operation': 'settle', 'status': 'completed', 'duration_s': 2.9}),
+        ('verification.started', {}),
+        ('verification.completed', {'passed': False, 'command': 'pytest -q', 'output_tail': 'assert 1 == 2'}),
+        ('subtask.completed', {'passed': False}),
+    ])
+    for event, t in zip(events, [0, 1, 32, 33, 73, 75, 78, 79, 82, 91, 111, 115, 116, 120.1, 121], strict=True):
+        event.created_at = NOW + timedelta(seconds=t)
+    page = await project(task, events)
+    items = {item.kind: item for item in page.items}
+    assert items['plan.completed'].duration_s == 31
+    assert items['subtask.started'].duration_s == 40
+    assert items['sandbox.created'].duration_s == 1.5 and items['setup.completed'].duration_s == 2.2
+    assert items['agent.turn_completed'].duration_s == 32
+    assert items['agent.activity'].duration_s == 2.9
+    assert items['subtask.completed'].duration_s == 48 and items['subtask.completed'].cost_usd == .003
+    failed = items['verification.completed']
+    assert failed.duration_s == 4.1 and failed.output_tail == 'assert 1 == 2' and failed.command == 'pytest -q'
+    assert items['operations'].activity.operations[0].duration_s == 9
+    after_tool_start = await project(task, events, after=9, limit=1)
+    assert after_tool_start.items[0].activity.operations[0].duration_s == 9
 
 
 def backend_events(backend: str) -> list[AgentEvent]:

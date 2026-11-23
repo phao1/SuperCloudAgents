@@ -54,12 +54,13 @@ async def test_local_stream_mapping(tmp_path):
     events = [event async for event in agent.run_turn(
         None, "container", ctx, "hello", session_id=None, timeout_s=5)]
     assert [event.type for event in events] == [
-        "session_started", "command", "message", "usage", "usage", "turn_completed"]
+        "session_started", "activity", "command", "message", "usage", "usage", "turn_completed"]
     assert events[-1].data["final_message"] == "done"
     assert events[-2].data["brain_wall_time_ms"] >= 0
     assert events[-2].data["total_model_call_ms"] == 60
     assert events[-2].data["total_tool_ms"] == 30
-    assert events[1].data["started_at_ms"] == 160
+    assert events[1].data["operation"] == "model"
+    assert events[2].data["started_at_ms"] == 160
 
 
 @pytest.mark.asyncio
@@ -129,11 +130,12 @@ def test_recorded_timing():
          "state": {"time": {"start": 160, "end": 190}}}},
         {"type": "step_finish", "timestamp": 200, "part": {"messageID": "m"}},
     ]
-    events = [event for raw in records for event in parse_opencode_line(json.dumps(raw), steps)]
-    assert events[0].data["duration_ms"] == 30
-    assert events[1].data["model_call_duration_ms"] == 60
-    assert events[1].data["started_at_ms"] == 100
-    assert events[1].data["ended_at_ms"] == 200
+    start, command, usage = [event for raw in records for event in parse_opencode_line(json.dumps(raw), steps)]
+    assert start.type == "activity" and start.data["operation"] == "model"
+    assert command.data["duration_ms"] == 30
+    assert usage.data["model_call_duration_ms"] == 60
+    assert usage.data["started_at_ms"] == 100
+    assert usage.data["ended_at_ms"] == 200
 
 
 def test_materialize_version_and_prune(tmp_path):

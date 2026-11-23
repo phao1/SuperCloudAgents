@@ -180,6 +180,11 @@ class CodingActivities(KernelActivities):
 
     @activity.defn(name="coding.prepare_mirror")
     async def prepare_mirror(self, task_id: str) -> WorkspaceInfo:
+        async with self._live_task(task_id, "workspace"):
+            return await self._prepare_mirror(task_id)
+
+    async def _prepare_mirror(self, task_id: str) -> WorkspaceInfo:
+        started = time.monotonic()
         await self._ensure_state(task_id)
         spec = await self._spec(task_id)
         ws = self._workspace(task_id)
@@ -199,7 +204,7 @@ class CodingActivities(KernelActivities):
         await self.store.append_event(
             task_id,
             EventType.WORKSPACE_PREPARED,
-            {**asdict(info), "mirror_only": True},
+            {**asdict(info), "mirror_only": True, "duration_s": time.monotonic() - started},
             dedup_key="workspace.prepared",
         )
         await self._save_state(task_id, 0, info.base_sha)
@@ -212,28 +217,34 @@ class CodingActivities(KernelActivities):
         child = ChildActivities(self, inp.name, inp.agent)
         await self._ensure_state(inp.task_id)
         if inp.action == "prepare":
-            await child.record_started(inp.task_id)
-            await child._ensure_state(inp.task_id)
-            parent = await self.store.get_task(inp.task_id)
-            ws = child._workspace(inp.task_id)
-            task = await child.store.get_task(inp.task_id)
-            if not task.result.get("base_sha"):
-                await ws.prepare(
-                    str(self._workspace(inp.task_id).mirror), parent.result["base_sha"]
-                )
-                await child.store.update_result(
-                    inp.task_id, {"base_sha": parent.result["base_sha"], "branch": ws.branch}
-                )
-            await child._save_state(inp.task_id, 0, parent.result["base_sha"])
-            await child.create_sandbox(inp.task_id)
+            async with child._live_task(inp.task_id, "workspace"):
+                await child.record_started(inp.task_id)
+                await child._ensure_state(inp.task_id)
+                parent = await self.store.get_task(inp.task_id)
+                ws = child._workspace(inp.task_id)
+                task = await child.store.get_task(inp.task_id)
+                if not task.result.get("base_sha"):
+                    await ws.prepare(
+                        str(self._workspace(inp.task_id).mirror), parent.result["base_sha"]
+                    )
+                    await child.store.update_result(
+                        inp.task_id, {"base_sha": parent.result["base_sha"], "branch": ws.branch}
+                    )
+                await child._save_state(inp.task_id, 0, parent.result["base_sha"])
+                await child.create_sandbox(inp.task_id)
             return {}
         return await child.run_step(inp)
 
     @activity.defn(name="coding.merge_subtasks")
     async def merge_subtasks(self, inp: MergeInput) -> list[dict]:
+        async with self._live_task(inp.task_id, "merge"):
+            return await self._merge_subtasks(inp)
+
+    async def _merge_subtasks(self, inp: MergeInput) -> list[dict]:
         from sca.kinds.coding.subtasks import subtask_sources
         from sca.workspace.merge import merge_subtasks
 
+        started = time.monotonic()
         await self._ensure_state(inp.task_id)
         task = await self.store.get_task(inp.task_id)
         base = task.result["base_sha"]
@@ -270,7 +281,7 @@ class CodingActivities(KernelActivities):
         await self.store.append_event(
             inp.task_id,
             EventType.SUBTASKS_MERGED,
-            {"subtasks": statuses},
+            {"subtasks": statuses, "duration_s": time.monotonic() - started},
             dedup_key="subtasks.merged",
         )
         return statuses
@@ -287,6 +298,10 @@ class CodingActivities(KernelActivities):
 
     @activity.defn(name="coding.prepare_workspace")
     async def prepare_workspace(self, task_id: str) -> WorkspaceInfo:
+        async with self._live_task(task_id, "workspace"):
+            return await self._prepare_workspace(task_id)
+
+    async def _prepare_workspace(self, task_id: str) -> WorkspaceInfo:
         if await self._ensure_state(task_id):
             task = await self.store.get_task(task_id)
             return WorkspaceInfo(task.result["base_sha"], self._workspace(task_id).branch)
@@ -344,7 +359,7 @@ class CodingActivities(KernelActivities):
         await self.store.append_event(
             task_id,
             EventType.WORKSPACE_PREPARED,
-            {"base_sha": info.base_sha, "branch": info.branch, **usage},
+            {"base_sha": info.base_sha, "branch": info.branch, **usage, "duration_s": time.monotonic() - started},
             dedup_key="workspace.prepared",
         )
         await self._save_state(task_id, 0, info.base_sha)
@@ -407,6 +422,10 @@ class CodingActivities(KernelActivities):
 
     @activity.defn(name="coding.checkpoint_workspace")
     async def checkpoint_workspace(self, inp: StepInput) -> CheckpointResult:
+        async with self._live_task(inp.task_id, "checkpoint"):
+            return await self._checkpoint_workspace(inp)
+
+    async def _checkpoint_workspace(self, inp: StepInput) -> CheckpointResult:
         await self._ensure_state(inp.task_id)
         task = await self.store.get_task(inp.task_id)
         sandbox_id = await self._sandbox_id(inp.task_id)
@@ -442,6 +461,10 @@ class CodingActivities(KernelActivities):
 
     @activity.defn(name="coding.run_verification")
     async def run_verification(self, inp: StepInput) -> VerifyResult:
+        async with self._live_task(inp.task_id, "verification"):
+            return await self._run_verification(inp)
+
+    async def _run_verification(self, inp: StepInput) -> VerifyResult:
         task_id, turn = inp.task_id, inp.turn
         if await self._ensure_state(task_id):
             await self.sandbox.destroy(await self._sandbox_id(task_id))
@@ -464,6 +487,7 @@ class CodingActivities(KernelActivities):
             return result
 
         sandbox_id = await self._sandbox_id(task_id)
+        started = time.monotonic()
         await self.store.append_event(
             task_id, EventType.VERIFICATION_STARTED,
             {"turn": turn, "checks": len(commands), **self._activity_route()},
@@ -471,10 +495,7 @@ class CodingActivities(KernelActivities):
         )
         # All checks run at the same time; the turn is judged on all of them.
         runs = await asyncio.gather(
-            *(
-                self._run(sandbox_id, ["bash", "-lc", command], timeout_s=25 * 60)
-                for command in commands
-            )
+            *(self._verify_command(sandbox_id, command) for command in commands)
         )
         checks = [
             {
@@ -482,17 +503,18 @@ class CodingActivities(KernelActivities):
                 "passed": exit_event.exit_code == 0,
                 "exit_code": exit_event.exit_code,
                 "timed_out": exit_event.timed_out,
+                "duration_s": duration_s,
             }
-            for command, (exit_event, _) in zip(commands, runs, strict=True)
+            for command, (exit_event, _, duration_s) in zip(commands, runs, strict=True)
         ]
         many = len(commands) > 1
         log = "\n".join(
             (f"===== {command} (exit {exit_event.exit_code}) =====\n" if many else "") + output
-            for command, (exit_event, output) in zip(commands, runs, strict=True)
+            for command, (exit_event, output, _) in zip(commands, runs, strict=True)
         )
         failed = [
             (command, exit_event, output)
-            for command, (exit_event, output) in zip(commands, runs, strict=True)
+            for command, (exit_event, output, _) in zip(commands, runs, strict=True)
             if exit_event.exit_code != 0
         ]
         # What the agent is shown: only the checks that failed.
@@ -519,6 +541,7 @@ class CodingActivities(KernelActivities):
                 "turn": turn,
                 "command": " && ".join(commands) if many else commands[0],
                 "checks": checks,
+                "duration_s": time.monotonic() - started,
                 "passed": result.passed,
                 "exit_code": result.exit_code,
                 "timed_out": any(c["timed_out"] for c in checks),
@@ -528,6 +551,11 @@ class CodingActivities(KernelActivities):
             dedup_key=f"turn{turn}.verify",
         )
         return result
+
+    async def _verify_command(self, sandbox_id: str, command: str) -> tuple[ExecExit, str, float]:
+        started = time.monotonic()
+        exit_event, output = await self._run(sandbox_id, ["bash", "-lc", command], timeout_s=25 * 60)
+        return exit_event, output, time.monotonic() - started
 
     @activity.defn(name="coding.request_ci")
     async def request_ci(self, inp: StepInput) -> CiRequest:
@@ -713,7 +741,8 @@ class CodingActivities(KernelActivities):
                     or task.result.get("history_imported") or not task.spec.get("output_dir")
                     or task.spec["output_dir"] != task.spec.get("repo_url")):
                 raise InvalidTaskError("仅本机部署支持输出目录")
-            return await asyncio.to_thread(write_output, self.settings, task, ws.mirror)
+            async with self._live_task(inp.task_id, "output"):
+                return await asyncio.to_thread(write_output, self.settings, task, ws.mirror)
 
         return await self._set_task_state(inp, write_output=deliver)
 

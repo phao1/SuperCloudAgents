@@ -3,9 +3,11 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sca.agents.live import activity_start
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider, closing_stream
 from sca.core.models import (
@@ -65,6 +67,8 @@ class FakeBackend:
         if session_id is None:
             yield AgentEvent(type="session_started", data={"session_id": f"fake-{ctx.task_id}"})
         if script is not None:
+            yield activity_start("command", script, "fake-script")
+            started = time.monotonic()
             output = ""
             result = None
             stream = sandbox.exec(
@@ -80,7 +84,8 @@ class FakeBackend:
                 raise AgentTurnError("Fake script timed out or did not exit")
             yield AgentEvent(
                 type="command",
-                data={"command": script, "exit_code": result.exit_code, "output_tail": output},
+                data={"command": script, "exit_code": result.exit_code, "output_tail": output,
+                      "call_id": "fake-script", "duration_s": time.monotonic() - started},
             )
         queue_path.write_text(json.dumps({"queue": queue, "current": None}), encoding="utf-8")
         yield AgentEvent(

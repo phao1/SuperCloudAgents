@@ -5,6 +5,7 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sca.agents.live import activity_start, operation_id
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider, closing_stream
@@ -32,11 +33,23 @@ def parse_codex_line(line: str) -> list[AgentEvent]:
     data = {}
     if kind == "thread.started":
         event_type, data = "session_started", {"session_id": raw.get("thread_id", "")}
-    elif kind == "item.completed":
+    elif kind in ("item.started", "item.completed"):
         item = raw.get("item")
         if not isinstance(item, dict):
             return []
-        match item.get("type"):
+        item_type, call_id = item.get("type"), item.get("id")
+        if kind == "item.started":
+            match item_type:
+                case "command_execution":
+                    return [activity_start("command", item.get("command"), call_id)]
+                case "file_change":
+                    changes = item.get("changes")
+                    first = changes[0] if isinstance(changes, list) and changes else None
+                    return [activity_start("edit", first.get("path") if isinstance(first, dict) else None, call_id)]
+                case "mcp_tool_call":
+                    return [activity_start("tool", item.get("tool"), call_id)]
+            return []
+        match item_type:
             case "agent_message":
                 event_type, data = "message", {"text": item.get("text", "")}
             case "command_execution":
@@ -50,6 +63,10 @@ def parse_codex_line(line: str) -> list[AgentEvent]:
                 )
             case "file_change":
                 event_type, data = "file_change", {"changes": item.get("changes", [])}
+            case "mcp_tool_call":
+                event_type, data = "tool", {"name": item.get("tool"), "status": item.get("status")}
+        if event_type in ("command", "file_change", "tool") and (id_ := operation_id(call_id)):
+            data["call_id"] = id_
     elif kind == "turn.completed":
         usage = raw.get("usage") or {}
         if not isinstance(usage, dict):

@@ -160,6 +160,8 @@ class Store:
         type: str,
         payload: dict,
         dedup_key: str | None = None,
+        *,
+        created_at: datetime | None = None,
     ) -> Event | None:
         task = await self._task(session, task_id)
         if task["events_archived_at"] is not None:
@@ -186,6 +188,7 @@ class Store:
                         type=type,
                         payload=payload,
                         dedup_key=dedup_key,
+                        **({"created_at": created_at} if created_at is not None else {}),
                     )
                     .returning(events)
                 )
@@ -3471,6 +3474,63 @@ class Store:
         from sca.core.models import EventType
 
         # Publish under the task lock after checking messages, before SSE can see a terminal state.
+        started = datetime.now(UTC)
         output = await write_output(Task.model_validate(dict(row)))
-        await self._event(session, row["id"], EventType.OUTPUT_WRITTEN, output, "output.written")
+        # Live conversation
+        finished = datetime.now(UTC)
+        await self._event(session, row["id"], EventType.OUTPUT_WRITTEN, {
+            **output, "duration_s": (finished - started).total_seconds(),
+        }, "output.written", created_at=finished)
         return output
+
+    # Live conversation
+
+    async def live_task_history(
+        self, task_id: UUID, types: frozenset[str],
+    ) -> tuple[Task, list[Event], datetime | None]:
+        from sqlalchemy.dialects.postgresql import array
+
+        if self.tenant_id is None:
+            raise ValueError("Live history requires a tenant")
+        async with self._transaction() as session:
+            row = await self._task(session, task_id)
+            task = Task.model_validate(dict(row))
+            if row["events_archived_at"] is not None:
+                from sca.archive import read_events
+
+                if self.objects is None:
+                    raise RuntimeError("Archived events require an object store")
+                history = await read_events(self.objects, task_id, result=task.result)
+                return task, [event for event in history if event.type in types], max(
+                    (event.created_at for event in history), default=None,
+                )
+            c = events.c
+            scope = (c.tenant_id == self.tenant_id, c.task_id == task_id)
+            last = await session.scalar(select(c.created_at).where(*scope).order_by(c.seq.desc()).limit(1))
+            payload = c.payload.op("-")(array(["raw", "prompt", "text", "final_message", "output_tail", "metadata"]))
+            rows = (await session.execute(select(
+                c.task_id, c.seq, c.type, payload.label("payload"), c.created_at,
+            ).where(*scope, c.type.in_(types)).order_by(c.seq))).mappings()
+            return task, [Event.model_validate(dict(event)) for event in rows], last
+
+    async def live_case_events(self, task_ids: list[UUID]) -> dict[UUID, datetime]:
+        if self.tenant_id is None:
+            raise ValueError("Live history requires a tenant")
+        if not task_ids:
+            return {}
+        c = events.c
+        query = select(c.task_id, func.max(c.created_at)).where(
+            c.tenant_id == self.tenant_id, c.task_id.in_(task_ids),
+        ).group_by(c.task_id)
+        async with self._transaction() as session:
+            return {id_: at for id_, at in (await session.execute(query)).all()}
+
+    async def live_evolution_event(self, evolution_id: UUID) -> datetime | None:
+        from sca.db.schema import evolution_events
+
+        if self.tenant_id is None:
+            raise ValueError("Live history requires a tenant")
+        c = evolution_events.c
+        query = self._conversation_events(evolution_id).with_only_columns(c.created_at)
+        async with self._transaction() as session:
+            return await session.scalar(query.order_by(c.id.desc()).limit(1))

@@ -64,6 +64,7 @@ from sca.kernel.interjection import (
 )
 from sca.kernel.kind import ExecutionSpec, get
 from sca.kernel.prompts import EvaluationSettings, render_prompt
+from sca.live_heartbeat import LaneScope, worker_activity
 from sca.observability import business_metrics, metric_guard
 from sca.orchestration.provider_errors import account_failure
 from sca.secrets import make_secret_provider
@@ -85,6 +86,8 @@ _AGENT_EVENT_TYPES = {
     AgentEventType.FILE_CHANGE: EventType.AGENT_FILE_CHANGE,
     AgentEventType.USAGE: EventType.AGENT_USAGE,
     AgentEventType.ERROR: EventType.AGENT_ERROR,
+    # Live conversation
+    AgentEventType.ACTIVITY: EventType.AGENT_ACTIVITY,
 }
 
 
@@ -681,10 +684,12 @@ class KernelActivities:
 
     @activity.defn
     async def create_sandbox(self, task_id: str) -> str:
-        sandbox_id, image = await self._create_sandbox(task_id)
-        payload = await self._sandbox_event_payload(sandbox_id, image)
+        started = time.monotonic()
+        async with self._live_task(task_id, "sandbox"):
+            sandbox_id, image = await self._create_sandbox(task_id)
+            payload = await self._sandbox_event_payload(sandbox_id, image)
         await self.store.append_event(
-            task_id, EventType.SANDBOX_CREATED, payload,
+            task_id, EventType.SANDBOX_CREATED, {**payload, "duration_s": time.monotonic() - started},
             dedup_key="sandbox.created",
         )
         return sandbox_id
@@ -731,6 +736,11 @@ class KernelActivities:
     @activity.defn
     async def restore_sandbox(self, inp: StepInput) -> None:
         """Bring back a released sandbox on the same workspace and session history."""
+        async with self._live_task(inp.task_id, "sandbox"):
+            await self._restore_sandbox(inp)
+
+    async def _restore_sandbox(self, inp: StepInput) -> None:
+        started = time.monotonic()
         spec = await self._spec(inp.task_id)
         sandbox_id, image = await self._create_sandbox(inp.task_id)
         setup = await self._setup_command(inp.task_id, spec)
@@ -749,7 +759,7 @@ class KernelActivities:
         await self.store.append_event(
             inp.task_id,
             EventType.SANDBOX_RESTORED,
-            {**payload, "after_turn": inp.turn},
+            {**payload, "after_turn": inp.turn, "duration_s": time.monotonic() - started},
             dedup_key=f"turn{inp.turn}.sandbox_restored",
         )
 
@@ -842,6 +852,10 @@ class KernelActivities:
 
     @activity.defn
     async def run_setup(self, task_id: str) -> None:
+        async with self._live_task(task_id, "setup"):
+            await self._run_setup(task_id)
+
+    async def _run_setup(self, task_id: str) -> None:
         if await self._ensure_state(task_id):
             await self.store.update_result(task_id, {"workspace_forked": False})
             await self.sandbox.destroy(await self._sandbox_id(task_id))
@@ -870,6 +884,7 @@ class KernelActivities:
                 "exit_code": exit_event.exit_code,
                 "timed_out": exit_event.timed_out,
                 "output_tail": tail(output),
+                "duration_s": time.monotonic() - setup_started,
                 "skipped": False,
             },
             dedup_key="setup.completed",
@@ -897,7 +912,8 @@ class KernelActivities:
 
     @activity.defn
     async def run_agent_turn(self, inp: TurnInput) -> TurnResult:
-        async with self._turn_heartbeats(interjectible=inp.interjectible):
+        async with (self._live_task(inp.task_id, "turn"),
+                    self._turn_heartbeats(interjectible=inp.interjectible)):
             return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
 
     @contextlib.asynccontextmanager
@@ -1119,55 +1135,61 @@ class KernelActivities:
             )
             turn_error = e
         finally:
-            if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
-                await self.store.append_event(task_id, "sandbox.transition",
-                    {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
-            if deferred and reserved:
-                if issued:
-                    blocked = False
+            settling = issued and not interrupted
+            settlement_started = time.monotonic()
+            indicator = self._live_task(task_id, "settle") if settling else contextlib.nullcontext()
+            async with indicator:
+                if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
+                    await self.store.append_event(task_id, "sandbox.transition",
+                        {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
+                if deferred and reserved:
+                    if issued:
+                        blocked = False
+                        try:
+                            blocked = await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
+                            if not blocked:
+                                raise GatewayError("virtual model key is missing before spend settlement")
+                            if not interrupted:
+                                spend = await self._settle_blocked_key(deferred, task_id, key_alias, task_kind)
+                                cost_final = True
+                        except asyncio.CancelledError:
+                            await note_interrupted()
+                            if not blocked:
+                                await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
+                            raise
+                        except GatewayError:
+                            if provider_error is None or not provider_error.is_account_error:
+                                raise
+                            activity.logger.warning("Could not finalize virtual model key after account failure")
+                    else:
+                        await self.store.clear_turn_spend(task_id, key_alias)
+                elif gateway and issued:
+                    finalize = getattr(gateway, "finalize_key", None)
+                    cancelled = None
                     try:
-                        blocked = await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
-                        if not blocked:
-                            raise GatewayError("virtual model key is missing before spend settlement")
-                        if not interrupted:
-                            spend = await self._settle_blocked_key(deferred, task_id, key_alias, task_kind)
-                            cost_final = True
-                    except asyncio.CancelledError:
-                        await note_interrupted()
-                        if not blocked:
-                            await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
-                        raise
+                        settle = asyncio.create_task(finalize(key_alias) if finalize else gateway.revoke_key(key_alias))
+                        try:
+                            charge = await asyncio.shield(settle)
+                        except asyncio.CancelledError as exc:
+                            cancelled = exc
+                            await note_interrupted()
+                            charge = await settle
+                        if finalize is not None:
+                            spend, cost_final = charge
+                        else:
+                            spend = charge
                     except GatewayError:
                         if provider_error is None or not provider_error.is_account_error:
                             raise
                         activity.logger.warning("Could not finalize virtual model key after account failure")
-                else:
-                    await self.store.clear_turn_spend(task_id, key_alias)
-            elif gateway and issued:
-                finalize = getattr(gateway, "finalize_key", None)
-                cancelled = None
-                try:
-                    settle = asyncio.create_task(finalize(key_alias) if finalize else gateway.revoke_key(key_alias))
-                    try:
-                        charge = await asyncio.shield(settle)
-                    except asyncio.CancelledError as exc:
-                        cancelled = exc
-                        await note_interrupted()
-                        charge = await settle
-                    if finalize is not None:
-                        spend, cost_final = charge
-                    else:
-                        spend = charge
-                except GatewayError:
-                    if provider_error is None or not provider_error.is_account_error:
-                        raise
-                    activity.logger.warning("Could not finalize virtual model key after account failure")
-                if spend:
-                    await self.store.add_usage(task_id, {"cost_micro_usd": round(spend * 1e6)})
-                    with metric_guard():
-                        business_metrics.cost.labels(task_kind).inc(spend)
-                if cancelled is not None:
-                    raise cancelled
+                    if spend:
+                        await self.store.add_usage(task_id, {"cost_micro_usd": round(spend * 1e6)})
+                        with metric_guard():
+                            business_metrics.cost.labels(task_kind).inc(spend)
+                    if cancelled is not None:
+                        raise cancelled
+            if settling:
+                await self._record_settlement(task_id, turn, key, time.monotonic() - settlement_started)
 
         if turn_error is not None:
             if provider_error is not None and provider_error.is_account_error:
@@ -1201,11 +1223,13 @@ class KernelActivities:
     async def _reserve_turn_spend(
         self, task_id: str, alias: str, cap: float | None, event: dict,
     ) -> float | None:
-        while True:
-            budget, waiting = await self.store.reserve_turn_spend(task_id, alias, cap, event)
-            if not waiting:
-                return budget
-            await asyncio.sleep(0.25)
+        budget, waiting = await self.store.reserve_turn_spend(task_id, alias, cap, event)
+        if waiting:
+            async with self._live_task(task_id, "settle"):
+                while waiting:
+                    await asyncio.sleep(0.25)
+                    budget, waiting = await self.store.reserve_turn_spend(task_id, alias, cap, event)
+        return budget
 
     async def _settle_blocked_key(
         self, gateway: DeferredSpendGateway, task_id: str, alias: str, task_kind: str,
@@ -1222,6 +1246,14 @@ class KernelActivities:
 
     @activity.defn
     async def settle_turn_spend(self, inp: SettleTurnSpend) -> None:
+        async with self._live_task(inp.task_id, "settle", scope=(inp.scope or "", None)):
+            started = time.monotonic()
+            await self._settle_turn_spend(inp)
+        elapsed = time.monotonic() - started
+        if elapsed >= 1:
+            await self._record_settlement(inp.task_id, inp.turn, f"turn{inp.turn}.deferred", elapsed, inp.scope)
+
+    async def _settle_turn_spend(self, inp: SettleTurnSpend) -> None:
         gateway = self.gateway
         if not isinstance(gateway, DeferredSpendGateway):
             raise GatewayError("virtual model key settlement requires its model gateway")
@@ -1354,6 +1386,10 @@ class KernelActivities:
 
     @activity.defn
     async def run_acceptance(self, task_id: str) -> bool | None:
+        async with self._live_task(task_id, "verification"):
+            return await self._run_acceptance(task_id)
+
+    async def _run_acceptance(self, task_id: str) -> bool | None:
         import tempfile
         from uuid import UUID
 
@@ -1511,3 +1547,23 @@ class KernelActivities:
     @activity.defn
     async def apply_task_messages(self, inp: ApplyMessages) -> None:
         await self.store.apply_task_messages(inp.task_id, inp.message_ids)
+
+    # Live conversation
+    def _live_scope(self) -> LaneScope:
+        return ("", None)
+
+    def _live_task(
+        self, task_id: str, operation: str, *, scope: LaneScope | None = None,
+    ) -> contextlib.AbstractAsyncContextManager[None]:
+        return worker_activity(self.settings.data_dir, "task", task_id, operation, scope or self._live_scope())
+
+    async def _record_settlement(
+        self, task_id: str, turn: int, key: str, duration_s: float, scope: str | None = None,
+    ) -> None:
+        with contextlib.suppress(Exception):
+            await self.store.append_event(
+                task_id, EventType.AGENT_ACTIVITY,
+                {"turn": turn, "operation": "settle", "status": "completed", "duration_s": duration_s,
+                 **({"subtask": scope} if scope else {})},
+                dedup_key=f"{key}.{scope or 'main'}.settle.completed",
+            )

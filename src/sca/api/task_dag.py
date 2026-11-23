@@ -1,17 +1,21 @@
 """Read the execution graph using the same tenant scope as task history."""
 
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from sca.api.authz import authorize
 from sca.api.conversation import ConversationPage, task_page
-from sca.api.guest_history import history_dag
+from sca.api.guest_history import history_dag, history_payload
+from sca.api.live_status import LiveSnapshot
+from sca.api.live_task import LIVE_TASK_EVENTS, TaskTrace
 from sca.core.errors import NotFoundError
 from sca.core.models import Event, Principal, Task
 from sca.core.task_dag import TaskDAG, build_task_dag, linked_tasks
 from sca.db.repo import Store
+from sca.live_heartbeat import read_beats
 
 router = APIRouter(prefix="/v1")
 
@@ -61,3 +65,18 @@ async def read_task_conversation(
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
 ) -> ConversationPage:
     return await task_page(request.app.state.store.for_tenant(user.tenant_id), task_id, user, cursor, limit)
+
+
+@router.get('/tasks/{task_id}/live', response_model_exclude_none=True)
+async def read_task_live(
+    task_id: UUID, request: Request, response: Response,
+    user: Annotated[Principal, Depends(authorize('read', guest=True))],
+) -> LiveSnapshot:
+    settings = request.app.state.settings
+    store = request.app.state.store.for_tenant(user.tenant_id)
+    task, events, last_event = await store.live_task_history(task_id, LIVE_TASK_EVENTS)
+    snapshot = TaskTrace(task, events, settings.agent_backend).snapshot(
+        datetime.now(UTC), settings.stall_warn_s, last_event, read_beats(settings.data_dir, 'task', task_id),
+    )
+    response.headers['Cache-Control'] = 'no-store'
+    return LiveSnapshot.model_validate(history_payload(user, snapshot.model_dump(exclude_none=True)))

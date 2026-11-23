@@ -2,7 +2,6 @@ import asyncio
 import io
 import json
 import tarfile
-import time
 from dataclasses import replace
 from types import SimpleNamespace
 from uuid import UUID
@@ -17,6 +16,7 @@ from sca.core.errors import WorkspaceError
 from sca.core.models import TaskState
 from sca.kernel import activities as kernel_activities
 from sca.kernel.workflow import TaskWorkflow
+from sca.kinds.coding import activities as coding_activities
 from sca.kinds.coding.best_of import Candidate, DiffStats, allocate_attempts, choose_candidate
 from sca.kinds.coding.kind import CodingKind
 from sca.kinds.coding.spec import CodingSpec
@@ -243,7 +243,9 @@ async def test_normal_tasks_emit_identical_event_payloads(tmp_path, best_of_repo
     legacy = make_harness(tmp_path / "prev", best_of_repo, auto_finish=True)
     current = make_harness(tmp_path / "next", best_of_repo, auto_finish=True, best_of=None)
     assert "best_of" not in current.store.task.spec and "fork_from_snapshot" not in current.store.task.spec
-    monkeypatch.setattr(kernel_activities, "time", SimpleNamespace(time=lambda: 10, monotonic=time.monotonic))
+    clock = SimpleNamespace(time=lambda: 10, monotonic=lambda: 10)
+    monkeypatch.setattr(kernel_activities, "time", clock)
+    monkeypatch.setattr(coding_activities, "time", clock)
     assert await LocalWorkflow(monkeypatch, legacy, TaskWorkflow()).run() == "SUCCEEDED"
     assert await LocalWorkflow(monkeypatch, current).run() == "SUCCEEDED"
     assert json.dumps(current.store.events) == json.dumps(legacy.store.events)

@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from sca.agents.live import activity_start
 from sca.agents.provider_errors import model_error_event
 from sca.config import DSH_DEFAULT_MAX_OUTPUT_TOKENS
 from sca.core.errors import GATEWAY_BUDGET_REFUSAL, AgentTurnError, ModelBudgetRefused, SandboxError
@@ -240,6 +241,8 @@ class _RunEvents:
                                                      "input": inputs, "status": "started"})
         elif kind == "tool_result":
             return self.tool_result(raw)
+        elif kind == "status" and raw.get("phase") == "step_start":
+            return activity_start("model")
         elif kind == "status" and raw.get("phase") == "step_end":
             event = _usage(raw.get("usage"))
             if event is not None and event.model_call_succeeded:

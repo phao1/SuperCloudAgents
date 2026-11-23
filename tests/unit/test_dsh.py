@@ -206,16 +206,17 @@ async def test_parses_headless_events_and_redacts_nested_payloads(ctx, shell):
         final(text="Final " + KEY), ExecExit(exit_code=0),
     )
     events = await collect(DshBackend("deepseek-flash"), sandbox, ctx)
-    assert [e.type for e in events] == ["session_started", "message", "tool", "command", "tool",
+    assert [e.type for e in events] == ["session_started", "activity", "message", "tool", "command", "tool",
                                        "file_change", "tool", "usage", "turn_completed"]
-    assert events[2].data["input"]["meta"] == [{"[REDACTED]": "[REDACTED]"}]
-    assert events[3].data["name"] == shell
-    assert events[3].data["command"] == "echo [REDACTED]" and events[3].data["exit_code"] is None
-    assert events[3].data["output_tail"].startswith("…") and events[3].data["output_tail"].endswith("[REDACTED]")
-    assert events[5].data["changes"] == [{"path": "demo.py", "kind": "update"}]
-    assert events[6].data["is_error"] is True
-    assert events[7].data == {"input_tokens": 12, "cached_input_tokens": 3, "output_tokens": 2}
-    assert events[7].model_call_succeeded
+    assert events[1].data["operation"] == "model"
+    assert events[3].data["input"]["meta"] == [{"[REDACTED]": "[REDACTED]"}]
+    assert events[4].data["name"] == shell
+    assert events[4].data["command"] == "echo [REDACTED]" and events[4].data["exit_code"] is None
+    assert events[4].data["output_tail"].startswith("…") and events[4].data["output_tail"].endswith("[REDACTED]")
+    assert events[6].data["changes"] == [{"path": "demo.py", "kind": "update"}]
+    assert events[7].data["is_error"] is True
+    assert events[8].data == {"input_tokens": 12, "cached_input_tokens": 3, "output_tokens": 2}
+    assert events[8].model_call_succeeded
     assert events[-1].data == {"final_message": "Final [REDACTED]"}
     assert KEY not in str(events)
 
