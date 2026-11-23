@@ -397,20 +397,20 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/events" \
 curl -fsS "$SCA_API_URL/v1/models" -H "Authorization: Bearer $SCA_API_TOKEN"
 curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/dag" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
-curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
-  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"next","text":"优先验证边界条件"}'
-curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
-  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"now","text":"本代改为优先检查空输入"}'
 ```
 
 ### 对话与审批
 
 演进详情的「对话」显示候选假设、提议依据、覆盖变更概况与开发集及留出集的评测结果。
-桌面端的对话面板与 DAG 并排，消息可单独滚动。屏幕宽度为 900 像素或更窄时，DAG 排在对话上方。
-任务对话提供「排队发送」和「打断并发送」。输入框随内容增高，最多显示六行。运行结束后，
-底部显示「任务已结束」或「演进已结束」。[任务插话使用说明](operations.md#运行中插话)
+桌面端的对话面板与 DAG 并排，消息可单独滚动。对话面板较宽时，输入框和两个发送按钮同排并底部对齐。
+屏幕宽度为 900 像素或更窄时，DAG 排在对话上方，两个发送按钮并排放在输入框下方。
+输入框随内容增高，最多显示六行，按 Shift+Enter 换行。任务对话按 Enter「排队发送」，
+按 Ctrl/Cmd+Enter「打断并发送」。运行结束后，底部显示「任务已结束」或「演进已结束」。
+[任务插话使用说明与 API 示例](operations.md#运行中插话)
 
-演进对话可选择「下一代生效」（`next`，旧 API 的 `guidance` 仍可用）或「立即生效」（`now`）。
+演进对话按 Enter 提交「下一代生效」（`next`，旧 API 的 `guidance` 仍可用），
+按 Ctrl/Cmd+Enter 提交「立即生效」（`now`）。展开「运行控制」可暂停或恢复演进、在本代结束后停止、
+跳过当前候选或调整剩余预算。
 立即生效会中止本代剩余的评测，沿用同一代编号重新提议。发出单代理用例的取消请求后，旧评测可在后台结算。
 旧评测的已结算费用和未结算用例的单题预算会抵扣可用额度，结算后按实测费用校正。
 剩余额度不足以启动一个用例时，新评测会等结算完成再检查预算。
@@ -418,6 +418,13 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
 达到剩余预算下限时结束演进。暂停期间发送的指引会在恢复后使用。新版 Worker 启动的演进支持立即生效。
 首次基线会先完成。已发出的反思与提议请求会返回，替换时跳过这些提议对应的评测。
 提议活动开始使用指引时，消息即可显示「已应用于第 N 代提议」。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"next","text":"优先验证边界条件"}'
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"now","text":"本代改为优先检查空输入"}'
+```
 
 待审卡片固定在消息区顶部，也可通过侧栏「待审批」打开。展开「变更与审核详情」可查看文件和补丁，
 点击「要求修改」可填写并提交修改意见。提交决定后在消息列表查看带时间的简短记录。
@@ -464,5 +471,7 @@ curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/review" \
 对话布局回归覆盖了插话方式、审核详情展开、审批记录收起、结束提示与路由切换。
 模拟工作流仍在等待审批时，待审数量会先更新，任务再次进入审核后会重新计入。
 本次单元回归通过 1,309 项，跳过 23 项。相关集成测试通过 3 项，另有 11 项因 PostgreSQL 套接字受限而跳过。
-Playwright 布局用例检查 1440×1000 和 390 像素视口。当前沙箱拒绝启动 Chromium，
-这两种尺寸仍待浏览器验证。
+
+发送区修复后，用 Playwright 查看了运行中任务和演进在 1440 与 390 像素宽度下的截图。
+两种尺寸下发送按钮底部对齐，输入框最多显示六行，展开演进的运行控制后页面仍无横向滚动。
+Chromium 在受限沙箱中通过临时启动适配运行，两项对话浏览器用例通过 DOM 模拟输入验证。
