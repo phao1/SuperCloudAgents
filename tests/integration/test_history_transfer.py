@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from sca.api.app import create_app
 from sca.api.auth import StaticTokenAuthenticator
-from sca.archive import archive_task
+from sca.archive import archive_key, archive_task
 from sca.config import Settings
 from sca.core.models import TaskState
 from sca.db import schema as db
@@ -201,15 +201,18 @@ async def seed_history(engine, objects, *, agent_backend: str | None = "opencode
     return ids
 
 
-@pytest.mark.parametrize("source_revision", ["0024", "0025"])
+@pytest.mark.parametrize(("source_revision", "shared_objects"), [
+    ("0024", False), ("0025", False), ("0025", True),
+])
 async def test_history_round_trip_and_existing_history_surfaces(
-    history_databases, source_revision, tmp_path, monkeypatch,
+    history_databases, source_revision, shared_objects, tmp_path, monkeypatch,
 ):
     linux, windows = history_databases
     source = LocalObjectStore(tmp_path / "linux" / "objects")
-    target = LocalObjectStore(tmp_path / "windows" / "objects")
+    target = source if shared_objects else LocalObjectStore(tmp_path / "windows" / "objects")
     backend = None if source_revision == "0024" else "dsh"
     ids = await seed_history(linux, source, agent_backend=backend)
+    original_events = await source.get(archive_key(ids["child"]))
     path = tmp_path / "history.zip"
     manifest = await export_history(linux, source, path)
     assert manifest.schema_revision == source_revision
@@ -224,6 +227,7 @@ async def test_history_round_trip_and_existing_history_surfaces(
 
     counts = await import_history(windows, target, path, default_quota=9)
     assert counts["objects"] == 2 and counts["tasks"] == 4
+    assert await source.get(archive_key(ids["child"])) == original_events
     assert not any((await import_history(windows, target, path)).values())
     store = Store(make_sessionmaker(windows), objects=target)
     scoped = store.for_tenant("eval")

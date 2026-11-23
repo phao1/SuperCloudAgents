@@ -533,6 +533,9 @@ body[data-trace-expanded] { overflow: hidden; }
         <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
       </div>
       <div id="model-providers" class="panel" hidden></div>
+      <!-- Temporary runtime settings mount -->
+      <div data-access="eval-admin" hidden><div id="overview-runtime" class="panel" hidden></div></div>
+      <!-- End temporary runtime settings mount -->
       <div class="cards" data-access="eval" hidden>
         <article class="feature">
           <h2>系统提示词自演进</h2>
@@ -951,6 +954,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/assets/portal-ui.js"></script>
 <script src="/portal/assets/portal-conversation.js"></script>
 <script src="/portal/assets/portal-models.js"></script>
+<script src="/portal/assets/portal-runtime.js"></script>
 <script src="/portal/assets/portal-markdown.js"></script>
 <script src="/portal/assets/portal-tasks.js"></script>
 <script src="/portal/assets/portal-evolution.js"></script>
@@ -2563,6 +2567,8 @@ async function showRoute({page,current,parts}){
   evidenceView=null;
   if(current!=='evals'||!parts[0])appliedPreset=null;
   activeRun=current==='runs'&&parts[0]?decodeURIComponent(parts[0]):null;
+  // Temporary runtime settings mount
+  if(current==='overview'&&portalUI.can('eval-admin'))window.SCAPortalRuntime?.mount($('overview-runtime'));
   await loadPage(current,parts);
 }
 async function loadTaskRoute(parts){

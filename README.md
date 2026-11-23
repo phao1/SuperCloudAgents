@@ -87,8 +87,10 @@ bash scripts/portal_demo.sh status
 bash scripts/portal_demo.sh down
 ```
 
-也可设置 `SCA_RUNTIME_MODE=docker` 或 `SCA_RUNTIME_MODE=source`。
-省略两种设置时，脚本优先使用可用的 Docker，否则会提示并进入源码模式。
+在 Linux 和 macOS 上，本机 `eval` 管理员可在 Portal「概览 → 运行模式」切换。确认后 Portal
+自动重启并迁移历史。后续运行 `bash scripts/portal_demo.sh up` 会使用保存的首选模式，
+`--mode` 优先于 `SCA_RUNTIME_MODE`，两者均覆盖首选模式。未指定或保存模式时，脚本优先使用
+可用的 Docker，否则提示并进入源码模式。[切换步骤与 API](docs/operations.md#切换运行模式)
 源码模式的系统依赖和 API 示例见 [运维文档](docs/operations.md#源码模式)。
 Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
 [Windows 源码模式指南](docs/windows.md) · [交给 Windows Agent 的启动提示词](docs/windows-agent-start.md)

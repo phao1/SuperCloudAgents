@@ -8,7 +8,7 @@ help() {
 用法: bash scripts/portal_demo.sh {setup|up} [--mode docker|source]
       bash scripts/portal_demo.sh {down [--all]|status|logs|--help}
       bash scripts/portal_demo.sh restart-gateway
-      bash scripts/portal_demo.sh export-history <zip>
+      bash scripts/portal_demo.sh {export-history|import-history} [--mode docker|source] <zip>
       bash scripts/portal_source.sh {import-history|export-history} <zip>
   setup   准备依赖、数据库和 OpenCode 基线，然后启动 Portal（可重复运行）
   up      启动本地 API 和 worker，显示网址及登录信息
@@ -17,8 +17,8 @@ help() {
   logs    查看当前模式的服务日志
   restart-gateway  加载模型接入配置并重启网关
   export-history   使用当前模式的数据库和对象存储导出历史 ZIP
-  import-history   将历史 ZIP 导入本机源码模式
-也可用 SCA_RUNTIME_MODE=docker|source 指定模式；默认优先使用可用的 Docker。
+  import-history   将历史 ZIP 导入本机源码模式或已启动的 Docker 模式
+启动模式按 --mode、SCA_RUNTIME_MODE、Portal 保存的首选模式依次选择，默认优先使用可用的 Docker。
 本机 Portal 默认免令牌，可在概览打开「需要访问令牌」。
 设置 SCA_STRIPE_SIMULATOR=1 可在 up 时启动 Stripe 模拟器。
 Docker 模式需要 Docker Compose、至少 15 GB 可用磁盘，macOS 需要 GNU timeout。
@@ -38,14 +38,14 @@ case "$COMMAND" in
             REQUESTED_MODE=$2
         elif [[ $# != 0 ]]; then help; exit 2; fi;;
     import-history|export-history)
-        if [[ $# == 3 && $1 == --mode && $2 == source ]]; then
-            REQUESTED_MODE=source
+        if [[ $# == 3 && $1 == --mode && ( $2 == source || $2 == docker ) ]]; then
+            REQUESTED_MODE=$2
             shift 2
         fi
         [[ $# == 1 && -n $1 && $1 != -* ]] || { help; exit 2; }
         ARCHIVE=$1
         if [[ $ARCHIVE != /* ]]; then ARCHIVE="$CALLER_DIR/$ARCHIVE"; fi;;
-    status|logs|restart-gateway) [[ $# == 0 ]] || { help; exit 2; };;
+    status|logs|restart-gateway|probe-docker) [[ $# == 0 ]] || { help; exit 2; };;
     down) [[ $# == 0 || ( $# == 1 && $1 == --all ) ]] || { help; exit 2; };;
     *) help; exit 2;; esac
 TIMEOUT=$(command -v timeout || command -v gtimeout || true)
@@ -67,14 +67,31 @@ docker_probe() {
     if [[ -n "$TIMEOUT" ]]; then "$TIMEOUT" 10 "$@"; else "$@"; fi
 }
 docker_available() {
-    command -v docker >/dev/null || return 1
-    if docker_probe docker info >/dev/null 2>&1 && docker_probe docker compose version >/dev/null 2>&1; then
-        return
+    if [[ -n ${SCA_DOCKER_BIN:-} ]]; then
+        command -v "$SCA_DOCKER_BIN" >/dev/null || return 2
+        docker_probe "$SCA_DOCKER_BIN" info >/dev/null 2>&1 || return 3
+        docker_probe "$SCA_DOCKER_BIN" compose version >/dev/null 2>&1 || return 4
+    else
+        command -v docker >/dev/null || return 2
+        local failure=3
+        if docker_probe docker info >/dev/null 2>&1; then
+            docker_probe docker compose version >/dev/null 2>&1 && return 0
+            failure=4
+        fi
+        command -v sg >/dev/null && docker_probe sg docker -c 'docker info' >/dev/null 2>&1 || return "$failure"
+        docker_probe sg docker -c 'docker compose version' >/dev/null 2>&1 || return 4
     fi
-    command -v sg >/dev/null && docker_probe sg docker -c 'docker info && docker compose version' >/dev/null 2>&1
+}
+read_preferred_mode() {
+    [[ -f .data/runtime-mode.json ]] || return 0
+    local python=$PY
+    if [[ ! -x "$python" ]]; then python=$(command -v python3.12) || return 0; fi
+    PYTHONPATH="$ROOT/src${PYTHONPATH:+:$PYTHONPATH}" run "$python" -c \
+        'from pathlib import Path; from sca.runtime_mode import preferred_mode; print(preferred_mode(Path(".data")) or "")'
 }
 select_mode() {
     local choice="${REQUESTED_MODE:-${SCA_RUNTIME_MODE:-}}"
+    if [[ -z "$choice" ]]; then choice=$(read_preferred_mode); fi
     case "$choice" in
         docker|source) printf '%s\n' "$choice";;
         '')
@@ -89,12 +106,23 @@ select_mode() {
 }
 docker_access() {
     [[ -n "$TIMEOUT" ]] || fail '请安装 GNU timeout（macOS: brew install coreutils）。'
-    command -v docker >/dev/null || fail '请安装并启动 Docker。'
-    if run docker info >/dev/null 2>&1; then
-        :
-    elif command -v sg >/dev/null && run sg docker -c 'docker info' >/dev/null 2>&1; then
-        :
-    else fail 'Docker 不可用；请启动 Docker 或授予当前用户 docker 组权限。'; fi
+    local wrapper="$ROOT/.data/run/docker" override=''
+    if [[ -n ${SCA_DOCKER_BIN:-} ]]; then
+        override=$(command -v "$SCA_DOCKER_BIN") || fail '找不到 SCA_DOCKER_BIN 指定的 Docker 命令。'
+        if [[ $override == */* && $override != /* ]]; then override="$ROOT/$override"; fi
+        docker_available || fail 'SCA_DOCKER_BIN 指定的 Docker 或 Docker Compose 不可用。'
+        if [[ $override -ef "$wrapper" ]]; then
+            export SCA_DOCKER_BIN="$wrapper"
+            return 0
+        fi
+    else
+        command -v docker >/dev/null || fail '请安装并启动 Docker。'
+        if run docker info >/dev/null 2>&1; then
+            :
+        elif command -v sg >/dev/null && run sg docker -c 'docker info' >/dev/null 2>&1; then
+            :
+        else fail 'Docker 不可用；请启动 Docker 或授予当前用户 docker 组权限。'; fi
+    fi
     # A wrapper also gives Python subprocesses Docker access through sg.
     cat > .data/run/docker <<WRAPPER
 #!/usr/bin/env bash
@@ -105,12 +133,16 @@ WRAPPER
     if [[ $(uname -s) == Darwin && -S "$HOME/.docker/run/docker.sock" ]]; then
         printf 'export DOCKER_HOST=%q\n' "unix://$HOME/.docker/run/docker.sock" >> .data/run/docker
     fi
-    cat >> .data/run/docker <<'WRAPPER'
+    if [[ -n "$override" ]]; then
+        printf 'exec %q "$@"\n' "$override" >> .data/run/docker
+    else
+        cat >> .data/run/docker <<'WRAPPER'
 if docker info >/dev/null 2>&1; then exec docker "$@"; fi
 printf -v arguments '%q ' "$@"
 command="docker $arguments"
 exec sg docker -c "$command"
 WRAPPER
+    fi
     chmod 700 .data/run/docker
     export SCA_DOCKER_BIN="$ROOT/.data/run/docker"
     run "$SCA_DOCKER_BIN" compose version >/dev/null
@@ -492,7 +524,11 @@ case "$COMMAND" in
         fi
         up;;
     import-history|export-history)
-        if [[ $COMMAND == import-history || ${REQUESTED_MODE:-$(saved_mode)} == source ]]; then
+        history_mode=$REQUESTED_MODE
+        if [[ -z "$history_mode" ]]; then
+            if [[ $COMMAND == import-history ]]; then history_mode=source; else history_mode=$(saved_mode); fi
+        fi
+        if [[ $history_mode == source ]]; then
             ensure_mode_switch source
             find_postgres
             if [[ ! -x "$PY" || ! -f .data/portal.env || ! -f .env ]]; then
@@ -503,10 +539,14 @@ case "$COMMAND" in
             start_postgres
             "$PY" "$SOURCE_HELPER" history "${COMMAND%-history}" "$ARCHIVE" --migrate
         else
+            [[ $(saved_mode) == docker ]] || fail '请先启动 Docker 模式。'
             load_env
             [[ -x "$PY" ]] || fail '请先运行 setup。'
-            "$PY" "$SOURCE_HELPER" history export "$ARCHIVE"
+            "$PY" "$SOURCE_HELPER" history "${COMMAND%-history}" "$ARCHIVE"
         fi;;
+    probe-docker)
+        [[ -n "$TIMEOUT" ]] || exit 5
+        docker_available;;
     down)
         mode=$(saved_mode)
         cleanup_failed=0

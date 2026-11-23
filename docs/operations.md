@@ -265,8 +265,7 @@ Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/tempor
 
 脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
 源码模式默认本机免令牌，登录所需的令牌位于 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。
-停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
-`bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
+停止源码模式会保留本机数据库。两种模式分别使用各自的数据库，可通过 Portal 切换并迁移历史。
 
 在 Portal 的「提交任务」页面选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
 `2.3.0-sca.0`，支持该版本和模型对应的运行时冠军覆盖。OpenCode 源码修复、构建和冠军固化
@@ -288,6 +287,31 @@ curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN
 ```
 
 配置接口返回 `sandbox_driver: "local"`、`warning` 和 `unavailable_agent_backends`。
+
+## 切换运行模式
+
+在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「概览 → 运行模式」，选择可用模式
+并确认重启。页面会显示导出、停止、启动和导入进度，并在服务恢复后刷新工作区。首次准备 Docker
+沙箱镜像和 OpenCode 构建仍使用 `bash scripts/portal_demo.sh setup --mode docker`。
+Windows 启动脚本使用源码模式，页面会说明 Docker 模式不可用。
+
+启动模式按 `--mode`、`SCA_RUNTIME_MODE`、`.data/runtime-mode.json` 中的首选模式选择。
+切换失败时，脚本会尝试恢复原模式。`.data/run/runtime-switch.json` 记录当前或最近一次切换的
+步骤和结果。通过启动脚本重启时需要使用的持久 Docker 配置可放在本机 `.env` 中。
+
+本机免令牌时可使用以下 API。使用令牌登录时，为每条请求加上
+`-H "Authorization: Bearer $SCA_EVAL_API_TOKEN"`。
+
+```bash
+API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/runtime"
+curl -fsS "$API/v1/portal/runtime/switch" -H "Origin: $API" \
+  --json '{"mode":"source","carry_history":true}'
+```
+
+POST 返回 `202` 和切换 `id`。API 重启后，继续 GET，并匹配 `switch.id` 查看 `status` 和 `step`。
+`carry_history` 默认为 `true`，API 调用方可显式传 `false` 跳过这次导入和导出。
+[自动迁移范围与 ZIP 保留](history-transfer.md#本机切换模式)
 
 ## 工作目录和缓存清理
 

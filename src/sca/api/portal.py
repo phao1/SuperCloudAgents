@@ -33,6 +33,7 @@ from sca.api.authz import (
     principal,
 )
 from sca.api.evals import can_rescore
+from sca.api.portal_runtime import router as runtime_router
 from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
@@ -206,6 +207,7 @@ _ASSETS = {
     "portal-settings.js": "text/javascript",
     "portal-projects.js": "text/javascript",
     "portal-models.js": "text/javascript",
+    "portal-runtime.js": "text/javascript",
     "task-dag.js": "text/javascript",
     "task-dag.css": "text/css",
 }
@@ -377,3 +379,7 @@ async def set_portal_access(
         raise HTTPException(503, "无法保存本机 Portal 访问设置。") from None
     response.headers["Cache-Control"] = "no-store"
     return PortalAccessStatus(require_token=body.require_token, local_no_token_active=active)
+
+
+# Portal runtime switching
+router.include_router(runtime_router)

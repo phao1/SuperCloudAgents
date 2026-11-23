@@ -3,7 +3,9 @@
 import argparse
 import asyncio
 import gzip
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import delete, select, update
@@ -14,13 +16,20 @@ from sca.core.models import TERMINAL_STATES, Event
 from sca.db.repo import Store
 from sca.db.schema import events, tasks
 
+HISTORY_EVENT_ARCHIVE = "history_event_archive"
 
-def archive_key(task_id: str | UUID) -> str:
+
+def archive_key(task_id: str | UUID, *, result: Mapping[str, Any] | None = None) -> str:
+    # A runtime switch can import into the same object store as the original task.
+    if result and result.get(HISTORY_EVENT_ARCHIVE) is True:
+        return f"history/events/{task_id}.jsonl.gz"
     return f"tasks/{task_id}/events.jsonl.gz"
 
 
-async def read_events(objects: ObjectStore, task_id: str | UUID) -> list[Event]:
-    data = gzip.decompress(await objects.get(archive_key(task_id)))
+async def read_events(
+    objects: ObjectStore, task_id: str | UUID, *, result: Mapping[str, Any] | None = None,
+) -> list[Event]:
+    data = gzip.decompress(await objects.get(archive_key(task_id, result=result)))
     return [Event.model_validate_json(line) for line in data.splitlines() if line]
 
 

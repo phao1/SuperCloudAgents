@@ -44,6 +44,8 @@ Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz'
 ```
 
 打开 <http://127.0.0.1:8000/portal>。默认本机免令牌，以 `eval` 管理员身份进入工作空间。
+「运行模式」显示当前为源码模式，Docker 选项显示「Windows 版仅支持源码模式」。本机管理员可用
+`Invoke-RestMethod http://127.0.0.1:8000/v1/portal/runtime` 查询运行模式与可用性。
 在「概览 → 工作空间连接」打开「需要访问令牌」，随后用 `.data/portal.env` 中的
 `SCA_EVAL_API_TOKEN` 登录。在本机 PowerShell 私下运行以下命令查看令牌。
 
