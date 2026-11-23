@@ -109,14 +109,18 @@ async def test_approvals_inbox_reads_only_pending_rows_for_the_token_tenant(post
 
     async def fixtures(tenant):
         scoped = store.for_tenant(tenant)
+        project = await scoped.create_project({'name': f'Project for {tenant}'}, 'fixture')
         plan, _ = await scoped.create_task(
-            tenant_id=tenant, kind='coding', spec={'instruction': f'Plan for {tenant}'}, idempotency_key=None,
+            tenant_id=tenant, kind='coding', idempotency_key=None, project_id=project.id,
+            spec={'instruction': f'## **Plan** for {tenant}\n\n```sca-fake\necho fixture\n```'},
         )
         await scoped.set_state(plan.id, TaskState.PROVISIONING)
         await scoped.set_state(plan.id, TaskState.RUNNING)
         await scoped.set_state(plan.id, TaskState.VERIFYING)
+        await scoped.set_session(plan.id, 'fake', 'fixture-session')
         await scoped.append_event(plan.id, 'review.requested', {'plan': {'subtasks': []}})
-        await scoped.set_state(plan.id, TaskState.AWAITING_REVIEW)
+        started = await scoped.set_state(plan.id, TaskState.AWAITING_REVIEW)
+        await scoped.update_result(plan.id, {'fixture': True})
         await scoped.create_task(tenant_id=tenant, kind='coding', spec={}, idempotency_key=None)
         run, candidate, harvest = uuid4(), uuid4(), uuid4()
         await scoped.create_evolution({'id': run, 'status': 'awaiting_approval', 'config': {}, 'created_by': 'fixture'})
@@ -133,22 +137,28 @@ async def test_approvals_inbox_reads_only_pending_rows_for_the_token_tenant(post
             'id': uuid4(), 'task_id': plan.id, 'suite': 'fixture', 'split': 'dev', 'case_id': 'already-published',
             'base_sha': 'fixture', 'notes': '', 'created_by': 'fixture', 'status': 'approved',
         })
-        return plan.id, candidate, harvest
+        return started, candidate, harvest
 
     plan, candidate, harvest = await fixtures('eval')
     other_plan, other_candidate, other_harvest = await fixtures('other')
     app = create_app(store=api_store, authenticator=StaticTokenAuthenticator({'eval': 'eval', 'other': 'other'}),
                      orchestrator=SimpleNamespace())
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
-        for tenant, expected in [
-            ('eval', {'task_plan': plan, 'evolution_candidate': candidate, 'harvest': harvest}),
-            ('other', {'task_plan': other_plan, 'harvest': other_harvest}),
+        for tenant, task, expected in [
+            ('eval', plan, {'task_plan': plan.id, 'evolution_candidate': candidate, 'harvest': harvest}),
+            ('other', other_plan, {'task_plan': other_plan.id, 'harvest': other_harvest}),
         ]:
             response = await client.get('/v1/approvals?tenant_id=other',
                                         headers={'Authorization': f'Bearer {tenant}'})
             assert response.status_code == 200
             assert response.json()['count'] == len(expected)
-            assert {row['kind']: row['id'] for row in response.json()['items']} == {
+            items = {row['kind']: row for row in response.json()['items']}
+            assert {kind: item['id'] for kind, item in items.items()} == {
                 kind: str(id_) for kind, id_ in expected.items()
             }
+            item = items['task_plan']
+            assert item['title'] == f'Plan for {tenant}'
+            assert item['project_name'] == f'Project for {tenant}'
+            assert item['backend'] == 'fake' and item['task_kind'] == 'coding'
+            assert item['created_at'] == task.model_dump(mode='json')['updated_at']
             assert str(other_candidate) not in response.text

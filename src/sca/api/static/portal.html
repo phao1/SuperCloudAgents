@@ -2615,8 +2615,8 @@ async function loadEvalPage(page,parts,polling){
 async function loadPage(page,parts,polling=false){
   const hash=location.hash,identity=portalIdentity;
   const current=()=>hash===location.hash&&identity===portalIdentity;
-  if(page==='approvals')return portalApprovals.refresh(!polling);
-  void portalApprovals.refresh();
+  const inbox=portalApprovals.refresh(!polling);
+  if(page==='approvals')return inbox;
   if(page==='projects')return polling?portalProjects.poll(parts):portalProjects.load(parts);
   if(page==='tasks'){
     return Promise.all([
@@ -2865,7 +2865,8 @@ async function runAction(id,action){
 }
 $('approve').onclick=()=>runAction('approve',async()=>{
   if(!flow.fixTask)throw Error('尚未加载审核任务。');
-  await data('/tasks/'+enc(flow.fixTask)+'/review',{decision:'approve',accept_memories:checkedMemories(flow.fixTask)});
+  const path='/tasks/'+enc(flow.fixTask);
+  await portalApprovals.submit(path+'/review',{decision:'approve',accept_memories:checkedMemories(flow.fixTask)},'#'+path+'/approval');
 });
 $('prompt-feedback-form').onsubmit=event=>{
   event.preventDefault();
@@ -2873,7 +2874,8 @@ $('prompt-feedback-form').onsubmit=event=>{
     const task=currentLoopTask;
     const feedback=$('prompt-feedback').value.trim();
     if(!task||task.state!=='AWAITING_REVIEW'||!feedback)throw Error('请输入希望 OpenCode 修改的内容。');
-    await data('/tasks/'+enc(task.id)+'/review',{decision:'request_changes',feedback});
+    const path='/tasks/'+enc(task.id);
+    await portalApprovals.submit(path+'/review',{decision:'request_changes',feedback},'#'+path+'/approval');
     pendingReview={id:task.id,turn:task.result?.turns,commit:task.result?.commit};
     $('prompt-feedback').value='';
   });

@@ -404,11 +404,18 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
 ### 对话与审批
 
 演进详情的「对话」显示候选假设、提议依据、覆盖变更概况与开发集及留出集的评测结果。
-候选等待人工晋升时，审批卡片出现在对话顶部，也可通过侧栏「待审批」打开。
-`eval` 租户管理员可在卡片上批准或拒绝，晋升和采集继续使用各自的审批接口。
-「本机免令牌」和租户令牌登录均可查看待审批数量。`GET /v1/approvals` 返回当前租户可查看的待审事项和
-Portal 跳转链接。访客可在脱敏的任务或演进对话中查看只读审批卡片，待审批入口隐藏且接口返回
-`401`。归档 Portal 隐藏待审批入口，可从「任务进度」回放已发布的记录。
+桌面端的对话面板与 DAG 并排，消息可单独滚动。屏幕宽度为 900 像素或更窄时，DAG 排在对话上方。
+在任务对话底部选择「排队」或「打断」后发送插话。输入框随内容增高，最多显示六行。运行结束后，
+底部显示「任务已结束」或「演进已结束」。
+
+待审卡片固定在消息区顶部，也可通过侧栏「待审批」打开。展开「变更与审核详情」可查看文件和补丁，
+点击「要求修改」可填写并提交修改意见。提交决定后在消息列表查看带时间的简短记录。
+`eval` 租户管理员可在演进卡片上批准或拒绝候选晋升。
+
+侧栏在提交审批、切换页面和定期轮询时更新待审数量。「本机免令牌」和租户令牌登录均可使用待审批入口。
+`GET /v1/approvals` 返回当前租户可查看的待审事项、单行标题与 Portal 跳转链接。任务事项还提供
+`task_kind`、`backend` 与可用的 `project_name`。访客可在脱敏的任务或演进对话中查看只读审批卡片，
+待审批入口隐藏且接口返回 `401`。归档 Portal 隐藏待审批入口，可从「任务进度」回放已发布的记录。
 
 ```bash
 # 本机免令牌模式
@@ -417,6 +424,8 @@ curl -fsS http://127.0.0.1:8000/v1/approvals
 curl -fsS "$SCA_API_URL/v1/approvals" -H "Authorization: Bearer $SCA_API_TOKEN"
 curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/conversation?limit=50" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/review" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"decision":"request_changes","feedback":"请补充空输入测试"}'
 ```
 
 任务对话使用 `GET /v1/tasks/{id}/conversation`。可用返回的 `cursor` 继续读取两类对话。
@@ -440,3 +449,9 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/conversation?limit=50" \
 审批提交及归档导航。单元回归通过 1,298 项，跳过 27 项。测试进程使用带超时的选择器轮询，
 依赖受限套接字或 Chromium 的用例在沙箱中跳过。对话、审批和 Portal 相关集成测试通过 9 项，
 跳过 37 项。沙箱拒绝 PostgreSQL 和 Temporal 连接，依赖这两项服务的流程仍待现场验证。
+
+对话布局回归覆盖了插话方式、审核详情展开、审批记录收起、结束提示与路由切换。
+模拟工作流仍在等待审批时，待审数量会先更新，任务再次进入审核后会重新计入。
+本次单元回归通过 1,309 项，跳过 23 项。相关集成测试通过 3 项，另有 11 项因 PostgreSQL 套接字受限而跳过。
+Playwright 布局用例检查 1440×1000 和 390 像素视口。当前沙箱拒绝启动 Chromium，
+这两种尺寸仍待浏览器验证。

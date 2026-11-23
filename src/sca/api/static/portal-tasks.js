@@ -408,7 +408,7 @@ const portalTasks = (() => {
       });
       conversation = {id: task.id, identity, panel};
     }
-    conversation.panel.setState(finishedTask(task.state) ? '任务已结束，无法发送插话。' : '');
+    conversation.panel.setState(finishedTask(task.state) ? '任务已结束' : '');
     renderApproval(task, events);
   }
 
@@ -430,7 +430,8 @@ const portalTasks = (() => {
 
   function focusApproval() {
     if (!conversation) return;
-    portalApprovals.focus(conversation.review?.node || conversation.panel.title);
+    const card = conversation.review?.node;
+    portalApprovals.focus(card && !card.hidden ? card : conversation.panel.title);
   }
 
   function approvalCard(task, request, selection, title) {
@@ -440,6 +441,10 @@ const portalTasks = (() => {
       card.node.append(reviewLink(task, '查看候选补丁与验证结果', () => $('task-best-of')));
       return record;
     }
+    const detail = el('details');
+    const evidence = el('div', undefined, 'conversation-approval-evidence');
+    detail.append(el('summary', task.kind === 'coding' && !request?.plan ? '变更与审核详情' : '审核详情'), evidence);
+    card.node.append(detail);
     if (request?.plan) {
       const subtasks = el('ul');
       for (const subtask of request.plan.subtasks || []) {
@@ -449,37 +454,51 @@ const portalTasks = (() => {
         if (subtask.depends_on?.length) row.append(el('small', '依赖 · ' + subtask.depends_on.join('、')));
         subtasks.append(row);
       }
-      card.node.append(subtasks);
+      evidence.append(subtasks);
     } else {
       record.verification = el('p');
       record.fileList = el('div', task.kind === 'coding' ? '等待补丁文件' : '');
-      card.node.append(record.verification, record.fileList);
+      evidence.append(record.verification, record.fileList);
       if (task.kind === 'coding') {
-        card.node.append(reviewLink(task, '查看最终补丁', () => $('patch'), 'patch'));
+        evidence.append(reviewLink(task, '查看最终补丁', () => $('patch'), 'patch'));
       }
       if (task.kind === 'analysis') {
-        card.node.append(reviewLink(task, '查看分析报告', () => $('analysis-report-panel')));
+        evidence.append(reviewLink(task, '查看分析报告', () => $('analysis-report-panel')));
       }
     }
     if (!ui.can('member')) return record;
     record.evidence = reviewLink(task, '前往任务审核', () => $('task-review'));
-    card.node.append(record.evidence);
-    const controls = el('fieldset', undefined, 'stack');
-    controls.dataset.access = 'member';
-    controls.hidden = !ui.can('member');
-    record.controls = controls;
-    record.fields = el('div');
     record.memory = el('div');
     record.memory.hidden = true;
+    evidence.append(record.evidence, record.memory);
+    const controls = el('fieldset');
+    record.controls = controls;
     const feedback = ui.field('修改意见', 'feedback', {multiline: true, rows: 2});
     const textarea = feedback.querySelector('textarea');
-    const actions = [['approve', '批准'], ['request_changes', '要求修改'], ['reject', '拒绝']]
-      .map(([decision, label]) => ui.action(label,
-        () => submitReview(record.task, decision, textarea.value.trim()), card.feedback));
-    record.approve = actions[0];
-    controls.append(record.memory, feedback, ui.actions(...actions));
-    record.fields.append(controls);
-    card.node.append(record.fields, card.feedback);
+    const edit = el('fieldset', undefined, 'conversation-review-feedback');
+    edit.id = 'task-approval-feedback';
+    edit.hidden = true;
+    const change = button('要求修改', () => toggleFeedback(edit.hidden));
+    change.setAttribute('aria-controls', edit.id);
+    change.setAttribute('aria-expanded', 'false');
+    function toggleFeedback(open) {
+      edit.hidden = !open;
+      change.setAttribute('aria-expanded', String(open));
+      if (!open) ui.setMessage(card.feedback, '');
+      (open ? textarea : change).focus();
+    }
+    const feedbackText = () => edit.hidden ? undefined : textarea.value.trim();
+    const approve = ui.action('批准', () => submitReview(record.task, 'approve', feedbackText()), card.feedback);
+    approve.classList.add('primary');
+    const reject = ui.action('拒绝', () => submitReview(record.task, 'reject', feedbackText()), card.feedback);
+    const send = ui.action('提交修改意见', () => submitReview(record.task, 'request_changes', textarea.value.trim()),
+      card.feedback);
+    edit.append(feedback, ui.actions(send, button('取消', () => toggleFeedback(false))));
+    record.approve = approve;
+    record.edit = edit;
+    controls.append(ui.actions(approve, change, reject));
+    card.header.append(controls);
+    card.node.append(edit, card.feedback);
     return record;
   }
 
@@ -494,13 +513,19 @@ const portalTasks = (() => {
     const entering = Boolean(request?.plan && !submitted && !finishedTask(task.state)
       && !events.some(event => event.seq > requested.seq && event.type === 'task.state_changed'
         && event.payload.from === 'AWAITING_REVIEW'));
-    if (!awaiting && !entering && !submitted && !conversation.review) return;
+    if (!awaiting && !entering) {
+      if (conversation.review) {
+        conversation.panel.approvals.replaceChildren();
+        conversation.review = null;
+      }
+      return;
+    }
     const fix = task.spec.labels?.kind === 'opencode-fix';
     const type = selection ? 'selection' : request?.plan ? 'plan' : fix ? 'fix' : 'result';
-    const key = type + ':' + (requested?.seq ?? task.result.turns ?? 0);
+    const entry = events.findLast(event => event.type === 'task.state_changed' && event.payload.to === 'AWAITING_REVIEW');
+    const key = type + ':' + (requested?.seq ?? entry?.seq ?? task.result.turns ?? 0);
     let review = conversation.review;
     if (review?.key !== key) {
-      if (!awaiting && !entering && !submitted) return;
       const label = {selection: '选择 Best-of-N 候选', plan: '规划审核', fix: '修复审核', result: '任务结果审核'};
       review = approvalCard(task, request, selection, label[type]);
       review.key = key;
@@ -509,8 +534,6 @@ const portalTasks = (() => {
     }
     review.task = task;
     review.awaiting = awaiting;
-    review.entering = entering;
-    if (!awaiting && submitted) review.decision = submitted.payload.decision;
     if (review.verification) {
       const passed = request?.verification_passed ?? task.result.verification_passed;
       const label = passed === true ? '通过' : passed === false ? '未通过' : '暂无验证结果';
@@ -525,21 +548,21 @@ const portalTasks = (() => {
   }
 
   function syncReview(review) {
-    const decision = portalApprovals.decisions[review.decision];
-    review.status.textContent = decision || (review.awaiting
+    review.node.hidden = Boolean(review.sent);
+    review.status.textContent = review.awaiting
       ? (ui.can('member') ? '等待人工审核' : '等待人工审核 · 只读')
-      : review.entering ? '等待进入审核' : '审核已结束');
-    if (!review.fields) return;
-    if (review.evidence) review.evidence.hidden = !review.awaiting;
-    review.fields.hidden = !review.awaiting || Boolean(decision) || !ui.can('member');
-    review.controls.disabled = Boolean(review.busy);
+      : '等待进入审核';
+    if (!review.controls) return;
+    review.evidence.hidden = review.controls.hidden = !review.awaiting || !ui.can('member');
+    review.edit.disabled = review.controls.disabled = Boolean(review.busy);
   }
 
   async function submitReview(task, decision, feedback) {
     if (!ui.can('member')) return;
     if (decision === 'request_changes' && !feedback) throw Error('请填写修改意见。');
-    const current = conversation?.id === task.id ? conversation.review : null;
-    if (current?.busy || current?.decision) return;
+    const chat = conversation?.id === task.id ? conversation : null;
+    const current = chat?.review;
+    if (current?.busy || current?.sent) return;
     const body = {decision, feedback: feedback || null};
     if (decision === 'approve') body.accept_memories = checkedMemories(task.id);
     if (current) {
@@ -547,16 +570,21 @@ const portalTasks = (() => {
       syncReview(current);
     }
     try {
-      await api(taskPath(task) + '/review', body);
-      if (current) current.decision = decision;
+      await portalApprovals.submit(taskPath(task) + '/review', body, '#' + taskPath(task) + '/approval');
+      if (current) {
+        current.sent = true;
+        if (current.node.contains(document.activeElement)) chat.panel.title.focus({preventScroll: true});
+      }
     } finally {
       if (current) {
         current.busy = false;
         syncReview(current);
       }
     }
-    void portalApprovals.refresh(true);
-    if (openTaskIs(task.id)) void updateTask().catch(error);
+    if (chat === conversation && openTaskIs(task.id)) {
+      void chat?.panel.refresh(true);
+      void updateTask().catch(error);
+    }
   }
 
   function reviewMemoryTarget(taskId) {
@@ -616,7 +644,7 @@ const portalTasks = (() => {
           }
           if (ui.can('member') && record.select === 'human' && record.awaiting_selection) {
             actions.push(ui.action('选择', async () => {
-              await data(path + '/select', {attempt: attempt.attempt});
+              await portalApprovals.submit(path + '/select', {attempt: attempt.attempt}, '#' + taskPath(task) + '/approval');
               ui.setMessage(message, '已提交候选选择，等待发布补丁。');
               await updateTask();
             }, message));

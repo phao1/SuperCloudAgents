@@ -183,7 +183,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 
 
 @pytest.mark.parametrize("destination", [
-    "guest", "local", "projects", "task", "evolution", "approvals", "result-approval", "evolution-approval",
+    "guest", "local", "projects", "task", "evolution", "approvals", "result-approval", "result-rejection", "evolution-approval",
     "local-result-approval", "local-evolution-approval", "archive",
 ])
 def test_portal_route_bootstrap(tmp_path, destination):
@@ -219,7 +219,7 @@ const destination=process.argv[2];
 const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
 const local=destination==='local'||destination.startsWith('local-');
-const resultApproval=destination.endsWith('result-approval');
+const resultApproval=destination.endsWith('result-approval')||destination==='result-rejection';
 const evolutionApproval=destination.endsWith('evolution-approval');
 const taskApproval=destination==='approvals'||resultApproval;
 const awaitingReview=taskApproval||destination==='evolution';
@@ -228,7 +228,8 @@ const task={id:'task-id',kind:'coding',state:awaitingReview?'AWAITING_REVIEW':'S
 const at='2026-11-22T00:00:00Z';
 const approvalHref='#/tasks/'+task.id+'/approval';
 const reviewRequests=[];
-let moreMessages=false;
+let moreMessages=false, inboxAt=at, reviewItem, anotherReview=false;
+const postedMessages=[];
 const harvest={id:'harvest-id',task_id:task.id,tenant_id:'eval',case_id:'boundary-case',suite:'fixture',status:'pending'};
 const harvestHref='#/evolutions/harvest/approval/'+harvest.id;
 const harvestPath='/v1/evals/harvest';
@@ -267,8 +268,9 @@ class Element {
   prepend(...nodes){this.children.unshift(...nodes)}
   replaceChildren(...nodes){this.children=nodes}
   addEventListener(){}
-  focus(){this.focused=true}
+  focus(){this.focused=true;document.activeElement=this}
   scrollIntoView(){this.scrolled=true}
+  contains(node){return walk(this).includes(node)}
   hasChildNodes(){return this.children.length>0}
   hasAttribute(name){return this.attributes.has(name)}
   setAttribute(name,value){this.attributes.set(name,value)}
@@ -302,7 +304,8 @@ const nav=new Element();
 nav.selectors.set('[href="#/tasks"]',links[0]);
 nav.querySelectorAll=()=>links;
 const document={
-  getElementById:element,createElement:()=>new Element(),documentElement:new Element(),
+  getElementById:element,createElement:tag=>Object.assign(new Element(),{tagName:tag.toUpperCase(),style:{}}),
+  documentElement:new Element(),
   createElementNS:()=>new Element(),createTextNode:textContent=>({textContent}),
   createDocumentFragment:()=>new Element(),
   addEventListener(){},
@@ -361,16 +364,17 @@ global.fetch=async (path,request={})=>{
   }
   if(path.includes('/conversation?'))assert.equal(auth,guest?undefined:tenantAuth);
   if(path===taskPath+'/review'){
-    reviewRequests.push(JSON.parse(request.body));
-    task.state='RUNNING';
+    const review=JSON.parse(request.body);
+    reviewRequests.push(review);
+    const text={approve:'已批准',request_changes:'已要求修改',reject:'已拒绝'}[review.decision];
+    reviewItem={id:'review',kind:'review.submitted',text,created_at:at};
   }
+  if(path===taskPath+'/messages')postedMessages.push(JSON.parse(request.body));
   if(path===taskPath+'/artifacts/changes.patch'){
     return {ok:true,text:async()=> 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n'};
   }
   if(path===evolutionPath+'/approve'){
     reviewRequests.push(JSON.parse(request.body));
-    candidate.decision='promoted';
-    evolution.status='completed';
   }
   if(path===harvestPath+'/'+harvest.id+'/approve'){
     reviewRequests.push(JSON.parse(request.body));
@@ -382,7 +386,8 @@ global.fetch=async (path,request={})=>{
       title:candidate.hypothesis,created_at:at}]:[]),
     ...(harvest.status==='pending'?[{id:harvest.id,href:harvestHref,kind:'harvest',title:harvest.case_id,created_at:at}]:[]),
   ]:taskApproval&&task.state==='AWAITING_REVIEW'?[{href:approvalHref,id:task.id,
-    kind:resultApproval?'task_result':'task_plan',title:'校验任务',created_at:at}]:[];
+    kind:resultApproval?'task_result':'task_plan',title:'校验任务',created_at:inboxAt,
+    task_kind:'coding',backend:'dsh',project_name:'默认项目'}]:[];
   const fixtures={
     '/v1/portal/whoami':local||evolutionApproval?evalAdmin:{tenant_id:'eval',role:'member'},
     '/v1/portal/config':local?(
@@ -398,6 +403,9 @@ global.fetch=async (path,request={})=>{
       {seq:2,type:'review.requested',payload:resultApproval?{verification_passed:true}
         :{plan:{subtasks:[{name:'verify',instruction:'覆盖边界条件'}]}}},
     ])],
+    [taskPath+'/events?after=2']:anotherReview?[
+      {seq:3,type:'review.requested',payload:{plan:{subtasks:[]}}},
+    ]:[],
     [taskPath+'/artifacts']:artifacts,
     [taskPath+'/conversation?limit=100']:taskApproval?{items:[
       {id:'run',kind:'operations',backend:'dsh',activity:{turn_seq:1,
@@ -413,7 +421,9 @@ global.fetch=async (path,request={})=>{
     [taskPath+'/conversation?limit=100&cursor=6']:{items:moreMessages?[
       {id:'verification',kind:'verification.completed',text:'验证通过',created_at:at},
     ]:[],cursor:moreMessages?'7':'6',has_more:false},
-    [taskPath+'/conversation?limit=100&cursor=7']:{items:[],cursor:'7',has_more:false},
+    [taskPath+'/conversation?limit=100&cursor=7']:{items:reviewItem?[reviewItem]:[],
+      cursor:reviewItem?'8':'7',has_more:false},
+    [taskPath+'/conversation?limit=100&cursor=8']:{items:[],cursor:'8',has_more:false},
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
     [harvestPath]:[harvest],
     [evolutionPath+'/dag']:{nodes:[{kind:'evolution',cost_usd:liveSpend}],edges:[]},
@@ -434,6 +444,9 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
   const nextTick=()=>new Promise(setImmediate);
   const waitForStartup=async()=>{while(refreshing)await nextTick()};
   const approve=card=>walk(card).find(node=>node.textContent==='批准');
+  const inboxFetches=()=>calls.filter(path=>path==='/v1/approvals').length;
+  const decisionChip=(chat,label)=>chat.some(node=>node.children?.some(child=>child.textContent===label)
+    &&node.children.some(child=>child.tagName==='TIME'&&/^\d{2}:\d{2}$/.test(child.textContent)));
   await nextTick();
   if(archived){
     assert.deepEqual(calls,['/portal/archive.json']);
@@ -561,6 +574,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     releaseSuites();
     await evaluation;
     assert(!calls.includes('/v1/evals/runs?limit=200'));
+    assert.equal(inboxFetches(),3);
     await refresh(true);
     assert.equal(calls.filter(path=>path==='/v1/projects').length,3);
   }else if(destination==='evolution'){
@@ -604,7 +618,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     const taskCard=chat.find(node=>node.id==='task-approval');
     assert(walk(taskCard).some(node=>node.textContent==='等待人工审核 · 只读'));
     assert(!approve(taskCard));
-    assert(chat.find(node=>node.className==='stack conversation-composer').hidden);
+    assert(chat.find(node=>node.className==='conversation-composer').hidden);
     location.hash='#/approvals';
     await route();
     assert.equal(approvalLink.hidden,true);
@@ -619,11 +633,29 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('approvals-count').textContent,' (1)');
     const entry=walk($('approvals-list')).find(node=>node.href);
     assert.equal(entry.href,approvalHref);
+    assert(walk($('approvals-list')).some(node=>node.textContent.includes('编码任务 · DeepSeek Harness · 默认项目')));
+    const beforeRoute=inboxFetches();
     location.hash=entry.href;
     await route();
+    assert.equal(inboxFetches(),beforeRoute+1);
     const chat=walk($('task-conversation'));
     const card=chat.find(node=>node.id==='task-approval');
     assert(card.scrolled);
+    const scrollArea=chat.find(node=>node.className==='conversation-scroll-area');
+    assert(scrollArea.children[0].children.includes(card));
+    assert(!walk(card).find(node=>node.tagName==='DETAILS').open);
+    const composer=chat.find(node=>node.className==='conversation-composer');
+    const [input,mode,send]=chat.find(node=>node.className==='conversation-compose-row').children;
+    assert.equal(input.rows,1);
+    assert.equal(input.getAttribute('aria-label'),'插话');
+    assert.equal(mode.value,'queue');
+    assert.deepEqual(mode.children.map(node=>node.textContent),['排队','打断']);
+    assert.equal(send.textContent,'发送');
+    input.value='查看结果';
+    mode.value='interrupt';
+    await composer.onsubmit({preventDefault(){}});
+    assert.deepEqual(postedMessages,[{text:'查看结果',mode:'interrupt'}]);
+    assert.equal(input.value,'');
     if(resultApproval){
       assert(walk(card).some(node=>node.textContent==='验证结果 · 通过'));
       assert(walk(card).some(node=>node.textContent==='app.py'));
@@ -656,13 +688,56 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(feed.scrollTop,1000);
     assert.equal(jump.hidden,true);
     const change=walk(card).find(node=>node.textContent==='要求修改');
+    const editor=walk(card).find(node=>node.id==='task-approval-feedback');
+    assert(editor.hidden);
     await change.onclick();
+    assert(!editor.hidden);
+    assert.equal(change.getAttribute('aria-expanded'),'true');
     assert.equal(reviewRequests.length,0);
-    await approve(card).onclick();
-    assert.deepEqual(reviewRequests,[{decision:'approve',feedback:null,accept_memories:resultApproval?['memory']:[]}]);
-    assert(walk(card).some(node=>node.textContent==='已批准'));
+    const beforeDecision=inboxFetches();
+    let decision='approve', label='已批准';
+    if(!resultApproval){
+      decision='request_changes';
+      label='已要求修改';
+      const sendChanges=walk(editor).find(node=>node.textContent==='提交修改意见');
+      await sendChanges.onclick();
+      assert.equal(reviewRequests.length,0);
+      walk(editor).find(node=>node.textContent==='修改意见').querySelector('textarea').value='补充测试';
+      await sendChanges.onclick();
+      assert.deepEqual(reviewRequests,[{decision,feedback:'补充测试'}]);
+    }else if(destination==='result-rejection'){
+      decision='reject';
+      label='已拒绝';
+      await walk(card).find(node=>node.textContent==='拒绝').onclick();
+      assert.deepEqual(reviewRequests,[{decision,feedback:null}]);
+    }else{
+      await approve(card).onclick();
+      assert.deepEqual(reviewRequests,[{decision,feedback:null,accept_memories:['memory']}]);
+    }
     await nextTick();
+    assert(card.hidden);
+    assert(decisionChip(walk($('task-conversation')),label));
     assert.equal($('approvals-count').textContent,' (0)');
+    assert.equal(inboxFetches(),beforeDecision+1);
+    assert.equal(task.state,'AWAITING_REVIEW');
+    if(decision==='request_changes'){
+      inboxAt='2026-11-22T00:01:00Z';
+      anotherReview=true;
+      await refresh();
+      await nextTick();
+      assert.equal($('approvals-count').textContent,' (1)');
+      const nextCard=walk($('task-conversation')).find(node=>node.id==='task-approval');
+      assert.notEqual(nextCard,card);
+      assert(!nextCard.hidden);
+    }else{
+      task.state=decision==='approve'?'SUCCEEDED':'CANCELLED';
+      await refresh();
+      assert(composer.hidden);
+      const footer=chat.find(node=>node.className==='conversation-ended');
+      assert(!footer.hidden);
+      assert.equal(footer.children[0].textContent,'任务已结束');
+      assert(!walk($('task-conversation')).some(node=>node.id==='task-approval'));
+    }
     portalIdentity={tenant_id:'eval',role:'viewer'};
     portalTasks.render({...task,state:'AWAITING_REVIEW'},taskEvents);
     const readOnly=walk($('task-conversation')).find(node=>node.id==='task-approval');
@@ -680,7 +755,16 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(card.scrolled);
     await approve(card).onclick();
     assert.deepEqual(reviewRequests,[{candidate_id:candidate.id}]);
-    assert(walk(card).some(node=>node.textContent==='已批准 · 已晋升'));
+    assert(card.hidden);
+    assert(decisionChip(content(),'已批准'));
+    assert.equal(evolution.status,'awaiting_approval');
+    assert.equal($('approvals-count').textContent,' (1)');
+    candidate.decision='promoted';
+    evolution.status='completed';
+    await refresh();
+    const evolutionChat=walk(content().find(node=>node.id==='evolution-conversation'));
+    assert(evolutionChat.find(node=>node.className==='conversation-composer').hidden);
+    assert(evolutionChat.some(node=>node.textContent==='演进已结束'));
     location.hash=link(harvestHref).href;
     await route();
     const publication=content().find(node=>node.id==='harvest-approval-'+harvest.id);
@@ -1058,15 +1142,119 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         assert 1 in cursors
         chat.locator('.conversation-user').get_by_role('link', name='已应用于第 1 代提议', exact=True).click()
         assert panel.locator(f'[data-node="{generation}"]').get_attribute('aria-pressed') == 'true'
+        chat.get_by_text('运行控制', exact=True).click()
         chat.get_by_role('button', name='暂停', exact=True).click()
         chat.get_by_role('button', name='恢复', exact=True).wait_for(timeout=6000)
         chat.get_by_role('button', name='恢复', exact=True).click()
         assert [msg['mode'] for msg in messages] == ['guidance', 'pause', 'resume']
         page.set_viewport_size({'width': 820, 'height': 850})
-        assert chat.bounding_box()['y'] < panel.bounding_box()['y']
+        assert chat.bounding_box()['y'] >= panel.bounding_box()['y'] + panel.bounding_box()['height']
         row['status'] = 'stopped'
-        chat.get_by_text('演进已结束，无法发送消息。').wait_for(timeout=6000)
-        assert prompt.is_disabled()
+        chat.get_by_text('演进已结束', exact=True).wait_for(timeout=6000)
+        assert prompt.is_hidden()
+
+
+def test_portal_browser_task_chat_layout():
+    task_id = "task-fixture"
+    path = f"/v1/tasks/{task_id}"
+    task = {"id": task_id, "kind": "coding", "state": "AWAITING_REVIEW", "spec": {"agent_backend": "dsh"},
+            "result": {"verification_passed": True}}
+    at = "2026-11-22T16:31:00Z"
+    journal = [{"id": f"reply-{i}", "kind": "reply", "text": f"检查第 {i} 个边界条件", "backend": "dsh",
+                "created_at": at} for i in range(30)]
+    patch = "".join(f"diff --git a/test_{i}.py b/test_{i}.py\n--- a/test_{i}.py\n+++ b/test_{i}.py\n"
+                    for i in range(20))
+    inbox_item = {"id": task_id, "kind": "task_result", "href": f"#/tasks/{task_id}/approval",
+                  "title": "校验任务", "task_kind": "coding", "backend": "dsh", "created_at": at}
+
+    def handle(route):
+        url = urlsplit(route.request.url)
+        if serve_portal(route, url.path):
+            return
+        if url.path == path + "/review":
+            assert route.request.post_data_json["decision"] == "approve"
+            journal.append({"id": "review", "kind": "review.submitted", "text": "已批准", "created_at": at})
+            route.fulfill(json=task)
+        elif url.path == path + "/conversation":
+            cursor = re.search(r"cursor=(\d+)", url.query)
+            offset = int(cursor[1]) if cursor else 0
+            route.fulfill(json={"items": journal[offset:], "cursor": str(len(journal)), "has_more": False})
+        elif url.path == path + "/artifacts/changes.patch":
+            route.fulfill(body=patch)
+        else:
+            awaiting = task["state"] == "AWAITING_REVIEW"
+            fixtures = {
+                "/v1/portal/config": TENANT_PORTAL_CONFIG,
+                "/v1/portal/whoami": {"role": "member", "tenant_id": "eval"},
+                "/v1/approvals": {"count": int(awaiting), "items": [inbox_item] if awaiting else []},
+                path: task, path + "/dag": {"nodes": [], "edges": []},
+                path + "/artifacts": [{"name": "changes.patch"}],
+            }
+            route.fulfill(json=fixtures.get(url.path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-member')")
+        page.route("**/*", handle)
+        page.goto(f"http://portal.test/portal#/tasks/{task_id}")
+        dag, chat = page.locator("#task-dag"), page.locator("#task-conversation")
+        scroll_area = chat.locator(".conversation-scroll-area")
+        approvals, feed = chat.locator(".conversation-approvals"), chat.locator(".conversation-feed")
+        composer = chat.locator(".conversation-composer")
+        card = chat.locator("#task-approval")
+        mode = composer.get_by_role("combobox", name="送达方式")
+        text = composer.get_by_role("textbox", name="插话")
+        send = composer.get_by_role("button", name="发送")
+        feed.get_by_text("检查第 29 个边界条件").wait_for(state="attached")
+        page.get_by_text("(1)", exact=True).wait_for()
+        assert chat.bounding_box()["x"] > dag.bounding_box()["x"]
+        assert chat.evaluate("(node) => getComputedStyle(node).position") == "sticky"
+        assert chat.bounding_box()["height"] >= 800
+        assert feed.bounding_box()["height"] > 550
+        assert composer.bounding_box()["height"] <= 50
+        assert feed.evaluate("(node) => node.scrollHeight > node.clientHeight")
+
+        pinned_at = approvals.bounding_box()["y"]
+        feed.evaluate("(node) => node.scrollTop = 0")
+        assert approvals.bounding_box()["y"] == pinned_at
+        evidence = card.get_by_text("变更与审核详情", exact=True)
+        filename = card.get_by_text("test_19.py", exact=True)
+        assert filename.is_hidden()
+        evidence.click()
+        filename.wait_for()
+        assert approvals.bounding_box()["height"] <= scroll_area.bounding_box()["height"] * .4 + 1
+        evidence.click()
+        assert card.get_by_role("textbox", name="修改意见").is_hidden()
+        card.get_by_role("button", name="要求修改").click()
+        assert card.get_by_role("textbox", name="修改意见").is_visible()
+        card.get_by_role("button", name="取消").click()
+
+        page.set_viewport_size({"width": 390, "height": 844})
+        assert chat.bounding_box()["y"] >= dag.bounding_box()["y"] + dag.bounding_box()["height"]
+        row = chat.locator(".conversation-compose-row").bounding_box()
+        boxes = [control.bounding_box() for control in (text, mode, send)]
+        assert all(row["x"] <= box["x"] and box["x"] + box["width"] <= 390 for box in boxes)
+        assert max(box["y"] + box["height"] for box in boxes) - min(box["y"] + box["height"] for box in boxes) < 1
+        single_row = boxes[0]["height"]
+        text.fill("一行\n二行\n三行")
+        three_rows = text.bounding_box()["height"]
+        text.fill("\n".join(["一行"] * 6))
+        six_rows = text.bounding_box()["height"]
+        text.fill("\n".join(["一行"] * 9))
+        assert single_row < three_rows < six_rows
+        assert abs(text.bounding_box()["height"] - six_rows) < 1
+        text.fill("")
+        assert text.bounding_box()["height"] == single_row
+
+        before = feed.bounding_box()["height"]
+        card.get_by_role("button", name="批准", exact=True).click()
+        card.wait_for(state="hidden")
+        page.get_by_text("(0)", exact=True).wait_for()
+        feed.locator(".conversation-approval-chip").get_by_text("已批准").wait_for()
+        task["state"] = "SUCCEEDED"
+        chat.get_by_text("任务已结束", exact=True).wait_for(timeout=6500)
+        assert composer.is_hidden()
+        assert feed.bounding_box()["height"] > before
 
 
 @pytest.mark.parametrize("destination", ["projects", "task"])

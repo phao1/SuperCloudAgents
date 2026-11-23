@@ -51,7 +51,7 @@ def test_review_accepts_only_selected_proposals_on_approval():
     assert "accept_memories:checkedMemories(flow.fixTask)" in source
     assert "await renderMemoryProposals(task,'loop-memory-proposals')" in source
     assert "portalTasks.submitReview(task,decision" in source
-    assert "await api(taskPath(task) + '/review', body)" in tasks
+    assert "await portalApprovals.submit(taskPath(task) + '/review', body," in tasks
 
 
 def test_memory_and_report_content_uses_text_nodes():

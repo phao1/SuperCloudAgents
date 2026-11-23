@@ -385,51 +385,52 @@ const portalEvolution = (() => {
       for (const candidate of run.candidates) {
         const awaiting = pendingApproval(run, candidate);
         let approval = approvalCards.get(candidate.id);
-        if (!approval && !awaiting && state.approval !== candidate.id) continue;
+        if (!approval && !awaiting) continue;
         if (!approval) {
           const card = portalApprovals.card('candidate-approval-' + candidate.id, '候选晋升审批 · 第 ' + candidate.generation + ' 代');
-          const locate = evidenceLink('定位候选节点', '#node-' + enc('candidate:' + candidate.id));
+          const nodeId = 'candidate:' + candidate.id;
+          const href = pageHref('runs', id) + '/approval/' + enc(candidate.id);
+          const locate = evidenceLink('定位候选节点', '#node-' + enc(nodeId));
           locate.onclick = event => {
             event.preventDefault();
-            state.dag.focus('candidate:' + candidate.id);
+            state.dag.focus(nodeId);
           };
           const controls = el('fieldset');
-          controls.dataset.access = 'eval-admin';
-          const wrap = el('div');
-          wrap.append(controls);
-          approval = {...card, controls, wrap};
-          const app = approval;
+          const app = approval = {...card, controls};
           if (canManage) controls.append(ui.actions(...[['approve', '批准'], ['reject', '拒绝']].map(([action, label]) =>
             ui.action(label, async () => {
               if (!canManage || !active(state) || app.sent) return;
               controls.disabled = true;
               try {
-                await data(path + '/' + action, {candidate_id: candidate.id});
+                await portalApprovals.submit(path + '/' + action, {candidate_id: candidate.id}, href);
                 if (!active(state)) return;
-                app.sent = action;
-                app.status.textContent = portalApprovals.decisions[action] + ' · 等待演进继续';
-                app.wrap.hidden = true;
-                void portalApprovals.refresh(true);
+                app.sent = true;
+                if (card.node.contains(document.activeElement)) state.conversation.title.focus({preventScroll: true});
+                card.node.hidden = true;
+                state.conversation.recordDecision(action, nodeId);
                 await refresh(state);
               } finally {
                 controls.disabled = false;
               }
             }, card.feedback))));
-          card.node.append(el('p', candidate.hypothesis), ui.actions(locate),
-            ui.actions(el('span', '开发集'), metricLine(candidate.dev_metrics, candidate.dev_run_id),
-              el('span', '留出集'), metricLine(candidate.holdout_metrics, candidate.holdout_run_id)),
-            wrap, card.feedback);
+          const detail = el('details');
+          const evidence = el('div', undefined, 'conversation-approval-evidence');
+          evidence.append(el('p', candidate.hypothesis), locate, ui.actions(
+            el('span', '开发集'), metricLine(candidate.dev_metrics, candidate.dev_run_id),
+            el('span', '留出集'), metricLine(candidate.holdout_metrics, candidate.holdout_run_id)));
+          detail.append(el('summary', '候选详情'), evidence);
+          card.header.append(controls);
+          card.node.append(detail, card.feedback);
           approvalCards.set(candidate.id, approval);
           state.conversation.approvals.append(card.node);
         }
-        approval.wrap.hidden = !awaiting || !canManage || Boolean(approval.sent);
-        approval.status.textContent = candidate.decision === 'promoted' ? '已批准 · 已晋升'
-          : candidate.decision === 'rejected' ? '已拒绝'
-          : approval.sent ? portalApprovals.decisions[approval.sent] + ' · 等待演进继续'
-          : awaiting ? (canManage ? '等待人工审批' : '等待人工审批 · 只读') : '当前未等待审批';
+        approval.node.hidden = !awaiting || Boolean(approval.sent);
+        approval.controls.hidden = !canManage;
+        approval.status.textContent = canManage ? '等待人工审批' : '等待人工审批 · 只读';
       }
       if (state.approval && state.focusedApproval !== state.approval) {
-        portalApprovals.focus(approvalCards.get(state.approval)?.node || state.conversation.title);
+        const card = approvalCards.get(state.approval)?.node;
+        portalApprovals.focus(card && !card.hidden ? card : state.conversation.title);
         state.focusedApproval = state.approval;
       }
     }
@@ -442,7 +443,7 @@ const portalEvolution = (() => {
       updateSpend();
       state.dag.refresh(id, true);
       state.polling = activeStates.includes(row.status);
-      state.conversation.setState(state.polling ? '' : '演进已结束，无法发送消息。', row.status === 'paused');
+      state.conversation.setState(state.polling ? '' : '演进已结束', row.status === 'paused');
       updateApprovals(row);
       void state.conversation.refresh();
       const nextSignature = JSON.stringify([row.status, row.reason, row.spent_usd, row.best_champion_id,
@@ -748,16 +749,15 @@ const portalEvolution = (() => {
       ui.panel('采集候选', ...(filter ? [filter] : []), target, rows, message));
     function operations(row, query, feedback) {
       if (row.status !== 'pending') return '—';
+      const href = pageHref('harvest') + '/approval/' + enc(row.id);
       return ui.actions(
         ui.can('eval-admin') && ui.action('批准发布', async () => {
           if (!confirm('确认将该候选发布到目标评测套件？')) return;
-          await data(harvestPath + '/' + enc(row.id) + '/approve' + query, {});
-          void portalApprovals.refresh(true);
+          await portalApprovals.submit(harvestPath + '/' + enc(row.id) + '/approve' + query, {}, href);
           await refresh(state);
         }, feedback),
         ui.action('拒绝', async () => {
-          await data(harvestPath + '/' + enc(row.id) + '/reject' + query, {});
-          void portalApprovals.refresh(true);
+          await portalApprovals.submit(harvestPath + '/' + enc(row.id) + '/reject' + query, {}, href);
           await refresh(state);
         }, feedback),
       );

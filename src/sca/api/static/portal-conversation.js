@@ -3,13 +3,14 @@
 const portalConversation = (() => {
   const ui = portalUI;
   const clock = new Intl.DateTimeFormat('zh-CN', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  const minuteClock = new Intl.DateTimeFormat('zh-CN', {hour: '2-digit', minute: '2-digit'});
   const modes = {queue: '排队', interrupt: '打断', guidance: '指引', pause: '暂停', resume: '恢复',
     stop: '停止', skip: '跳过', budget: '预算'};
   const receipts = {pending: '等待送达', delivered: '已送达', applied: '已应用', rejected: '未应用'};
 
-  function timeLabel(item) {
+  function timeLabel(item, format = clock) {
     const time = new Date(item.created_at);
-    const timestamp = el('time', Number.isFinite(time.valueOf()) ? clock.format(time) : '');
+    const timestamp = el('time', Number.isFinite(time.valueOf()) ? format.format(time) : '');
     timestamp.dateTime = item.created_at;
     timestamp.title = ui.date(item.created_at);
     return timestamp;
@@ -125,31 +126,47 @@ const portalConversation = (() => {
     jump.type = 'button';
     jump.hidden = true;
     const scrollArea = el('div', undefined, 'conversation-scroll-area');
-    scrollArea.append(feed, jump);
     const approvals = el('div', undefined, 'conversation-approvals');
+    scrollArea.append(approvals, feed, jump);
 
     const isTask = type === 'task';
-    const message = ui.field(isTask ? '插话' : '给下一代提议的指引', 'text', {
-      multiline: true, required: true, rows: 2, maxLength: 4000,
-      placeholder: '回车发送，Shift + 回车换行',
+    const message = isTask ? '插话' : '给下一代提议的指引';
+    const input = el('textarea', undefined, 'conversation-input');
+    Object.assign(input, {name: 'text', required: true, rows: 1, maxLength: 4000, enterKeyHint: 'send',
+      placeholder: message, title: '回车发送，Shift + 回车换行',
     });
-    const input = message.querySelector('textarea');
-    const form = el('form', undefined, 'stack conversation-composer');
-    const controls = el('fieldset', undefined, 'stack');
+    input.setAttribute('aria-label', message);
+    const form = el('form', undefined, 'conversation-composer');
+    const controls = el('fieldset');
+    const row = el('div', undefined, 'conversation-compose-row');
+    row.append(input);
+    const mode = isTask ? el('select') : null;
+    if (mode) {
+      mode.name = 'mode';
+      mode.setAttribute('aria-label', '送达方式');
+      for (const key of ['queue', 'interrupt']) {
+        const option = el('option', modes[key]);
+        option.value = key;
+        mode.append(option);
+      }
+      mode.value = 'queue';
+      row.append(mode);
+    }
     const send = el('button', '发送', 'primary');
     send.type = 'submit';
-    const mode = isTask ? ui.field('送达方式', 'mode', {
-      value: 'queue', choices: [['queue', '排队'], ['interrupt', '打断']],
-    }) : null;
-    controls.append(message, ui.actions(mode, send));
+    row.append(send);
+    controls.append(row);
     const feedback = el('p', undefined, 'status-text conversation-status');
     feedback.setAttribute('role', 'status');
-    const disabled = el('p', undefined, 'status-text conversation-status');
-    form.append(controls, disabled, feedback);
+    form.append(controls, feedback);
+    const footer = el('footer', undefined, 'conversation-ended');
+    const endMessage = el('p');
+    endMessage.setAttribute('role', 'status');
+    footer.append(endMessage);
     mount.classList.add('panel', 'portal-conversation');
     const title = el('h2', '对话');
     title.tabIndex = -1;
-    mount.replaceChildren(title, approvals, scrollArea, form);
+    mount.replaceChildren(title, scrollArea, form, footer);
 
     let cursor, loading, posting, ended = '', paused = false, finishedLoaded = false;
     const seen = new Set();
@@ -158,7 +175,8 @@ const portalConversation = (() => {
     const allowed = () => canWrite() && !ended && !posting && active();
     const pause = action('暂停', 'pause'), resume = action('恢复', 'resume');
     if (!isTask) {
-      const budget = el('details', undefined, 'conversation-budget');
+      const steering = el('details', undefined, 'conversation-steering');
+      const budget = el('details');
       const field = ui.field('剩余预算（美元）', 'budget', {type: 'number', min: 0, step: 'any'});
       const amount = field.querySelector('input');
       const apply = el('button', '应用预算');
@@ -173,8 +191,9 @@ const portalConversation = (() => {
         if (await post({mode: 'budget', remaining_budget_usd: amount.valueAsNumber})) budget.open = false;
       };
       budget.append(el('summary', '调整剩余预算'), ui.actions(field, apply));
-      controls.prepend(ui.actions(pause, resume, action('本代结束后停止', 'stop'),
+      steering.append(el('summary', '运行控制'), ui.actions(pause, resume, action('本代结束后停止', 'stop'),
         action('跳过当前候选', 'skip')), budget);
+      controls.prepend(steering);
     }
 
     function action(label, mode) {
@@ -192,9 +211,10 @@ const portalConversation = (() => {
     }
 
     function syncForm() {
-      form.hidden = !canWrite();
+      form.hidden = !canWrite() || Boolean(ended);
       controls.disabled = !allowed();
-      disabled.textContent = ended;
+      footer.hidden = !ended;
+      endMessage.textContent = ended;
       pause.hidden = paused;
       resume.hidden = !paused;
     }
@@ -283,7 +303,13 @@ const portalConversation = (() => {
       } else {
         row.classList.add('conversation-system');
         body.classList.add('conversation-chip');
-        body.append(item.dag_node_id ? locate(item.dag_node_id, item.text) : el('span', item.text), timeLabel(item));
+        const decision = ['review.submitted', 'approval.decision'].includes(item.kind);
+        body.append(item.dag_node_id ? locate(item.dag_node_id, item.text) : el('span', item.text));
+        if (decision) {
+          body.classList.add('conversation-approval-chip');
+          body.append(el('span', '·'));
+        }
+        body.append(timeLabel(item, decision ? minuteClock : clock));
         row.append(body);
       }
       list.append(row);
@@ -304,9 +330,22 @@ const portalConversation = (() => {
       list.focus({preventScroll: true});
     };
 
-    async function refresh() {
+    function recordDecision(decision, dagNodeId) {
+      const follow = atEnd();
+      addItem({id: 'decision:' + dagNodeId, kind: 'approval.decision', text: portalApprovals.decisions[decision],
+        dag_node_id: dagNodeId, created_at: new Date().toISOString()});
+      empty.hidden = true;
+      if (follow) scrollToEnd();
+      else jump.hidden = false;
+    }
+
+    async function refresh(afterCurrent = false) {
       if (!active() || finishedLoaded) return;
-      if (loading) return loading;
+      if (loading) {
+        if (!afterCurrent) return loading;
+        await loading;
+        return refresh();
+      }
       const terminal = ended;
       loading = (async () => {
         try {
@@ -339,11 +378,10 @@ const portalConversation = (() => {
       if (!allowed()) return false;
       posting = true;
       syncForm();
-      ui.setMessage(feedback, '正在发送…');
+      ui.setMessage(feedback, '');
       try {
         await data(path + '/messages', body);
         if (!active()) return false;
-        ui.setMessage(feedback, '已发送，等待回执。');
         await refresh();
         return active();
       } catch (error) {
@@ -358,17 +396,27 @@ const portalConversation = (() => {
     form.onsubmit = async event => {
       event.preventDefault();
       if (!allowed() || !input.value.trim()) return;
-      const value = isTask ? ui.value(form, 'mode') : 'guidance';
-      if (await post({text: input.value, mode: value})) input.value = '';
+      if (await post({text: input.value, mode: mode?.value || 'guidance'})) {
+        input.value = '';
+        input.oninput?.();
+      }
       if (allowed()) input.focus({preventScroll: true});
     };
+    if (!globalThis.CSS?.supports('field-sizing: content')) {
+      input.oninput = () => {
+        const follow = atEnd();
+        input.style.blockSize = '';
+        input.style.blockSize = input.scrollHeight + input.offsetHeight - input.clientHeight + 'px';
+        if (follow) scrollToEnd();
+      };
+    }
     input.onkeydown = event => {
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
       if (allowed()) form.requestSubmit();
     };
     syncForm();
-    return {approvals, title, refresh, setState, destroy() { mount.replaceChildren(); }};
+    return {approvals, title, refresh, setState, recordDecision, destroy() { mount.replaceChildren(); }};
   }
 
   return {create};
@@ -380,7 +428,9 @@ const portalApprovals = (() => {
     task_selection: 'Best-of-N 候选选择', evolution_candidate: '候选晋升审批', harvest: '采集发布审批',
   };
   const decisions = {approve: '已批准', request_changes: '已要求修改', reject: '已拒绝'};
-  let identity, nextFetch = 0, pending;
+  const taskKinds = {coding: '编码任务', analysis: '数据分析'};
+  const submitted = new Map();
+  let identity, nextFetch = 0, pending, rows = [];
 
   function focus(node) {
     if (!node) return;
@@ -395,20 +445,64 @@ const portalApprovals = (() => {
     const heading = el('h3', title);
     heading.id = id + '-title';
     node.setAttribute('aria-labelledby', heading.id);
-    const status = el('p', undefined, 'conversation-approval-state');
+    const status = el('span', undefined, 'conversation-approval-state');
     status.setAttribute('role', 'status');
     const feedback = el('p', undefined, 'status-text conversation-status');
     feedback.setAttribute('role', 'status');
-    node.append(heading, status);
-    return {node, status, feedback};
+    const header = el('header', undefined, 'conversation-approval-header');
+    const summary = el('div', undefined, 'conversation-approval-summary');
+    summary.append(heading, status);
+    header.append(summary);
+    node.append(header);
+    return {node, header, status, feedback};
   }
 
   function reset() {
     identity = pending = undefined;
     nextFetch = 0;
+    rows = [];
+    submitted.clear();
     $('approvals-count').textContent = '';
     $('approvals-list').replaceChildren();
     $('approvals-status').textContent = '';
+  }
+
+  function renderInbox() {
+    const list = el('ul', undefined, 'approval-inbox');
+    const now = Date.now();
+    for (const [href, {item, until}] of submitted) {
+      const current = rows.find(row => row.href === href);
+      if (!current || until <= now || current.kind !== item.kind
+          || (item.kind.startsWith('task_') && current.created_at !== item.created_at)) submitted.delete(href);
+    }
+    const visible = rows.filter(row => !submitted.has(row.href));
+    for (const row of visible) {
+      const entry = el('li');
+      const details = el('div');
+      const context = [labels[row.kind], taskKinds[row.task_kind] || row.task_kind,
+        row.backend && portalUI.backendLabel(row.backend), row.project_name].filter(Boolean);
+      const title = evidenceLink(row.title, row.href);
+      title.className = 'approval-inbox-title';
+      title.title = row.title;
+      details.append(el('small', context.join(' · ')), title);
+      entry.append(details, el('small', portalUI.date(row.created_at)));
+      list.append(entry);
+    }
+    $('approvals-count').textContent = ' (' + visible.length + ')';
+    $('approvals-list').replaceChildren(visible.length ? list : el('p', '当前没有待审批事项。', 'empty-state'));
+  }
+
+  async function submit(path, body, href) {
+    const viewer = portalIdentity;
+    const item = rows.find(row => row.href === href);
+    await api(path, body);
+    if (portalIdentity !== viewer) return;
+    // Signals can succeed before the workflow leaves review. Hide only the submitted round.
+    if (item) {
+      submitted.set(href, {item, until: Date.now() + 12000});
+      renderInbox();
+    }
+    void refresh(true);
   }
 
   function refresh(force = false) {
@@ -421,18 +515,11 @@ const portalApprovals = (() => {
     if (!force && (pending || Date.now() < nextFetch)) return pending;
     nextFetch = Date.now() + 12000;
     // A refresh after a decision supersedes any inbox request started before it.
-    const request = data('/approvals').then(({count, items}) => {
+    const request = data('/approvals').then(({items}) => {
       if (pending !== request || portalIdentity !== viewer) return;
-      $('approvals-count').textContent = ' (' + count + ')';
-      const list = el('ul', undefined, 'approval-inbox');
-      for (const row of items) {
-        const entry = el('li');
-        const details = el('div');
-        details.append(el('small', labels[row.kind]), evidenceLink(row.title, row.href));
-        entry.append(details, el('small', portalUI.date(row.created_at)));
-        list.append(entry);
-      }
-      $('approvals-list').replaceChildren(items.length ? list : el('p', '当前没有待审批事项。', 'empty-state'));
+      rows = items;
+      renderInbox();
+      if (submitted.size) nextFetch = 0;
       portalUI.setMessage($('approvals-status'), '');
     }).catch(error => {
       if (pending === request && portalIdentity === viewer) {
@@ -445,5 +532,5 @@ const portalApprovals = (() => {
     return request;
   }
 
-  return {card, decisions, focus, refresh, reset};
+  return {card, decisions, focus, refresh, reset, submit};
 })();

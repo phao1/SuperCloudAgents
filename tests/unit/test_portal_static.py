@@ -79,7 +79,7 @@ const flowModel = require(process.argv[2]);
 const {buildRecords, activeTiming} = require(process.argv[3]);
 class Element {
  constructor(tag){this.tag=tag;this.children=[];this.dataset={};this.textContent='';this.className='';this.value='';
- this.parentElement={};this.classList={add: name=>{this.className+=' '+name},toggle:()=>{}}}
+ this.parentElement={};this.style={};this.classList={add: name=>{this.className+=' '+name},toggle:()=>{}}}
  append(...items){this.children.push(...items)}
  replaceChildren(...items){this.children=items}
  get elements(){return {namedItem:name=>this.querySelector('[name="'+name+'"]')}}
@@ -349,6 +349,9 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  form.requestSubmit=()=>{submitted=form.onsubmit({preventDefault(){}})};
  const enter={key:'Enter',preventDefault(){}};
  input.value='添加测试';
+ Object.assign(input,{scrollHeight:78,offsetHeight:40,clientHeight:38});
+ input.oninput();
+ assert.equal(input.style.blockSize,'80px');
  input.onkeydown({...enter,isComposing:true});assert(!submitted);
  input.onkeydown({...enter,shiftKey:true});assert(!submitted);
  form.querySelector('select').value='interrupt';
@@ -363,6 +366,7 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  assert.equal(input.value,'');
  assert(!controls.disabled);
  portalTasks.render({...currentTask,state:'SUCCEEDED'},[]);
+ assert(form.hidden);
  assert(controls.disabled);
 
  const old='11111111-1111-1111-1111-111111111111';
@@ -439,4 +443,4 @@ def test_interjection_composer_is_next_to_the_dag():
     source = Path('src/sca/api/static/portal.html').read_text()
     composer = Path('src/sca/api/static/portal-conversation.js').read_text()
     assert source.index('id="task-dag"') < source.index('id="task-conversation"') < source.index('id="timeline"')
-    assert "['interrupt', '打断']" in composer and 'maxLength: 4000' in composer
+    assert "interrupt: '打断'" in composer and 'rows: 1, maxLength: 4000' in composer

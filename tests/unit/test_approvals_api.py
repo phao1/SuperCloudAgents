@@ -4,9 +4,11 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import httpx
+import pytest
 from sqlalchemy.engine import make_url
 
 from sca.api.app import create_app
+from sca.api.approvals import _title
 from sca.config import Settings
 from sca.core.errors import AuthError
 from sca.core.models import Principal
@@ -16,7 +18,7 @@ async def test_inbox_scopes_the_aggregate_and_matches_existing_access(monkeypatc
     origin = 'http://127.0.0.1:8000'
     monkeypatch.setenv('SCA_RUNTIME_MODE', 'source')
     monkeypatch.delenv('SCA_PORTAL_LOCAL_CONFIG', raising=False)
-    settings = Settings(_env_file=None, data_dir=tmp_path, guest_view='local', guest_tenant='eval',
+    settings = Settings(_env_file=None, data_dir=tmp_path, agent_backend='dsh', guest_view='local', guest_tenant='eval',
                         portal_require_token=True, eval_api_token='admin')
     monkeypatch.setattr('sca.api.app.get_settings', lambda: settings)
     now = datetime(2026, 11, 22, tzinfo=UTC)
@@ -25,11 +27,13 @@ async def test_inbox_scopes_the_aggregate_and_matches_existing_access(monkeypatc
     )
 
     def task(id_, **kinds):
-        return {'id': id_, 'source': 'task', 'title': 'Review fixture revisions', 'created_at': now,
+        return {'id': id_, 'source': 'task', 'title': 'Review fixture revisions', 'created_at': now, 'task_kind': 'coding',
                 'plan_review': False, 'fix_kind': None, 'selection': None, 'chosen': None, **kinds}
 
     rows = {
-        'eval': [task(task_id), task(plan_id, plan_review=True), task(fix_id, fix_kind='opencode-fix'),
+        'eval': [task(task_id, title='## **Review** `app.py`\n```sca-fake\necho fixture\n```',
+                      backend='fake', project_name='边界测试'), task(plan_id, plan_review=True),
+                 task(fix_id, fix_kind='opencode-fix'),
                  task(best_id, selection='human'),
                  {'id': candidate_id, 'source': 'evolution', 'evolution_id': evolution_id,
                   'title': 'Candidate', 'created_at': now},
@@ -76,11 +80,18 @@ async def test_inbox_scopes_the_aggregate_and_matches_existing_access(monkeypatc
         ]:
             response = await client.get('/v1/approvals?tenant_id=eval', headers={'Authorization': f'Bearer {role}'})
             assert response.status_code == 200 and calls[-1] == (tenant, evolutions, harvest)
+            assert response.headers['Cache-Control'] == 'no-store'
             assert response.json()['count'] == expected
-            links = {row['kind']: row['href'] for row in response.json()['items']}
+            items = {row['kind']: row for row in response.json()['items']}
+            links = {kind: row['href'] for kind, row in items.items()}
             assert links['task_result'] == f'#/tasks/{task_id if tenant == "eval" else other_id}/approval'
             if tenant == 'eval':
                 assert str(other_id) not in response.text
+                assert {field: items['task_result'][field] for field in ('title', 'task_kind', 'backend', 'project_name')} == {
+                    'title': 'Review app.py', 'task_kind': 'coding', 'backend': 'fake', 'project_name': '边界测试',
+                }
+                assert items['task_plan']['backend'] == 'dsh'
+                assert items['task_plan']['project_name'] is None
                 assert links['task_plan'] == f'#/tasks/{plan_id}/approval'
                 assert links['task_fix'] == f'#/tasks/{fix_id}/approval'
                 assert links['task_selection'] == f'#/tasks/{best_id}/approval'
@@ -102,3 +113,14 @@ async def test_inbox_scopes_the_aggregate_and_matches_existing_access(monkeypatc
                         {'Authorization': 'Bearer invalid'}):
             assert (await client.get('/v1/approvals', headers=headers)).status_code == 401
         assert calls == []
+
+
+@pytest.mark.parametrize(('instruction', 'expected'), [
+    ('```sca-fake\necho fixture\n```\n\n## **Fix** [the tests](https://example.test/tests) ##', 'Fix the tests'),
+    ('> ~~~~sh\n> echo fixture\n> ~~~\n> echo fixture\n> ~~~~\n- __Empty input__', 'Empty input'),
+    ('```sca-fake\necho fixture', 'fixture-id'),
+    ('---\n\n1. Update foo_bar.py\nMore notes.', 'Update foo_bar.py'),
+    ('回' * 161, '回' * 159 + '…'),
+])
+def test_approval_title_uses_the_first_plain_text_line(instruction, expected):
+    assert _title(instruction, 'fixture-id') == expected

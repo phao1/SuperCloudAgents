@@ -3242,25 +3242,37 @@ class Store:
     # Portal approvals inbox
 
     async def pending_approvals(self, *, include_evolutions: bool, include_harvest: bool) -> list[dict]:
-        from sca.db.schema import evolution_candidates, evolutions, harvest_candidates
+        from sca.db.schema import evolution_candidates, evolutions, harvest_candidates, projects
 
         tenant = self._feature_tenant()
-        t, e = tasks.c, events.c
+        t, e, p, s = tasks.c, events.c, projects.c, sessions.c
         plan_review = select(e.payload.has_key('plan')).where(
             e.task_id == t.id, e.tenant_id == tenant, e.type == 'review.requested',
             e.payload['subtask'].astext.is_(None), e.payload['best_of_candidate'].astext.is_(None),
         ).order_by(e.seq.desc()).limit(1).scalar_subquery()
+        review_started = select(e.created_at).where(
+            e.task_id == t.id, e.tenant_id == tenant, e.type == 'task.state_changed',
+            e.payload['to'].astext == TaskState.AWAITING_REVIEW,
+        ).order_by(e.seq.desc()).limit(1).scalar_subquery()
+        session_backend = select(s.backend).where(
+            s.task_id == t.id, s.tenant_id == tenant,
+        ).order_by(s.created_at.desc()).limit(1).scalar_subquery()
         task_query = select(
-            t.id, t.updated_at.label('created_at'), plan_review.label('plan_review'),
-            t.spec['instruction'].astext.label('title'),
+            t.id, func.coalesce(review_started, t.updated_at).label('created_at'),
+            plan_review.label('plan_review'),
+            func.coalesce(t.spec['instruction'].astext, t.spec['question'].astext).label('title'),
+            t.kind.label('task_kind'), p.name.label('project_name'),
+            func.coalesce(session_backend, t.spec['agent_backend'].astext).label('backend'),
             t.spec['labels']['kind'].astext.label('fix_kind'),
             t.spec['best_of']['select'].astext.label('selection'),
             t.result['best_of_chosen'].astext.label('chosen'),
-        ).where(t.tenant_id == tenant, t.state == TaskState.AWAITING_REVIEW)
+        ).select_from(tasks.outerjoin(projects, (p.id == t.project_id) & (p.tenant_id == t.tenant_id)
+            & p.deleted_at.is_(None))).where(t.tenant_id == tenant, t.state == TaskState.AWAITING_REVIEW)
         run, candidate = evolutions.c, evolution_candidates.c
         evolution_query = select(
             candidate.id, run.id.label('evolution_id'), run.updated_at.label('created_at'),
             candidate.hypothesis.label('title'),
+            func.coalesce(run.config['agent_backend'].astext, 'opencode').label('backend'),
         ).select_from(evolution_candidates.join(evolutions, run.id == candidate.evolution_id)).where(
             run.tenant_id == tenant, candidate.tenant_id == tenant, run.status == 'awaiting_approval',
             candidate.decision == 'pending', candidate.reason == 'awaiting approval',
