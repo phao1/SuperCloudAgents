@@ -147,7 +147,7 @@
   display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center;
   gap: .25rem 1rem; padding: .65rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere;
 }
-.approval-inbox-title { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.approval-inbox-title { display: block; }
 .approval-inbox li:last-child { border-bottom: 0; }
 @media (max-width: 900px) {
   .portal-run-workbench { grid-template-columns: minmax(0, 1fr); }

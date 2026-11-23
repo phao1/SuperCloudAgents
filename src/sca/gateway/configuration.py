@@ -3,7 +3,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from sca.gateway.model_providers import DEEPSEEK_MODELS, read_registry
+from sca.gateway.model_providers import DEEPSEEK_MODELS, ProviderRegistry, read_registry
 
 
 def demo_config_path() -> Path | None:
@@ -27,7 +27,13 @@ def model_configured(path: Path | None = None) -> bool:
         return True
     from sca.config import get_settings
 
-    return deepseek_configured(path) or bool(read_registry(get_settings().data_dir).providers)
+    registry = read_registry(get_settings().data_dir)
+    return bool(active_model_names(registry, path))
+
+
+def active_model_names(registry: ProviderRegistry, path: Path | None) -> list[str]:
+    deepseek = registry.deepseek_enabled and path is not None and deepseek_configured(path)
+    return [*(DEEPSEEK_MODELS if deepseek else ()), *registry.models]
 
 
 def prefer_model(preferred: str, choices: list[str]) -> str:
@@ -38,8 +44,10 @@ def local_default_model(data_dir: Path, preferred: str) -> str:
     path = demo_config_path()
     if path is None:
         return preferred
-    models = read_registry(data_dir).models
-    if not models or preferred in models:
+    registry = read_registry(data_dir)
+    if not registry.providers and registry.deepseek_enabled and registry.default_model is None:
         return preferred
-    choices = [*DEEPSEEK_MODELS, *models] if deepseek_configured(path) else list(models)
+    choices = active_model_names(registry, path)
+    if registry.default_model is not None and registry.default_model in choices:
+        return registry.default_model
     return prefer_model(preferred, choices)

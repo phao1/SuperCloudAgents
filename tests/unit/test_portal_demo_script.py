@@ -148,6 +148,7 @@ stop() { :; }
         binary.chmod(0o700)
     monkeypatch.setenv("PATH", str(binaries), prepend=":")
     monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("SCA_DOCKER_BIN", raising=False)
     monkeypatch.delenv("SCA_PORTAL_REQUIRE_TOKEN", raising=False)
     monkeypatch.delenv("SCA_STRIPE_SIMULATOR", raising=False)
 
@@ -197,6 +198,48 @@ def test_invalid_mode_is_rejected(demo, monkeypatch):
     monkeypatch.setenv("SCA_RUNTIME_MODE", "other")
     assert run("up").returncode != 0
     assert run("up", "--mode", "other").returncode == 2
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(("preference", "env_mode", "flags", "expected"), [
+    ('{"mode":"source"}', "", (), "source"),
+    ('{"mode":"source"}', "docker", (), "docker"),
+    ('{"mode":"docker"}', "docker", ("--mode", "source"), "source"),
+    ('{"mode":"bad"}', "", (), "docker"),
+    ("{", "", (), "docker"),
+])
+def test_up_reads_runtime_preference_after_explicit_overrides(demo, monkeypatch, preference, env_mode, flags, expected):
+    run, portal_env = demo
+    (portal_env.parent / "runtime-mode.json").write_text(preference, encoding="utf-8")
+    monkeypatch.setenv("SCA_RUNTIME_MODE", env_mode)
+    result = run("up", *flags)
+    assert result.returncode == 0, result.stderr
+    assert f"SCA_RUNTIME_MODE='{expected}'" in portal_env.read_text()
+    assert (portal_env.parent / "runtime-mode.json").read_text() == preference
+
+
+@POSIX_ONLY
+def test_probe_docker_respects_wrapper_and_docker_group(demo, monkeypatch):
+    run, portal = demo
+    root = portal.parents[1]
+    monkeypatch.setenv("DEMO_INFO_STATUS", "1")
+    assert run("probe-docker").returncode == 3
+    (root / "bin/sg").write_text('#!/bin/sh\nexport DEMO_INFO_STATUS=0\nexec /bin/sh -c "$3"\n')
+    assert run("probe-docker").returncode == 0
+    monkeypatch.setenv("DEMO_COMPOSE_STATUS", "1")
+    assert run("probe-docker").returncode == 4
+    monkeypatch.delenv("DEMO_COMPOSE_STATUS")
+
+    wrapper = root / "custom Docker"
+    monkeypatch.setenv("SCA_DOCKER_BIN", str(wrapper))
+    assert run("probe-docker").returncode == 2
+    wrapper.write_text('#!/bin/sh\nexport DEMO_INFO_STATUS=0\nexec docker "$@"\n')
+    wrapper.chmod(0o700)
+    assert run("probe-docker").returncode == 0
+    result = run("up", "--mode", "docker")
+    assert result.returncode == 0, result.stderr
+    command = (portal.parent / "run/docker").read_text().splitlines()[-1]
+    assert shlex.split(command) == ["exec", str(wrapper), "$@"]
 
 
 @POSIX_ONLY
@@ -332,18 +375,21 @@ def test_source_history_uses_native_postgres_only(demo, command, monkeypatch):
 
 
 @POSIX_ONLY
-def test_docker_history_uses_saved_portal_env_without_starting_services(demo):
+@pytest.mark.parametrize(("command", "flags"), [
+    ("export-history", ()), ("export-history", ("--mode", "docker")), ("import-history", ("--mode", "docker")),
+])
+def test_docker_history_uses_saved_portal_env_without_starting_services(demo, command, flags):
     run, portal_env = demo
     root = portal_env.parents[1]
     with portal_env.open("a") as config:
         config.write('export SCA_RUNTIME_MODE=docker SCA_DATA_DIR="$PWD/portal-data"\n')
         config.write('export SCA_DATABASE_URL=postgresql+asyncpg://fixture.invalid:6543/sca\n')
     archive = root / "server history.zip"
-    result = run("export-history", str(archive), cwd=root)
+    result = run(command, *flags, str(archive), cwd=root)
     assert result.returncode == 0, result.stderr
     actual = json.loads((root / "history-calls").read_text())
     route, action, path = actual.pop("args")
-    assert (route, action, Path(path)) == ("history", "export", archive)
+    assert (route, action, Path(path)) == ("history", command.removesuffix("-history"), archive)
     assert actual == {"mode": "docker", "data_dir": "portal-data", "db_port": 6543}
     assert not (root / "startup-calls").exists()
     assert not (root / "docker-calls").exists()

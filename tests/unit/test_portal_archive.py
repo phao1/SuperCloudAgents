@@ -13,7 +13,7 @@ def test_windows_archive_uses_portal_shell_and_published_records():
     portal = responses["/portal"][1].decode("utf-8")
 
     assert '<script src="/portal/assets/portal-archive.js"></script>' in portal
-    assert 'href="#/overview"' in portal
+    assert 'href="#/home"' in portal
     assert 'href="#/evals"' in portal
     assert responses["/portal/assets/portal-archive.js"][1]
     assert responses["/portal/history"][1] == (

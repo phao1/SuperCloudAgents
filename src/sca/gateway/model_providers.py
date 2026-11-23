@@ -85,6 +85,7 @@ class ProviderInput(ProviderConfig):
 class Provider(ProviderConfig):
     id: UUID
     has_key: bool
+    enabled: bool = True
 
     @property
     def key_env(self) -> str:
@@ -98,6 +99,8 @@ class RegistryError(ValueError):
 class ProviderRegistry(BaseModel):
     providers: list[Provider] = Field(default_factory=list)
     keys: dict[str, SecretStr] = Field(default_factory=dict, exclude=True, repr=False)
+    deepseek_enabled: bool = True
+    default_model: ModelName | None = None
 
     @model_validator(mode="after")
     def check_keys(self) -> ProviderRegistry:
@@ -106,8 +109,12 @@ class ProviderRegistry(BaseModel):
         return self
 
     @property
+    def active_providers(self) -> list[Provider]:
+        return [row for row in self.providers if row.enabled]
+
+    @property
     def models(self) -> dict[str, ModelRoute]:
-        return {model.name: model for row in self.providers for model in row.models}
+        return {model.name: model for row in self.active_providers for model in row.models}
 
     def environment(self) -> dict[str, str]:
         return {name: key.get_secret_value() for name, key in self.keys.items()}
@@ -123,7 +130,8 @@ class ProviderRegistry(BaseModel):
             if model.name.casefold() in aliases:
                 raise RegistryError("平台模型名重复或为网关保留名称")
             aliases.add(model.name.casefold())
-        provider = Provider(**body.model_dump(), id=provider_id, has_key=False)
+        provider = Provider(**body.model_dump(), id=provider_id, has_key=False,
+                            enabled=previous.enabled if previous else True)
         keys = dict(self.keys)
         if "api_key" in body.model_fields_set:
             if body.api_key is None:
@@ -133,12 +141,25 @@ class ProviderRegistry(BaseModel):
         provider.has_key = provider.key_env in keys
         index = next((i for i, row in enumerate(self.providers) if row.id == provider_id), len(records))
         records.insert(index, provider)
-        return ProviderRegistry(providers=records, keys=keys)
+        default_model = self.default_model
+        if previous and any(model.name == default_model for model in previous.models) and not any(
+            model.name == default_model for model in provider.models
+        ):
+            default_model = None
+        return ProviderRegistry(providers=records, keys=keys, deepseek_enabled=self.deepseek_enabled,
+                                default_model=default_model)
+
+    def with_provider_enabled(self, provider: Provider, enabled: bool) -> ProviderRegistry:
+        return self.model_copy(update={"providers": [
+            row.model_copy(update={"enabled": enabled}) if row.id == provider.id else row for row in self.providers
+        ]})
 
     def without_provider(self, provider: Provider) -> ProviderRegistry:
+        default_model = None if any(row.name == self.default_model for row in provider.models) else self.default_model
         return ProviderRegistry(
             providers=[row for row in self.providers if row.id != provider.id],
             keys={name: key for name, key in self.keys.items() if name != provider.key_env},
+            deepseek_enabled=self.deepseek_enabled, default_model=default_model,
         )
 
     def save(self, data_dir: Path) -> None:
@@ -209,13 +230,15 @@ def deployment(provider: Provider, model: ModelRoute, *, docker: bool) -> dict:
 def gateway_config(root: Path, data_dir: Path, registry: ProviderRegistry, *,
                    deepseek: bool, docker: bool) -> Path:
     templates = root / "deploy" / "litellm"
-    if not registry.providers:
+    deepseek = deepseek and registry.deepseek_enabled
+    active = registry.active_providers
+    if not active:
         return templates / ("config.yaml" if deepseek else "history.yaml")
     config = yaml.safe_load((templates / "config.yaml").read_text(encoding="utf-8"))
     if not deepseek:
         config["model_list"] = []
     config["model_list"].extend(deployment(row, model, docker=docker)
-                                for row in registry.providers for model in row.models)
+                                for row in active for model in row.models)
     config["litellm_settings"] = {
         **config.get("litellm_settings", {}), "drop_params": True,
         "redact_messages_in_exceptions": True, "log_raw_request_response": False,
@@ -231,7 +254,8 @@ def docker_gateway_command(root: Path, data_dir: Path, registry: ProviderRegistr
                            docker_bin: str, options: Sequence[str]) -> list[str]:
     command = [docker_bin, "compose", "--env-file", str(root / ".env"),
                "-f", str(root / "deploy/docker-compose.yml")]
-    if registry.providers or "--force-recreate" in options:
+    active = registry.active_providers
+    if active or "--force-recreate" in options:
         service: dict = {
             "healthcheck": {
                 "test": ["CMD", "python", "-c", (
@@ -241,8 +265,8 @@ def docker_gateway_command(root: Path, data_dir: Path, registry: ProviderRegistr
                 "interval": "2s", "timeout": "3s", "retries": 35,
             },
         }
-        if registry.providers:
-            service["environment"] = list(registry.keys)
+        if active:
+            service["environment"] = [row.key_env for row in active if row.has_key]
             if sys.platform == "linux":
                 service["extra_hosts"] = ["host.docker.internal:host-gateway"]
         override = data_dir.resolve() / COMPOSE_FILE

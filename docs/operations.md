@@ -55,9 +55,12 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 ## 本机 Portal 访问令牌
 
 源码和 Docker 演示启动脚本默认允许本机浏览器以 `eval` 管理员身份免令牌访问。打开
-`http://127.0.0.1:8000/portal`，在「概览 → 工作空间连接」打开「需要访问令牌」后，
+`http://127.0.0.1:8000/portal`，在「设置 → 访问与安全」打开「需要访问令牌」后，
 新请求立即需要令牌才能以管理员身份操作。用 Bash 的 `grep SCA_EVAL_API_TOKEN .data/portal.env`
 或 PowerShell 的 `Select-String SCA_EVAL_API_TOKEN .\.data\portal.env` 在本机私下查看令牌。
+
+尚未连接时，在首页或受限页面点「前往连接」，在「设置 → 访问与安全」输入令牌并连接。
+从受限页面进入连接时，登录成功且具备权限后会返回原页面。访客也可以点「只读访客模式」提示条上的「登录」。
 
 启动默认值是 `SCA_PORTAL_REQUIRE_TOKEN=0`。启动脚本优先使用进程环境中的值，其次是
 `.data/portal.env` 已保存的值，再其次是 `.env`，并将结果保存到 `.data/portal.env`。
@@ -70,6 +73,7 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 
 ```bash
 API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/whoami" -H "Authorization: Bearer $SCA_EVAL_API_TOKEN"
 curl -fsS "$API/v1/portal/access"
 curl -fsS -X PUT "$API/v1/portal/access" \
   -H "Authorization: Bearer $SCA_EVAL_API_TOKEN" \
@@ -114,8 +118,8 @@ curl -fsS "$API/v1/tasks/$TASK_ID/messages"
 
 访客的配置响应包含 `guest_view: true`、`guest_tenant` 和 `model_configured`。
 演示环境没有 DeepSeek 密钥时，Docker 和源码模式均以空模型列表启动 LiteLLM。此时用令牌提交
-任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在本机 Portal 概览
-保存密钥会重启网关。手工更新 `.env` 后可用
+任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在本机 Portal 的
+「设置 → 模型」保存密钥会重启网关。手工更新 `.env` 后可用
 `bash scripts/portal_demo.sh restart-gateway` 应用变更。
 
 ## 套餐与用量
@@ -260,15 +264,14 @@ bash scripts/portal_demo.sh down
 它为 API 和 Worker 设置 `SCA_DATABASE_URL`、执行 `alembic upgrade head`，并为网关创建独立的
 `litellm` 数据库。原生 Postgres 可选安装 pgvector，缺少扩展时记忆检索使用近期记录。
 Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/temporal/dev.db`。LiteLLM 1.110.2 在
-`.data/litellm-venv` 中运行，监听 `127.0.0.1:4000`。可以在 Portal 概览保存 DeepSeek API Key，
+`.data/litellm-venv` 中运行，监听 `127.0.0.1:4000`。可以在 Portal 的「设置 → 模型」保存 DeepSeek API Key，
 保存会重启本机网关。 [Temporal 发布包](https://github.com/temporalio/cli/releases/tag/v1.5.0) [LiteLLM 版本](https://pypi.org/project/litellm/1.110.2/)
 
 脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
 源码模式默认本机免令牌，登录所需的令牌位于 `.data/portal.env` 的 `SCA_EVAL_API_TOKEN`。
-停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
-`bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
+停止源码模式会保留本机数据库。两种模式分别使用各自的数据库，可通过 Portal 切换并迁移历史。
 
-在 Portal 的「提交任务」页面选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
+在 Portal 的「任务 → 新建任务」选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
 `2.3.0-sca.0`，支持该版本和模型对应的运行时冠军覆盖。OpenCode 源码修复、构建和冠军固化
 需要 Docker。Codex 和 Pi 仅在找到本机可执行文件时提供。Pi 使用兼容 1.5.2 的 CLI。
 选择 DeepSeek Harness 可运行本机 `dsh`。启动脚本用 npm 安装 `SCA_DSH_VERSION` 指定的
@@ -288,6 +291,31 @@ curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN
 ```
 
 配置接口返回 `sandbox_driver: "local"`、`warning` 和 `unavailable_agent_backends`。
+
+## 切换运行模式
+
+在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「设置 → 运行环境」，选择可用模式
+并确认重启。页面会显示导出、停止、启动和导入进度，并在服务恢复后刷新工作区。首次准备 Docker
+沙箱镜像和 OpenCode 构建仍使用 `bash scripts/portal_demo.sh setup --mode docker`。
+Windows 启动脚本使用源码模式，页面会说明 Docker 模式不可用。
+
+启动模式按 `--mode`、`SCA_RUNTIME_MODE`、`.data/runtime-mode.json` 中的首选模式选择。
+切换失败时，脚本会尝试恢复原模式。`.data/run/runtime-switch.json` 记录当前或最近一次切换的
+步骤和结果。通过启动脚本重启时需要使用的持久 Docker 配置可放在本机 `.env` 中。
+
+本机免令牌时可使用以下 API。使用令牌登录时，为每条请求加上
+`-H "Authorization: Bearer $SCA_EVAL_API_TOKEN"`。
+
+```bash
+API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/runtime"
+curl -fsS "$API/v1/portal/runtime/switch" -H "Origin: $API" \
+  --json '{"mode":"source","carry_history":true}'
+```
+
+POST 返回 `202` 和切换 `id`。API 重启后，继续 GET，并匹配 `switch.id` 查看 `status` 和 `step`。
+`carry_history` 默认为 `true`，API 调用方可显式传 `false` 跳过这次导入和导出。
+[自动迁移范围与 ZIP 保留](history-transfer.md#本机切换模式)
 
 ## 工作目录和缓存清理
 

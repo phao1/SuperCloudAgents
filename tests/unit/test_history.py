@@ -223,12 +223,34 @@ async def test_transfer_with_fake_db_and_real_local_objects(exported, tmp_path):
     key = history_artifact_key(task, "patch.diff")
     assert target.rows["artifacts"][0]["uri"] == objects._path(key).as_uri()
     assert await objects.get(key) == patch
-    assert (await read_events(objects, archived))[0].payload == {"turn": 1}
+    assert (await read_events(objects, archived, result=terminal_task["result"]))[0].payload == {"turn": 1}
     imported_champion, = target.rows["champions"]
     assert not imported_champion["active"]
     assert imported_champion["metrics"]["history_source_active"]
     assert target.rows["evolution_events"][0]["payload"]["history_source_id"] == 7
     assert not any((await import_history(target, objects, path)).values())
+
+
+async def test_runtime_switch_shares_storage_without_exposing_original_events(exported, tmp_path):
+    path, manifest, _, archived, _, _ = exported
+    objects = LocalObjectStore(tmp_path / "origin")
+    target = MemoryDatabase()
+    original = await objects.get(archive_key(archived))
+    assert (await import_history(target, objects, path))["objects"] == 2
+    result = next(row["result"] for row in target.rows["tasks"] if row["id"] == archived)
+
+    assert await objects.get(archive_key(archived)) == original
+    assert (await read_events(objects, archived, result=result))[0].payload == {"turn": 1}
+    assert not any((await import_history(target, objects, path)).values())
+    again = await export_history(target, objects, tmp_path / "again.zip")
+    members = [name for name in manifest.files if name.startswith("objects/events/")]
+    assert len(members) == 1 and again.files[members[0]] == manifest.files[members[0]]
+
+    # An older import uses the original key. A missing new import cannot fall back to it.
+    assert await read_events(objects, archived, result={"history_imported": True})
+    await objects.delete(archive_key(archived, result=result))
+    with pytest.raises(NotFoundError):
+        await read_events(objects, archived, result=result)
 
 
 async def test_missing_artifact_round_trip_and_reexport(exported, tmp_path):

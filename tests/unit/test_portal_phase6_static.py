@@ -12,10 +12,12 @@ import pytest
 
 STATIC = Path("src/sca/api/static").resolve()
 ASSETS = [
-    "portal-ui.js", "portal-conversation.js", "portal-models.js", "portal-markdown.js", "portal-tasks.js",
+    "portal-ui.js", "portal-nav.js", "portal-home.js", "portal-conversation.js", "portal-models.js",
+    "portal-markdown.js", "portal-tasks.js",
     "portal-evolution.js", "portal-settings.js",
     "portal-projects.js", "task-dag.js",
 ]
+STYLES = ["portal-operations.css", "portal-navigation.css", "portal-conversation.css", "task-dag.css"]
 TENANT_PORTAL_CONFIG = {
     "guest_view": False,
     "model_configured": True,
@@ -23,6 +25,7 @@ TENANT_PORTAL_CONFIG = {
     "default_model": "model-a",
     "agent_backends": ["codex"],
     "default_agent_backend": "codex",
+    "sandbox_driver": "local",
 }
 GUEST_PORTAL_CONFIG = {"guest_view": True, "guest_tenant": "eval", "model_configured": False}
 
@@ -32,14 +35,29 @@ class PortalAssets(HTMLParser):
         super().__init__()
         self.refs = []
         self.nav = {}
+        self.groups = []
+        self.icons = []
+        self.in_nav = False
 
     def handle_starttag(self, tag, attrs):
         attrs = dict(attrs)
         for key in ("src", "href"):
             if key in attrs:
                 self.refs.append(attrs[key])
-        if tag == "a" and attrs.get("href", "").startswith("#/") and "data-access" in attrs:
-            self.nav[attrs["href"][2:]] = attrs["data-access"], "hidden" in attrs
+        if tag == "nav" and attrs.get("id") == "primary-nav":
+            self.in_nav = True
+        if not self.in_nav:
+            return
+        if tag == "div" and "aria-labelledby" in attrs:
+            self.groups.append(attrs["aria-labelledby"])
+        if tag == "a":
+            self.nav[attrs["data-nav"]] = attrs.get("data-access"), "hidden" in attrs
+        if tag == "use":
+            self.icons.append(attrs["href"])
+
+    def handle_endtag(self, tag):
+        if tag == "nav":
+            self.in_nav = False
 
 
 def test_phase6_portal_navigation_and_local_assets():
@@ -47,14 +65,22 @@ def test_phase6_portal_navigation_and_local_assets():
     source = (STATIC / "portal.html").read_text()
     parser.feed(source)
     parser.close()
-    for route, title, role in (
-        ("submit", "提交任务", "member"), ("evolutions", "自动演进", "evolution-history"),
-        ("tools", "工具与知识库", "tenant"), ("integrations", "集成", "admin"),
-        ("team", "团队与用量", "admin"), ("platform", "平台管理", "platform"),
-    ):
-        assert parser.nav[route] == (role, True)
-        assert f"""'{route}-page','{title}'""" in source
-    for name in (*ASSETS, "portal-operations.css", "portal-conversation.css"):
+    assert parser.nav == {
+        "home": (None, False), "projects": ("tenant", True), "tasks": ("history", True),
+        "approvals": ("tenant", True), "history": (None, True), "evals": ("eval-history", True),
+        "evolutions": ("evolution-history", True), "versions": ("tenant", True), "memories": ("tenant", True),
+        "tools": ("tenant", True), "analysis": ("history", True), "settings": (None, False),
+    }
+    assert parser.groups == ["nav-workbench", "nav-evolution", "nav-knowledge", "nav-analysis"]
+    assert len(parser.icons) == len(set(parser.icons)) == len(parser.nav)
+    for icon in parser.icons:
+        assert f'<symbol id="{icon[1:]}" viewBox="0 0 24 24">' in source
+    sidebar = source.split('<aside class="sidebar">', 1)[1].split('</aside>', 1)[0]
+    assert not re.search(r"[◫⌘▦↻⇄◈]", sidebar)
+    assert source.count('href="#/submit" data-access="member" hidden>新建任务') == 2
+    assert 'href="#/evolutions/runs" data-access="eval-admin" hidden>开始演进' in source
+    assert '<div id="settings-runtime"></div>' in source
+    for name in (*ASSETS, *STYLES):
         assert "/portal/assets/" + name in parser.refs
     assert all(not urlsplit(ref).scheme and not urlsplit(ref).netloc for ref in parser.refs)
     assert "'/portal/whoami'" in source
@@ -118,6 +144,7 @@ function evidenceLink(label,href){return {...el('a',label),href};}
 const overallPassed = row => row.acceptance_passed === true && row.trajectory_passed !== false;
 const money = value => '$' + Number(value).toFixed(4);
 function walk(node){return [node,...(node.children||[]).flatMap(walk)];}
+let portalIdentity;
 '''
     checks = r'''
 const markdown = [
@@ -158,6 +185,36 @@ assert(portalUI.can('evolution-history',guest));
 assert(!portalUI.can('evolution-history',{...guest,tenant_id:'acme'}));
 assert(portalUI.can('evolution-history',{tenant_id:'acme',role:'admin'}));
 assert(['tenant','member','admin','eval','eval-admin','platform'].every(role=>!portalUI.can(role,guest)));
+const routes = ['projects', 'tasks', 'submit', 'approvals', 'evals', 'compare', 'loop', 'evolutions', 'versions',
+  'memories', 'tools', 'analysis', 'models', 'runtime', 'access', 'integrations', 'team', 'platform'];
+const tenantViews = ['projects', 'tasks', 'approvals', 'versions', 'memories', 'tools', 'analysis', 'models', 'runtime', 'access'];
+for (const [identity, allowed] of [
+  [null, ['access']],
+  [{platform_admin:true}, ['access', 'platform']],
+  [{tenant_id:'acme',role:'viewer'}, tenantViews],
+  [{tenant_id:'acme',role:'member'}, [...tenantViews, 'submit']],
+  [{tenant_id:'acme',role:'admin'}, [...tenantViews, 'submit', 'integrations', 'team', 'evolutions']],
+  [{tenant_id:'eval',role:'viewer'}, [...tenantViews, 'evals', 'compare', 'loop']],
+  [{tenant_id:'eval',role:'member'}, [...tenantViews, 'submit', 'evals', 'compare', 'loop', 'evolutions']],
+  [{tenant_id:'eval',role:'admin'}, routes.filter(page => page !== 'platform')],
+  [guest, ['tasks', 'evals', 'compare', 'evolutions', 'analysis', 'access']],
+  [{...guest,tenant_id:'acme'}, ['tasks', 'analysis', 'access']],
+]) {
+  portalIdentity=identity;
+  assert.equal(portalNav.liveRoute('').current, identity?.guest ? 'tasks' : 'home');
+  assert.equal(portalNav.liveRoute('#/overview').current, 'home');
+  for (const page of routes) {
+    const actual=portalNav.liveRoute('#/'+page);
+    const expected=allowed.includes(page) ? page : page==='projects'&&identity?.guest ? 'tasks' : 'home';
+    assert.equal(actual.current,expected,JSON.stringify([identity,page]));
+  }
+  for (const tab of ['models', 'runtime', 'access', 'integrations', 'team', 'platform']) {
+    assert.deepEqual(portalNav.liveRoute('#/settings/'+tab), portalNav.liveRoute('#/'+tab));
+  }
+  assert.deepEqual(portalNav.liveRoute('#/evals/compare/a/b'), portalNav.liveRoute('#/compare/a/b'));
+  assert.deepEqual(portalNav.liveRoute('#/evolutions/loop/round/a'), portalNav.liveRoute('#/loop/round/a'));
+  assert.equal(portalNav.liveRoute('#/evolutions/examples').current, allowed.includes('loop') ? 'examples' : 'home');
+}
 assert.deepEqual(portalUI.backendChoices({agent_backends:['codex','dsh'],default_agent_backend:'dsh'}),
   [['','默认 · DeepSeek Harness'],['codex','Codex'],['dsh','DeepSeek Harness']]);
 assert.deepEqual(portalEvolution.lineChanges('相同\n旧行\n下文','相同\n新行\n下文'),
@@ -175,7 +232,7 @@ const b={...a,results:[{...a.results[0],trajectory_passed:false},{...a.results[1
 assert.match(portalEvolution.equivalence(a,b),/^0 \/ 2 /);
 assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/无法完整配对/);
 '''
-    scripts = ["portal-ui.js", "portal-markdown.js", "portal-evolution.js"]
+    scripts = ["portal-ui.js", "portal-nav.js", "portal-markdown.js", "portal-evolution.js"]
     path = tmp_path / "portal-phase6.cjs"
     path.write_text(harness + "\n".join((STATIC / file).read_text() for file in scripts) + checks)
     result = subprocess.run([node, str(path)], capture_output=True, text=True, check=False, timeout=10)
@@ -183,8 +240,8 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
 
 
 @pytest.mark.parametrize("destination", [
-    "guest", "local", "projects", "task", "evolution", "approvals", "result-approval", "result-rejection", "evolution-approval",
-    "local-result-approval", "local-evolution-approval", "archive",
+    "guest", "local", "home", "models", "projects", "task", "evolution", "approvals", "result-approval",
+    "result-rejection", "evolution-approval", "local-result-approval", "local-evolution-approval", "archive",
 ])
 def test_portal_route_bootstrap(tmp_path, destination):
     responses = {}
@@ -203,10 +260,10 @@ def test_portal_route_bootstrap(tmp_path, destination):
             "const SCATaskDAG=fixtureDAG;",
             *((STATIC / name).read_text(encoding="utf-8") for name in assets),
         ]
-    assert '只读访客模式 · <a href="#/overview">登录</a>' in source
+    assert '只读访客模式 · <a href="#/settings/access">登录</a>' in source
     assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
-    assert 'href="#/approvals" data-access="tenant" hidden' in source
+    assert 'href="#/approvals" id="approvals-link" data-nav="approvals" data-access="tenant" hidden' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
     node = shutil.which("node") or Path.home() / ".local/bin/node"
@@ -219,6 +276,7 @@ const destination=process.argv[2];
 const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
 const local=destination==='local'||destination.startsWith('local-');
+const modelSettings=destination==='models';
 const resultApproval=destination.endsWith('result-approval')||destination==='result-rejection';
 const evolutionApproval=destination.endsWith('evolution-approval');
 const taskApproval=destination==='approvals'||resultApproval;
@@ -247,14 +305,15 @@ const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
 const candidateHref='#/evolutions/runs/'+evolution.id+'/approval/'+candidate.id;
 const location={hash:taskApproval||evolutionApproval?'#/approvals':{
-  guest:'#/projects/private-project',local:'#/projects',projects:'#/projects',task:'#/tasks/'+task.id,
-  evolution:'#/evolutions',archive:''}[destination]};
+  guest:'#/projects/private-project',home:'',models:'#/settings/models',local:'',projects:'#/projects',
+  task:'#/tasks/'+task.id,evolution:'#/evolutions',archive:''}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
-const token=evolutionApproval?'fixture-admin':'fixture-member';
+const token=evolutionApproval||modelSettings?'fixture-admin':'fixture-member';
 const storage=new Map(!guest&&!local?[['sca-portal-token',token]]:[]);
 const localStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
 const evalAdmin={tenant_id:'eval',role:'admin',subject:'static-token'};
 let required=false, acceptWarning=false, warningText='', switchWrites=0;
+let deepseekKeySet=false, preferredModel=null;
 class Element {
   constructor(id) {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
@@ -264,6 +323,7 @@ class Element {
   }
   get hash(){return this.href}
   get options(){return this.children}
+  get elements(){return {namedItem:name=>walk(this).find(node=>node.name===name)}}
   append(...nodes){this.children.push(...nodes)}
   prepend(...nodes){this.children.unshift(...nodes)}
   replaceChildren(...nodes){this.children=nodes}
@@ -281,7 +341,11 @@ class Element {
     if(!this.selectors.has(selector))this.selectors.set(selector,new Element());
     return this.selectors.get(selector);
   }
-  querySelectorAll(selector){return selector==='input'?walk(this).slice(1).filter(node=>node.type==='checkbox'):[]}
+  querySelectorAll(selector){
+    if(selector==='input')return walk(this).slice(1).filter(node=>node.type==='checkbox');
+    if(selector==='input[type="password"]')return walk(this).filter(node=>node.type==='password');
+    return [];
+  }
   reset(){}
 }
 const Node=Element;
@@ -291,26 +355,29 @@ function element(id){
   if(!elements.has(id))elements.set(id,new Element(id));
   return elements.get(id);
 }
-const sections=['overview','projects-page','evaluation','trace','evolutions-page','memories-page','approvals-page'].map(element);
+const sections=['home-page','projects-page','evaluation','trace','evolutions-page','memories-page','approvals-page',
+  'settings-page','loop','compare-page','evolution-examples','submit-page','versions'].map(element);
+element('settings-page').querySelectorAll=()=>['models','runtime','access','integrations','team','platform']
+  .map(page=>element(page+'-page'));
 element('trace').after=node=>sections.push(node);
 element('task-run-workbench').hidden=false;
 element('evolution-dag-template').content={firstElementChild:{cloneNode:()=>element('evolution-dag')}};
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
-const links=['tasks','evals','memories','evolutions','approvals'].map(page=>Object.assign(new Element(),{href:'#/'+page}));
-const approvalLink=links.at(-1);
-approvalLink.dataset.access='tenant';
-links[0].after=link=>links.splice(1,0,link);
-const nav=new Element();
-nav.selectors.set('[href="#/tasks"]',links[0]);
-nav.querySelectorAll=()=>links;
+const links=Object.entries(config.nav).map(([page,[access,hidden]])=>Object.assign(new Element(),{
+  href:'#/'+page,hidden,dataset:{nav:page,access},
+}));
+const navLink=page=>links.find(link=>link.dataset.nav===page);
+const approvalLink=navLink('approvals');
+elements.set('approvals-link',approvalLink);
+element('primary-nav').querySelectorAll=()=>links;
 const document={
   getElementById:element,createElement:tag=>Object.assign(new Element(),{tagName:tag.toUpperCase(),style:{}}),
   documentElement:new Element(),
   createElementNS:()=>new Element(),createTextNode:textContent=>({textContent}),
   createDocumentFragment:()=>new Element(),
   addEventListener(){},
-  querySelector:selector=>({'.sidebar .brand':element('brand'),'.sidebar nav':nav})[selector],
-  querySelectorAll:selector=>({'main > section':sections,'[data-access]':[...controls,approvalLink],'.sidebar nav a':links})[selector]||[],
+  querySelectorAll:selector=>({'main > section':sections,
+    '[data-access]':[...controls,...links.filter(link=>link.dataset.access)]})[selector]||[],
 };
 const window=globalThis;
 window.confirm=text=>{warningText=text;return acceptWarning};
@@ -380,6 +447,25 @@ global.fetch=async (path,request={})=>{
     reviewRequests.push(JSON.parse(request.body));
     harvest.status='approved';
   }
+  if(modelSettings&&path==='/v1/portal/provider-key'){
+    assert.equal(auth,'Bearer fixture-admin');
+    assert.equal(request.method,'POST');
+    assert.equal(JSON.parse(request.body).key,'fixture-static-key');
+    deepseekKeySet=true;
+    return {ok:true,json:async()=>({gateway_restarted:true})};
+  }
+  if(modelSettings&&path==='/v1/portal/providers/default'){
+    assert.equal(auth,'Bearer fixture-admin');
+    assert.equal(request.method,'PUT');
+    preferredModel=JSON.parse(request.body).model;
+    return {ok:true,json:async()=>({model:preferredModel})};
+  }
+  if(path.startsWith('/v1/usage?')){
+    assert(local);
+    const today=new Date().toISOString().slice(0,10);
+    assert.equal(path,`/v1/usage?from=${today}&to=${today}`);
+    return {ok:true,json:async()=>[{cost_usd:.02}]};
+  }
   await blocked.get(path);
   const pending=evolutionApproval?[
     ...(evolution.status==='awaiting_approval'?[{id:candidate.id,href:candidateHref,kind:'evolution_candidate',
@@ -389,12 +475,18 @@ global.fetch=async (path,request={})=>{
     kind:resultApproval?'task_result':'task_plan',title:'校验任务',created_at:inboxAt,
     task_kind:'coding',backend:'dsh',project_name:'默认项目'}]:[];
   const fixtures={
-    '/v1/portal/whoami':local||evolutionApproval?evalAdmin:{tenant_id:'eval',role:'member'},
+    '/v1/portal/whoami':local||evolutionApproval||modelSettings?evalAdmin:{tenant_id:'eval',role:'member'},
     '/v1/portal/config':local?(
       auth?{...config.tenant,portal_require_token:required}:
       required?config.guest:{...config.tenant,portal_require_token:false,local_identity:evalAdmin}
-    ):auth?config.tenant:config.guest,
+    ):auth?{...config.tenant,can_configure_model:modelSettings,default_model:preferredModel||'model-a'}:config.guest,
+    '/v1/portal/providers':{providers:[],deepseek_enabled:true,deepseek_has_key:deepseekKeySet,
+      deepseek_models:deepseekKeySet?['deepseek-flash']:[],default_model:preferredModel},
+    '/v1/models':{data:[{id:'model-a'},...(deepseekKeySet?[{id:'deepseek-flash'}]:[])],
+      default_model:preferredModel||'model-a'},
     '/v1/projects':[project],
+    '/v1/tasks?limit=100':['home','local'].includes(destination)?[
+      {...task,state:'RUNNING',spec:{instruction:'检查订单'}}]:[],
     '/v1/approvals':{count:pending.length,items:pending},
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
     '/v1/memories?status=proposed':[{id:'memory',text:'检查空输入',scope:'repo',category:'convention'}],
@@ -454,14 +546,26 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
   if(archived){
     assert.deepEqual(calls,['/portal/archive.json']);
     assert.equal($('guest-view-banner').textContent,'只读归档 · 来自仓库中已发布的任务与评测记录');
-    assert.equal($('overview').hidden,false);
-    assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.hash),
-      ['#/tasks','#/history','#/evals','#/memories','#/evolutions']);
+    assert.equal($('home-page').hidden,false);
+    assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.dataset.nav),
+      ['home','projects','tasks','history','evals','evolutions','versions','memories','tools','analysis']);
     assert.equal(approvalLink.hidden,true);
     location.hash='#/approvals';
     await listeners.get('hashchange')();
     assert.equal($('approvals-page').hidden,true);
-    assert.equal($('overview').hidden,false);
+    assert.equal($('home-page').hidden,false);
+    for(const [hash,target,tab] of [
+      ['#/overview','home-page',null], ['#/submit','submit-page',null],
+      ['#/compare','compare-page','#/evals/compare'], ['#/evals/compare','compare-page','#/evals/compare'],
+      ['#/loop','loop','#/evolutions/loop'], ['#/evolutions/loop','loop','#/evolutions/loop'],
+      ['#/integrations','integrations-page',null], ['#/team','team-page',null],
+      ['#/settings/team','team-page',null], ['#/platform','platform-page',null], ['#/versions','versions',null],
+    ]){
+      location.hash=hash;
+      await listeners.get('hashchange')();
+      assert.equal($(target).hidden,false,hash);
+      assert.equal($('page-tabs').children.find(link=>link.getAttribute('aria-current')==='page')?.href||null,tab);
+    }
     assert.deepEqual(calls,['/portal/archive.json']);
 
     $('memory-status').value='active';
@@ -491,6 +595,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(location.hash,'#/tasks');
     assert.equal($('trace').hidden,false);
     assert.equal($('guest-view-banner').hidden,false);
+    assert.equal(navLink('settings').hidden,true);
     assert.equal($('model-not-configured').hidden,false);
     assert.deepEqual(controls.map(control=>control.hidden),[false,true,true]);
     await assert.rejects(api('/tasks',{}),/请先登录/);
@@ -506,10 +611,12 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
   }else if(destination==='local'){
     await waitForStartup();
-    assert.deepEqual(calls,['/v1/portal/config','/v1/approvals','/v1/projects']);
-    assert.equal($('projects-home').hidden,false);
+    assert.deepEqual(calls.map(path=>path.split('?')[0]),['/v1/portal/config','/v1/approvals','/v1/tasks','/v1/usage','/v1/evolutions']);
+    assert.equal($('home-page').hidden,false);
+    assert.equal($('home-spend').textContent,'$0.0200');
     assert.equal(approvalLink.hidden,false);
-    assert.equal($('approvals-count').textContent,' (0)');
+    assert.equal($('approvals-count').textContent,'0');
+    assert.equal(approvalLink.getAttribute('aria-label'),'待审批 0 项');
     assert.equal($('local-access-badge').hidden,false);
     assert.equal($('connect-form').hidden,true);
     assert.equal($('guest-view-banner').hidden,true);
@@ -517,8 +624,22 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(storage.has('sca-portal-token'),false);
 
     releaseSuites();
-    location.hash='#/overview';
+    location.hash='#/settings/runtime';
     await route();
+    const runtime=$('settings-runtime');
+    assert.equal($('runtime-page').hidden,false);
+    assert(walk(runtime).some(node=>node.textContent==='本地源码模式'));
+    let mounts=0;
+    window.SCAPortalRuntime={mount(node){assert.equal(node,runtime);mounts++}};
+    await refresh();
+    await refresh();
+    assert.equal(mounts,1);
+
+    location.hash='#/settings/access';
+    await route();
+    assert.equal($('settings-page').hidden,false);
+    assert.equal($('access-page').hidden,false);
+    assert.equal(navLink('settings').getAttribute('aria-current'),'page');
     const toggle=$('portal-require-token');
     assert.equal($('portal-access-control').hidden,false);
     assert.equal(toggle.checked,false);
@@ -539,6 +660,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('guest-view-banner').hidden,false);
     assert.equal(approvalLink.hidden,true);
     assert.equal($('approvals-count').textContent,'');
+    assert.equal(approvalLink.hasAttribute('aria-label'),false);
     await assert.rejects(api('/tasks',{}),/请先登录/);
 
     $('token').value='fixture-admin';
@@ -551,6 +673,54 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(switchWrites,2);
     assert.equal(storage.get('sca-portal-token'),'fixture-admin');
     assert.deepEqual(authHeaders(),{Authorization:'Bearer fixture-admin'});
+  }else if(destination==='home'){
+    await waitForStartup();
+    assert.equal($('home-page').hidden,false);
+    assert.equal(navLink('home').getAttribute('aria-current'),'page');
+    assert.equal($('home-running').textContent,'1');
+    assert.equal($('home-approvals').textContent,'0');
+    assert.equal($('home-model-status').textContent,'已配置');
+    assert(walk($('home-tasks')).some(node=>node.href==='#/tasks/'+task.id&&node.textContent==='检查订单'));
+    assert(walk($('home-evolutions')).some(node=>node.href==='#/evolutions/runs/'+evolution.id));
+    assert(!calls.some(path=>path.startsWith('/v1/evals')||path.startsWith('/v1/usage')||path==='/v1/projects'));
+    location.hash='#/overview';
+    await route();
+    assert.equal($('home-page').hidden,false);
+    location.hash='#/evolutions/examples';
+    await route();
+    assert.equal($('evolution-examples').hidden,false);
+    assert.equal(navLink('evolutions').getAttribute('aria-current'),'page');
+    assert.deepEqual($('page-tabs').children.map(node=>node.textContent),['演进记录','自演进闭环','示例']);
+  }else if(modelSettings){
+    await waitForStartup();
+    assert.equal($('models-page').hidden,false);
+    const root=$('model-providers');
+    const modelCard=name=>walk(root).find(node=>node.className==='panel provider-card'
+      &&node.children[0].children[0].textContent===name);
+    for(const name of ['DeepSeek','OpenAI 兼容','Anthropic 兼容','本地模型'])assert(modelCard(name));
+    const formIn=node=>walk(node).find(child=>child.tagName==='FORM');
+    const form=formIn(modelCard('DeepSeek'));
+    const key=form.elements.namedItem('key');
+    assert.equal(form.elements.namedItem('base_url').value,'https://api.deepseek.com');
+    assert.equal(key.type,'password');
+    key.value='fixture-static-key';
+    await form.onsubmit({preventDefault(){}});
+    assert.equal(key.value,'');
+    assert(deepseekKeySet);
+    const replacement=formIn(modelCard('DeepSeek')).elements.namedItem('key');
+    assert.equal(replacement.placeholder,'已配置');
+    assert.equal(replacement.value,'');
+    const modelForm=formIn(walk(root).find(node=>node.className==='panel'&&node.children[0].textContent==='模型默认值'));
+    modelForm.elements.namedItem('model').value='deepseek-flash';
+    await modelForm.onsubmit({preventDefault(){}});
+    assert.equal(preferredModel,'deepseek-flash');
+    assert.equal($('model').value,preferredModel);
+    const draft=formIn(modelCard('DeepSeek')).elements.namedItem('key');
+    draft.value='discarded-fixture';
+    location.hash='#/settings/access';
+    await route();
+    assert.equal($('models-page').hidden,true);
+    assert.equal(draft.value,'');
   }else if(destination==='projects'){
     assert.deepEqual(calls,['/v1/portal/whoami','/v1/approvals','/v1/projects']);
     const duplicate=route();
@@ -584,7 +754,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await waitForStartup();
     assert.deepEqual(calls,['/v1/portal/config','/v1/evolutions']);
     assert.equal($('evolutions-page').hidden,false);
-    assert.deepEqual($('evolution-nav').children.map(node=>node.href),['#/evolutions/runs','#/evolutions/champions']);
+    assert.deepEqual($('page-tabs').children.map(node=>node.href),['#/evolutions/runs','#/evolutions/champions']);
     const content=()=>walk($('evolution-content')).map(node=>node.textContent);
     assert(!content().includes('开始演进'));
     location.hash='#/evolutions/runs/'+evolution.id;
@@ -627,13 +797,13 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(approvalLink.hidden,true);
     assert.equal($('approvals-page').hidden,true);
     assert.equal($('connect-prompt').hidden,false);
-    assert.equal($('connect-prompt').querySelector('p').textContent,'请先在概览连接 Portal 工作空间。');
+    assert.equal($('connect-prompt').querySelector('p').textContent,'请先在「设置 → 访问与安全」连接工作空间。');
     assert(!calls.includes('/v1/approvals'));
   }else if(taskApproval){
     await waitForStartup();
     assert.equal(approvalLink.hidden,false);
     assert.equal($('approvals-page').hidden,false);
-    assert.equal($('approvals-count').textContent,' (1)');
+    assert.equal($('approvals-count').textContent,'1');
     const entry=walk($('approvals-list')).find(node=>node.href);
     assert.equal(entry.href,approvalHref);
     assert(walk($('approvals-list')).some(node=>node.textContent.includes('编码任务 · DeepSeek Harness · 默认项目')));
@@ -754,7 +924,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await nextTick();
     assert(card.hidden);
     assert(decisionChip(walk($('task-conversation')),label));
-    assert.equal($('approvals-count').textContent,' (0)');
+    assert.equal($('approvals-count').textContent,'0');
     assert.equal(inboxFetches(),beforeDecision+1);
     assert.equal(task.state,'AWAITING_REVIEW');
     if(decision==='request_changes'){
@@ -762,7 +932,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
       anotherReview=true;
       await refresh();
       await nextTick();
-      assert.equal($('approvals-count').textContent,' (1)');
+      assert.equal($('approvals-count').textContent,'1');
       const nextCard=walk($('task-conversation')).find(node=>node.id==='task-approval');
       assert.notEqual(nextCard,card);
       assert(!nextCard.hidden);
@@ -783,7 +953,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
   }else if(evolutionApproval){
     releaseSuites();
     await waitForStartup();
-    assert.equal($('approvals-count').textContent,' (2)');
+    assert.equal($('approvals-count').textContent,'2');
     const link=href=>walk($('approvals-list')).find(node=>node.href===href);
     location.hash=link(candidateHref).href;
     await route();
@@ -795,7 +965,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(card.hidden);
     assert(decisionChip(content(),'已批准'));
     assert.equal(evolution.status,'awaiting_approval');
-    assert.equal($('approvals-count').textContent,' (1)');
+    assert.equal($('approvals-count').textContent,'1');
     candidate.decision='promoted';
     evolution.status='completed';
     await refresh();
@@ -820,12 +990,12 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
       assert.deepEqual(reviewRequests,[{candidate_id:candidate.id},{}]);
       const updated=content().find(node=>node.id===publication.id);
       assert(walk(updated).some(node=>node.textContent==='已批准'));
-      assert.equal($('approvals-count').textContent,' (0)');
+      assert.equal($('approvals-count').textContent,'0');
     } finally {
       releaseInbox();
       await staleInbox;
     }
-    assert.equal($('approvals-count').textContent,' (0)');
+    assert.equal($('approvals-count').textContent,'0');
   }else{
     assert.deepEqual(new Set(calls),new Set([
       '/v1/portal/whoami','/v1/approvals',taskPath,taskPath+'/events?after=0',
@@ -858,7 +1028,10 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
   assert.equal($('error').textContent,'');
 })().finally(()=>clearTimeout(deadline)).catch(error=>{console.error(error);process.exitCode=1});
 '''
+    nav = PortalAssets()
+    nav.feed(source)
     config = json.dumps({
+        "nav": nav.nav,
         "tenant": TENANT_PORTAL_CONFIG, "guest": GUEST_PORTAL_CONFIG,
         "archive": {
             ref: json.loads(body) for ref, (kind, body) in responses.items() if kind == "application/json"
@@ -892,7 +1065,7 @@ def serve_portal(route, path):
         route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
         return True
     name = path.rsplit("/", 1)[-1]
-    if name in {*ASSETS, "portal-operations.css", "portal-conversation.css", "task-dag.css", "task-flow.js", "task-timeline.js"}:
+    if name in {*ASSETS, *STYLES, "portal-runtime.js", "task-flow.js", "task-timeline.js"}:
         kind = "text/javascript" if name.endswith(".js") else "text/css"
         route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
         return True
@@ -903,7 +1076,8 @@ def serve_portal(route, path):
 def test_portal_browser_tracks_provider_restart_after_writes(local):
     providers_path = '/v1/portal/providers'
     provider = {'id': 'fixture-provider', 'name': 'Local', 'type': 'openai-compatible',
-                'base_url': 'http://127.0.0.1:8081/v1', 'models': [{'name': 'local-coder'}]}
+                'base_url': 'http://127.0.0.1:8081/v1', 'models': [{'name': 'local-coder'}],
+                'enabled': True, 'has_key': False}
     providers = []
     statuses = {'save': 'restarting', 'delete': 'restarting'}
 
@@ -931,7 +1105,8 @@ def test_portal_browser_tracks_provider_restart_after_writes(local):
                     if local else {}
                 )},
                 '/v1/portal/access': {'require_token': False, 'local_no_token_active': True},
-                providers_path: {'providers': providers, 'deepseek_models': []},
+                providers_path: {'providers': providers, 'deepseek_models': [], 'deepseek_has_key': False},
+                '/v1/models': {'data': []},
             }
             route.fulfill(json=fixtures.get(path, []))
 
@@ -940,12 +1115,15 @@ def test_portal_browser_tracks_provider_restart_after_writes(local):
         if not local:
             page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
         page.route('**/*', handle)
-        page.goto('http://portal.test/portal#/overview')
+        page.goto('http://portal.test/portal#/settings/models')
         panel = page.locator('#model-providers')
-        panel.get_by_label('名称', exact=True).fill(provider['name'])
-        panel.get_by_label('基础 URL').fill(provider['base_url'])
-        panel.get_by_label('平台模型名').fill('local-coder')
-        panel.get_by_label('上游模型 ID').fill('coder')
+        preset = panel.locator('.provider-card').filter(has=page.get_by_role('heading', name='OpenAI 兼容', exact=True))
+        preset.get_by_role('button', name='添加供应商').click()
+        editor = panel.locator('.provider-editor')
+        editor.get_by_label('名称', exact=True).fill(provider['name'])
+        editor.get_by_label('基础 URL').fill(provider['base_url'])
+        editor.get_by_label('平台模型名').fill('local-coder')
+        editor.get_by_label('上游模型 ID').fill('coder')
         with page.expect_response(f'**{providers_path}/restarts/save'):
             panel.get_by_role('button', name='保存并重启网关').click()
         panel.get_by_text('配置已保存，正在重启模型网关…', exact=True).wait_for()
@@ -957,7 +1135,69 @@ def test_portal_browser_tracks_provider_restart_after_writes(local):
         panel.get_by_text('配置已保存，正在重启模型网关…', exact=True).wait_for()
         statuses['delete'] = 'failed'
         panel.get_by_text('配置已保存，网关重启失败。', exact=False).wait_for()
-        panel.get_by_text('尚未添加自定义供应商。', exact=True).wait_for()
+        panel.get_by_role('heading', name=provider['name'], exact=True).wait_for(state='hidden')
+
+
+@pytest.mark.parametrize(("width", "height"), [(1440, 1000), (390, 844)])
+def test_portal_browser_navigation_layout(width, height):
+    title = "检查 Windows 导入的任务、项目、演进记录和审批，验证导入前后的关联与可读性"
+
+    def handle(route):
+        path = urlsplit(route.request.url).path
+        if serve_portal(route, path):
+            return
+        route.fulfill(json={
+            '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'portal_require_token': False,
+                                  'local_identity': {'role': 'admin', 'tenant_id': 'eval'}},
+            '/v1/portal/access': {'require_token': False, 'local_no_token_active': True},
+            '/v1/approvals': {'count': 1, 'items': [
+                {'id': 'task-fixture', 'kind': 'task_result', 'href': '#/tasks/task-fixture/approval',
+                 'title': title, 'created_at': '2026-11-22T16:31:00Z'},
+            ]},
+            '/v1/portal/runtime': {'current_mode': 'source', 'platform': 'Windows', 'switch': None,
+                                   'modes': [{'mode': 'source', 'available': True},
+                                             {'mode': 'docker', 'available': False,
+                                              'reason': 'Windows 版仅支持源码模式'}]},
+        }.get(path, []))
+
+    with portal_browser() as browser:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.route('**/*', handle)
+        page.goto('http://portal.test/portal')
+        page.locator('#local-access-badge').wait_for()
+        nav = page.locator('#primary-nav')
+        toggle = page.locator('#nav-toggle')
+        assert toggle.is_visible() == (width == 390)
+        if width == 390:
+            assert nav.is_hidden()
+            toggle.click()
+            assert toggle.get_attribute('aria-expanded') == 'true'
+        icons = nav.locator('a:visible > svg')
+        bounds = [icon.bounding_box() for icon in icons.all()]
+        assert len(bounds) == 11
+        assert all(box['width'] == 18 and box['x'] == bounds[0]['x'] for box in bounds)
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        nav.get_by_role('link', name='待审批 1 项', exact=True).click()
+        item = page.get_by_role('link', name=title, exact=True)
+        item.wait_for()
+        assert item.evaluate('(link) => link.scrollWidth === link.clientWidth')
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        if width == 390:
+            toggle.click()
+        nav.get_by_role('link', name='设置', exact=True).click()
+        page.get_by_role('heading', name='设置 · 访问与安全').wait_for()
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        assert nav.is_hidden() == (width == 390)
+        page.get_by_role('link', name='运行环境', exact=True).click()
+        runtime = page.locator('#settings-runtime')
+        runtime.get_by_text('当前运行模式 源码模式', exact=True).wait_for()
+        runtime.get_by_text('Windows 版仅支持源码模式', exact=True).wait_for()
+        assert runtime.get_by_role('button', name='切换到Docker 模式').is_disabled()
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        for breakpoint in (901, 900):
+            page.set_viewport_size({"width": breakpoint, "height": height})
+            assert toggle.is_visible() == (breakpoint == 900)
+            assert nav.is_visible() == (breakpoint == 901)
 
 
 def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
@@ -1012,7 +1252,7 @@ def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
         nav = page.locator('nav[aria-label="主导航"]')
         nav.get_by_role("link", name="自动演进", exact=True).wait_for()
         assert page.get_by_role("button", name="开始演进").count() == 0
-        assert page.locator("#evolution-nav").get_by_role("link").count() == 2
+        assert page.locator("#page-tabs").get_by_role("link").count() == 2
         page.locator(f'#evolution-content a[href="#/evolutions/runs/{evolution_id}"]').click()
         panel = page.locator("#evolution-dag")
         assert page.locator('#evolution-conversation form').is_hidden()
@@ -1247,7 +1487,7 @@ def test_portal_browser_task_chat_layout():
         queue = composer.get_by_role("button", name="排队发送")
         interrupt = composer.get_by_role("button", name="打断并发送")
         feed.get_by_text("检查第 29 个边界条件").wait_for(state="attached")
-        page.get_by_text("(1)", exact=True).wait_for()
+        page.get_by_role("link", name="待审批 1 项", exact=True).get_by_text("1", exact=True).wait_for()
         assert chat.bounding_box()["x"] > dag.bounding_box()["x"]
         assert chat.evaluate("(node) => getComputedStyle(node).position") == "sticky"
         assert chat.bounding_box()["height"] >= 800
@@ -1291,7 +1531,9 @@ def test_portal_browser_task_chat_layout():
         before = feed.bounding_box()["height"]
         card.get_by_role("button", name="批准", exact=True).click()
         card.wait_for(state="hidden")
-        page.get_by_text("(0)", exact=True).wait_for()
+        refreshed_badge = page.locator('#approvals-link[aria-label="待审批 0 项"] #approvals-count')
+        refreshed_badge.wait_for(state="attached")
+        assert refreshed_badge.text_content() == "0"
         feed.locator(".conversation-approval-chip").get_by_text("已批准").wait_for()
         task["state"] = "SUCCEEDED"
         chat.get_by_text("任务已结束", exact=True).wait_for(timeout=6500)
@@ -1339,7 +1581,7 @@ def test_portal_browser_first_render(destination):
             card.get_by_role("link", name="默认项目", exact=True).wait_for(timeout=3000)
             assert card.get_by_text("1,030", exact=True).is_visible()
             page.wait_for_function("!refreshing")
-            page.get_by_text("(0)", exact=True).wait_for(timeout=3000)
+            page.wait_for_function("document.getElementById('approvals-count').textContent === '0'")
             page.evaluate("refresh()")
             assert requests[0] == "/v1/portal/whoami"
             assert sorted(requests[1:]) == ["/v1/approvals", "/v1/projects"]
@@ -1359,6 +1601,10 @@ def test_portal_phase6_browser_submission():
         path = urlsplit(req.url).path
         if serve_portal(route, path):
             return
+        if path == "/v1/portal/config" and not req.header_value("authorization"):
+            return route.fulfill(status=401, json={"error": {"message": "需要访问令牌"}})
+        if path == "/v1/portal/whoami" or (path == "/v1/tasks" and req.method == "POST"):
+            assert req.header_value("authorization") == "Bearer fixture-member"
         if path == "/v1/tasks" and req.method == "POST":
             calls.append(req.post_data_json)
             if len(calls) == 1:
@@ -1368,6 +1614,7 @@ def test_portal_phase6_browser_submission():
             "/v1/portal/whoami": {"tenant_id": "acme", "role": "member", "platform_admin": False},
             "/v1/portal/config": {"models": ["model-a"], "agent_backends": ["opencode", "codex", "dsh"],
                                   "default_agent_backend": "codex", "default_model": "model-a"},
+            "/v1/approvals": {"items": [], "count": 0},
             "/v1/agents/opencode/versions": [],
             "/v1/tools/available": [{"name": "knowledge", "description": "知识检索"}],
             "/v1/tasks": [],
@@ -1382,19 +1629,34 @@ def test_portal_phase6_browser_submission():
     with portal_browser() as browser:
         page = browser.new_page()
         page.route("**/*", handle)
+        page.goto("http://portal.test/portal")
+        connect = page.get_by_role("link", name="前往连接", exact=True)
+        token = page.get_by_label("Portal 访问令牌")
+        connect.click()
+        token.wait_for()
         page.goto("http://portal.test/portal#/submit")
-        page.locator("#token").fill("fixture-member")
+        token.wait_for(state="hidden")
+        connect.click()
+        page.get_by_role("heading", name="设置 · 访问与安全").wait_for()
+        token.fill("fixture-member")
         page.get_by_role("button", name="连接", exact=True).click()
-        page.get_by_role("heading", name="提交任务").wait_for()
-        nav = page.locator('nav[aria-label="主导航"]')
-        assert not nav.locator('a[href="#/team"]').is_visible()
-        assert not nav.locator('a[href="#/platform"]').is_visible()
+        page.wait_for_url("**/portal#/submit")
+        page.get_by_role("heading", name="新建任务", exact=True, level=1).wait_for()
+        form = page.locator("#submit-form")
+        form.get_by_role("button", name="提交任务", exact=True).wait_for()
+        nav = page.get_by_role("navigation", name="主导航")
+        nav.get_by_role("link", name="设置", exact=True).click()
+        tabs = page.get_by_role("navigation", name="设置导航")
+        tabs.get_by_role("link", name="访问与安全", exact=True).wait_for()
+        assert tabs.get_by_role("link", name="团队与用量").is_hidden()
+        assert tabs.get_by_role("link", name="平台管理").is_hidden()
+        nav.get_by_role("link", name="任务", exact=True).click()
+        page.get_by_role("link", name="新建任务", exact=True).click()
         page.get_by_label("仓库地址").fill("https://example.test/org/repo.git")
         page.get_by_label("任务指令").fill("补测试")
         page.get_by_label("Agent 后端").select_option("dsh")
         assert page.get_by_label("OpenCode 版本（可选）").is_disabled()
         page.get_by_label("Agent 后端").select_option("opencode")
-        form = page.locator("#submit-form")
         form.get_by_text("Best-of-N 与执行设置", exact=True).click()
         page.get_by_label("并行尝试数").select_option("2")
         page.get_by_label("选择方式").select_option("human")
@@ -1474,8 +1736,8 @@ def test_projects_browser_shared_modal_lifecycle():
         dialog.wait_for(state="hidden")
 
         card.click()
-        page.get_by_role("button", name="新线程").click()
-        dialog.get_by_role("heading", name="新线程").wait_for()
+        page.get_by_role("button", name="新建任务").click()
+        dialog.get_by_role("heading", name="新建任务").wait_for()
         page.keyboard.press("Escape")
         dialog.wait_for(state="hidden")
         page.locator("#project-menu summary").click()
@@ -1496,7 +1758,7 @@ def test_projects_browser_shared_modal_lifecycle():
         page.keyboard.press("Escape")
         dialog.wait_for(state="hidden")
 
-        page.get_by_role("link", name="设置", exact=True).click()
+        page.locator("#project-tabs").get_by_role("link", name="设置", exact=True).click()
         page.get_by_role("button", name="删除项目").click()
         dialog.get_by_role("button", name="确认删除").wait_for()
         page.mouse.click(3, 3)

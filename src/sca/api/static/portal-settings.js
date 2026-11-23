@@ -11,6 +11,7 @@ const portalSettings = (() => {
   const providers = [['github', 'GitHub'], ['gitea', 'Gitea']];
   const mounted = new Map();
   let dismissToken = null;
+  let runtimeModule = null;
 
   function message() {
     const node = el('p', undefined, 'status-text portal-message');
@@ -446,7 +447,7 @@ const portalSettings = (() => {
         name: ui.value(form, 'name'), role: ui.value(form, 'role'), days: Number(ui.value(form, 'days')),
         scopes: ci ? ['ci:report'] : [], repo_url: ci ? ui.value(form, 'repo_url') || null : null,
       });
-      if (identity !== portalIdentity || !location.hash.startsWith('#/team') || !created.token) return;
+      if (identity !== portalIdentity || pageRoute().current !== 'team' || !created.token) return;
       const field = ui.field('新令牌 · 仅显示一次', 'new_token',
         {readOnly: true, autocomplete: 'off'});
       const input = field.querySelector('input');
@@ -564,7 +565,7 @@ const portalSettings = (() => {
     async function redirect(path, body) {
       const identity = portalIdentity;
       const result = await data(path, body, 'POST');
-      if (identity !== portalIdentity || !location.hash.startsWith('#/team')) return;
+      if (identity !== portalIdentity || pageRoute().current !== 'team') return;
       const link = ui.externalLink('Stripe', result.url);
       if (!link.href) throw Error('Stripe 未返回有效的付款链接。');
       location.assign(link.href);
@@ -676,6 +677,32 @@ const portalSettings = (() => {
     if (visible && !input.disabled) input.checked = required;
   }
 
+  async function runtime(config, polling) {
+    const root = $('settings-runtime');
+    const extension = window.SCAPortalRuntime;
+    if (portalUI.can('eval-admin') && typeof extension?.mount === 'function') {
+      if (runtimeModule === extension && polling) return;
+      if (runtimeModule !== extension) {
+        root.replaceChildren();
+        runtimeModule = extension;
+      }
+      const identity = portalIdentity;
+      try {
+        await extension.mount(root);
+      } catch (err) {
+        if (portalIdentity === identity) runtimeModule = null;
+        throw err;
+      }
+      return;
+    }
+    const mode = config?.runtime_mode || (config?.sandbox_driver === 'local' ? 'source' : config?.sandbox_driver) || '';
+    const label = {source: '本地源码模式', docker: 'Docker 模式', k8s: 'Kubernetes 模式'}[mode] || mode || '未知';
+    if (root.dataset.mode !== mode || !root.hasChildNodes()) {
+      root.dataset.mode = mode;
+      root.replaceChildren(ui.panel('当前运行模式', el('p', label)));
+    }
+  }
+
   function bindAccess() {
     const input = $('portal-require-token');
     input.onchange = async () => {
@@ -720,7 +747,11 @@ const portalSettings = (() => {
     dismissToken = null;
     for (const page of mounted.keys()) $(page + '-content').replaceChildren();
     mounted.clear();
+    const runtimeRoot = $('settings-runtime');
+    if (runtimeModule?.unmount) runtimeModule.unmount(runtimeRoot);
+    else runtimeRoot.replaceChildren();
+    runtimeModule = null;
   }
 
-  return {load, reset, clearSensitive, configureAccess, bindAccess};
+  return {load, reset, clearSensitive, configureAccess, bindAccess, runtime};
 })();

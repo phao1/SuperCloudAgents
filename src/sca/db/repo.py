@@ -441,7 +441,7 @@ class Store:
 
                 if self.objects is None:
                     raise RuntimeError("Archived events require an object store")
-                archived = await read_events(self.objects, task_id)
+                archived = await read_events(self.objects, task_id, result=task["result"])
                 return [event for event in archived if event.seq > after][:limit]
             rows = (
                 await session.execute(
@@ -3183,7 +3183,7 @@ class Store:
 
                 if self.objects is None:
                     raise RuntimeError('Archived events require an object store')
-                history = await read_events(self.objects, task_id)
+                history = await read_events(self.objects, task_id, result=task.result)
                 page = [event for event in history if event.seq > after and event.type in milestones][:limit]
                 return task, page, [event for event in history if page and event.seq <= page[-1].seq
                                     and event.type in context]

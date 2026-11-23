@@ -309,16 +309,18 @@ def test_project_asset_uses_role_checks_and_existing_task_routes():
 
     static = Path("src/sca/api/static")
     page = (static / "portal.html").read_text()
+    navigation = (static / "portal-nav.js").read_text()
     source = (static / "portal-projects.js").read_text()
     composer = (static / "portal-tasks.js").read_text()
-    assert "const home=portalUI.can('tenant')?'projects':'overview';" in page
+    assert "Object.hasOwn(pages, requested) ? requested : 'home'" in navigation
     assert 'id="project-create" class="primary" type="button" data-access="member" hidden' in page
     assert 'aria-label="线程面包屑"' in page and "portalProjects.breadcrumb(t)" in page
-    assert 'href="#/projects" data-access="tenant" hidden' in page
-    assert 'href="#/tasks" data-access="history" hidden' in page
+    assert 'href="#/projects" data-nav="projects" data-access="tenant" hidden' in page
+    assert 'href="#/tasks" data-nav="tasks" data-access="history" hidden' in page
     for value in ('待审核', '等你处理', '进行中', '合入中', '空闲', '已完成', '文件库', '用量', '设置', '16,000'):
         assert value in source
-    assert "if (project.status === 'active' && ui.can('member'))" in source
+    assert "$('project-new-task').hidden = project.status !== 'active' || !ui.can('member')" in source
+    assert "if (project.status !== 'active' || !ui.can('member')) return;" in source
     assert "if (!ui.can('admin')) return;" in source
     assert "project_id: project.id" in composer
     assert all(api not in source for api in ("innerHTML", "outerHTML", "insertAdjacentHTML"))

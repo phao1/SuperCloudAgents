@@ -5,16 +5,16 @@ window.SCAPortalArchive = (() => {
   const orderSource = 'portal-run-2026-11-19.md';
   const definitions = {
     projects: ['projects-page', '项目', '从已公开的场景进入执行记录。'],
-    overview: ['overview', '概览', '已归档的任务与评测结果。'],
+    home: ['home-page', '首页', '已归档的任务与评测结果。'],
     submit: ['submit-page', '提交任务示例', '查看订单任务使用的需求与验收条件。'],
-    evals: ['evaluation', '评测中心', '查看已发布的评测运行和用例结果。'],
+    evals: ['evaluation', '评测', '查看已发布的评测运行和用例结果。'],
     runs: ['run-detail', '评测运行详情', '浏览已有结果与公开证据。'],
-    tasks: ['trace', '任务进度', '沿架构图和执行泳道回放已归档的任务。'],
+    tasks: ['trace', '任务', '沿架构图和执行泳道回放已归档的任务。'],
     history: ['archive-history-page', '任务历史', '浏览和筛选完整的公开任务列表。'],
     analysis: ['analysis-page', '数据分析', '查看已归档的数据分析任务。'],
-    compare: ['compare-page', '版本对比', '查看同一评测套件在修复前后的结果。'],
-    versions: ['versions', '版本谱系', '查看公开记录里的 OpenCode 版本。'],
-    loop: ['loop', '自演进闭环', '回看文件工具的评测、修复和回归记录。'],
+    compare: ['compare-page', '评测', '查看同一评测套件在修复前后的结果。'],
+    versions: ['versions', '版本', '查看公开记录里的 OpenCode 版本。'],
+    loop: ['loop', '自动演进', '回看文件工具的评测、修复和回归记录。'],
     evolutions: ['evolutions-page', '自动演进', '查看已发布的迭代证据。'],
     memories: ['memories-page', '共享记忆', '浏览已公开的约定，查看任务何时命中记忆。'],
     tools: ['tools-page', '工具与知识库', '查看归档里的工具调用和参考资料。'],
@@ -71,7 +71,7 @@ window.SCAPortalArchive = (() => {
     const links = el('div', undefined, 'result-links');
     links.append(evidenceLink('查看任务进度 →', '#/tasks'), evidenceLink('查看任务历史 →', '#/history'),
       evidenceLink('查看共享记忆 →', '#/memories'), evidenceLink('查看架构图 →', '/portal/architecture'));
-    $('overview').replaceChildren(
+    $('home-page').replaceChildren(
       metrics(
         metric('已归档任务', archive.tasks.length, succeeded + ' 条成功'),
         metric('执行事件', events.toLocaleString('zh-CN'), '点击任务可查看时间线'),
@@ -89,7 +89,7 @@ window.SCAPortalArchive = (() => {
 
   function runDetail(id) {
     const run = runById(id);
-    const back = evidenceLink('返回评测中心', '#/evals');
+    const back = evidenceLink('返回评测运行', '#/evals');
     if (!run) {
       $('run-detail').replaceChildren(panel('未找到这条评测记录', back));
       return;
@@ -196,7 +196,7 @@ window.SCAPortalArchive = (() => {
       ['订单任务沙箱恢复复验', taskLink('T010', '共享记忆与 CI 复验 T010')],
       ['OpenCode 文件工具修复', evidenceLink('文件工具修复演练', '#/loop')],
       ['OpenCode 系统提示词迭代', runLink(runById('prompt-baseline'))],
-    ]), sourceLink(orderSource)));
+    ]), evidenceLink('查看任务提交示例', '#/submit'), sourceLink(orderSource)));
   }
 
   function submissionExample() {
@@ -262,15 +262,15 @@ window.SCAPortalArchive = (() => {
     el('p', '平台租户、套餐和配额由在线实例的管理员查看。')));
   }
 
-  const renderers = {projects, overview, submit: submissionExample, evals: evaluations, runs: runDetail,
+  const renderers = {projects, home: overview, submit: submissionExample, evals: evaluations, runs: runDetail,
     tasks, history: taskHistory, analysis, compare, versions, loop, evolutions, memories,
     tools: toolRecords, integrations, team, platform};
 
   async function route() {
     if (!archive) return;
     const hash = location.hash;
-    const [requested, ...parts] = hash.slice(2).split('/');
-    const routeName = Object.hasOwn(definitions, requested) ? requested : 'overview';
+    const {page, parts} = portalNav.resolve(hash);
+    const routeName = Object.hasOwn(definitions, page) ? page : 'home';
     if (routeName !== 'tasks') {
       stopReplay();
       if (traceFullscreen()) await setTraceFullscreen(false);
@@ -279,17 +279,7 @@ window.SCAPortalArchive = (() => {
     $('evidence').hidden = true;
     evidenceView = null;
     $('error').textContent = '';
-    const [section, title, description] = definitions[routeName];
-    $('page-title').textContent = title;
-    $('page-description').textContent = description;
-    for (const node of document.querySelectorAll('main > section')) node.hidden = node.id !== section;
-    for (const link of document.querySelectorAll('.sidebar nav a')) {
-      if (link.hash === '#/' + (routeName === 'runs' ? 'evals' : routeName)) {
-        link.setAttribute('aria-current', 'page');
-      } else {
-        link.removeAttribute('aria-current');
-      }
-    }
+    portalNav.display(routeName, parts, definitions);
     await renderers[routeName](...parts);
   }
 
@@ -313,21 +303,14 @@ window.SCAPortalArchive = (() => {
     $('workspace-indicator').className = 'badge complete';
     $('workspace-indicator').textContent = '本地归档';
     $('sidebar-workspace').textContent = '归档工作空间';
-    document.querySelector('.sidebar .brand').href = '#/overview';
-    const navigation = document.querySelector('.sidebar nav');
-    navigation.querySelector('[href="#/tasks"]').after(evidenceLink('任务历史', '#/history'));
-    for (const link of navigation.querySelectorAll('a')) {
-      const page = link.hash.slice(2);
-      link.hidden = !Object.hasOwn(definitions, page);
-      if (page === 'tasks' || page === 'submit') link.textContent = definitions[page][1];
-    }
+    portalNav.sync(definitions);
     const historyPage = el('section', undefined, 'page');
     historyPage.id = 'archive-history-page';
     historyPage.hidden = true;
     $('trace').after(historyPage);
     portalIdentity = {tenant_id: 'eval', role: 'viewer', guest: true};
     $('trace-live').textContent = '回到最新事件';
-    $('overview').replaceChildren(el('p', '正在读取归档…', 'empty-state'));
+    $('home-page').replaceChildren(el('p', '正在读取归档…', 'empty-state'));
     $('refresh').onclick = () => loadArchive().catch(error);
     window.addEventListener('hashchange', () => route().catch(error));
     await loadArchive();

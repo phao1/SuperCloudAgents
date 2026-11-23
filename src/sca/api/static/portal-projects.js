@@ -198,7 +198,18 @@ const portalProjects = (() => {
       return link;
     }));
     $('project-actions').replaceChildren();
+    $('project-new-task').hidden = project.status !== 'active' || !ui.can('member');
     if (!ui.can('member')) return;
+    $('project-new-task').onclick = async () => {
+      if (project.status !== 'active' || !ui.can('member')) return;
+      const form = el('div', '正在读取任务设置…');
+      dialog('新建任务', form);
+      try {
+        await portalTasks.loadSubmit(form, project);
+      } catch (err) {
+        if (form.isConnected) ui.setMessage(form, err.message, true);
+      }
+    };
     const identity = portalIdentity, route = location.hash;
     const actions = [button('设置', () => {
       if (!ui.can('member')) return;
@@ -235,20 +246,6 @@ const portalProjects = (() => {
   }
 
   function showThreads(root, project, threads) {
-    if (project.status === 'active' && ui.can('member')) {
-      const composer = ui.action('新线程', async () => {
-        if (!ui.can('member')) return;
-        const form = el('div', '正在读取任务设置…');
-        dialog('新线程', form);
-        try {
-          await portalTasks.loadSubmit(form, project);
-        } catch (err) {
-          if (form.isConnected) ui.setMessage(form, err.message, true);
-        }
-      }, $('projects-status'));
-      composer.classList.add('primary');
-      root.append(ui.actions(composer));
-    }
     const board = el('div', undefined, 'project-grid');
     board.append(...groups.map(([key, label]) => {
       const rows = threads.filter(thread => thread.group === key);

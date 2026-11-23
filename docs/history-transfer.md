@@ -4,6 +4,17 @@
 任务 DAG、插话、评测结果、演进候选与冠军，以及已发布的补丁和日志。已归档的事件也可回放。
 导出与导入均可在 API 和 Worker 运行期间执行。
 
+## 本机切换模式
+
+在 Linux 或 macOS 的本机 Portal 切换源码与 Docker 模式时，脚本会把原库的历史导出到
+`.data/switch/<id>.zip`，重启后导入目标库。两套数据库和原始制品均保留。已有记录按下文的
+去重规则处理，导出时尚未完成的记录在目标库显示为已取消或已停止。
+
+成功后自动清理这次的 ZIP。若需保留，请在启动 Portal 前设置 `SCA_KEEP_SWITCH_ARCHIVE=1`。
+切换失败时，已生成的 ZIP 会保留，可以在目标模式启动后重新导入。手工导入到 Docker
+模式时运行 `bash scripts/portal_demo.sh import-history --mode docker <zip>`。
+[Portal 切换与 API](operations.md#切换运行模式)
+
 ## Linux 导出
 
 在 Docker 模式的 SCA 服务器仓库根目录运行，脚本复用 Portal 的数据库和对象存储配置。

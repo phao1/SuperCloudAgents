@@ -242,7 +242,7 @@ curl -fsS "$SCA_API_URL/v1/champions/$CHAMPION_ID" \
 ### 6.6 模型服务账户故障
 
 升级后重启 API 和 Worker。两者应使用同一个 `SCA_DATA_DIR`，以共享模型网关状态，无需数据库迁移。
-模型服务余额或额度耗尽、密钥无效时，Portal 的概览和任务页会显示红色横幅及故障时间。
+模型服务余额或额度耗尽、密钥无效时，Portal 的首页和任务页会显示红色横幅及故障时间。
 充值、恢复额度或更新 LiteLLM 的上游密钥后，下一次成功的模型调用会清除横幅。
 
 任务遇到 `billing` 或 `auth` 时立即结束为 `FAILED`。详情的 `state_reason` 给出处理方式，

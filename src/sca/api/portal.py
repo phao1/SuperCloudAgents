@@ -33,11 +33,12 @@ from sca.api.authz import (
     principal,
 )
 from sca.api.evals import can_rescore
+from sca.api.portal_runtime import router as runtime_router
 from sca.config import SOURCE_MODE_WARNING, Settings, get_settings
 from sca.core.errors import AuthError, NotFoundError
 from sca.core.models import Principal, TaskState
 from sca.db.schema import plans, tasks, tenants, usage_daily
-from sca.gateway.configuration import model_configured, prefer_model
+from sca.gateway.configuration import demo_config_path, model_configured, prefer_model
 from sca.gateway.health import ProviderHealth
 from sca.gateway.model_providers import read_registry
 
@@ -65,13 +66,21 @@ async def set_provider_key(
     body: ProviderKey, request: Request, command: Annotated[list[str], Depends(model_admin)],
 ) -> dict:
     """Configure the local demo gateway; this capability is opt-in and administrator-only."""
-    config = os.environ.get('SCA_PORTAL_LOCAL_CONFIG')
-    if not config or not command:
-        raise HTTPException(status_code=403, detail='本地配置不可用')
     key = body.key.get_secret_value()
     if not re.fullmatch(r'[A-Za-z0-9_-]{8,256}', key):
         raise HTTPException(status_code=422, detail='密钥格式无效')
-    path = Path(config)
+    return await _write_provider_key(key, request, command)
+
+
+@router.delete('/v1/portal/provider-key')
+async def clear_provider_key(request: Request, command: Annotated[list[str], Depends(model_admin)]) -> dict:
+    return await _write_provider_key('REPLACE_ME', request, command)
+
+
+async def _write_provider_key(key: str, request: Request, command: list[str]) -> dict:
+    path = demo_config_path()
+    if path is None or not command:
+        raise HTTPException(status_code=403, detail='本地配置不可用')
     restarts = gateway_restarts(request)
     restarts.require_idle()
     set_key(str(path), 'DEEPSEEK_API_KEY', key)
@@ -126,12 +135,14 @@ async def gateway_models() -> tuple[bool, list[str]]:
 
 # Model catalog. The Portal exposes aliases and limits independently from provider administration.
 def model_catalog(settings: Settings, models: list[str]) -> dict:
-    configured = read_registry(settings.data_dir).models
+    registry = read_registry(settings.data_dir)
+    configured = registry.models
+    preferred = registry.default_model if demo_config_path() and registry.default_model in models else None
     return {
         "data": [{"id": name,
                   "context_window": configured[name].context_window if name in configured else None,
                   "unpriced": name in configured and configured[name].unpriced} for name in models],
-        "default_model": prefer_model(settings.default_model, models),
+        "default_model": prefer_model(preferred or settings.default_model, models),
         "evolve_model": prefer_model(settings.evolve_model, models),
     }
 
@@ -197,7 +208,10 @@ async def config(request: Request,
 
 _ASSETS = {
     "portal-operations.css": "text/css",
+    "portal-navigation.css": "text/css",
     "portal-ui.js": "text/javascript",
+    "portal-nav.js": "text/javascript",
+    "portal-home.js": "text/javascript",
     "portal-markdown.js": "text/javascript",
     "portal-tasks.js": "text/javascript",
     "portal-evolution.js": "text/javascript",
@@ -206,6 +220,7 @@ _ASSETS = {
     "portal-settings.js": "text/javascript",
     "portal-projects.js": "text/javascript",
     "portal-models.js": "text/javascript",
+    "portal-runtime.js": "text/javascript",
     "task-dag.js": "text/javascript",
     "task-dag.css": "text/css",
 }
@@ -377,3 +392,7 @@ async def set_portal_access(
         raise HTTPException(503, "无法保存本机 Portal 访问设置。") from None
     response.headers["Cache-Control"] = "no-store"
     return PortalAccessStatus(require_token=body.require_token, local_no_token_active=active)
+
+
+# Portal runtime switching
+router.include_router(runtime_router)

@@ -20,9 +20,10 @@ def test_memory_and_analysis_navigation_and_references():
     parser.feed(source)
     assert len(parser.ids) == len(set(parser.ids))
     assert set(re.findall(r"\$\('([^']+)'\)", source)) <= set(parser.ids)
+    nav = PORTAL.with_name('portal-nav.js').read_text()
     for route, title in [('memories', '共享记忆'), ('analysis', '数据分析')]:
         assert f'href="#/{route}"' in source
-        assert f"{route}:['{route}-page','{title}'" in source
+        assert f"{route}: ['{route}-page', '{title}'" in nav
 
 
 def test_memory_endpoints_and_api_statuses():
