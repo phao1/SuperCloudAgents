@@ -64,7 +64,7 @@ async def test_guest_reads_demo_history_with_tenant_rls(store, api_store, tmp_pa
         monkeypatch.setattr("sca.api.app.get_settings", lambda: settings)
         app = create_app(store=api_store, orchestrator=SimpleNamespace(), object_store=objects,
                          authenticator=StaticTokenAuthenticator({"fixture-token": "eval:admin"}))
-        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+        return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000")
 
     async with client_for() as client:
         assert (await client.get("/v1/portal/config")).json() == {

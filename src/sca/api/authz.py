@@ -1,6 +1,5 @@
 from collections.abc import Callable, Coroutine
 from hmac import compare_digest
-from ipaddress import IPv6Address, ip_address
 from os import environ
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -8,6 +7,7 @@ from uuid import UUID
 from fastapi import Depends, Header, Request
 from pydantic import BaseModel, ConfigDict, StrictBool, ValidationError
 
+from sca.api.local_request import is_loopback, local_guest_request, unproxied_host
 from sca.config import Settings
 from sca.core.errors import AuthError
 from sca.core.models import Principal
@@ -99,16 +99,6 @@ class GuestPrincipal(Principal):
     subject: Literal["guest"] = "guest"
 
 
-def is_loopback(host: str) -> bool:
-    try:
-        address = ip_address(host)
-    except ValueError:
-        return False
-    if isinstance(address, IPv6Address) and address.ipv4_mapped is not None:
-        address = address.ipv4_mapped
-    return address.is_loopback
-
-
 async def history_principal(request: Request, authorization: str | None = Header(None)) -> Principal:
     return await _request_principal(request, authorization, guest=True)
 
@@ -123,7 +113,9 @@ async def _guest_principal(request: Request) -> GuestPrincipal | None:
     settings = getattr(request.app.state, "settings", None)
     if settings is not None and request.method == "GET":
         mode = settings.guest_view
-        if mode == "all" or (mode == "local" and request.client and is_loopback(request.client.host)):
+        if mode == "all" or (mode == "local" and request.client and local_guest_request(
+            request.client.host, request.headers.items(),
+        )):
             tenant = settings.guest_tenant or _default_history_tenant()
             if not await request.app.state.store.tenant_deleted(tenant):
                 return GuestPrincipal(tenant_id=tenant)
@@ -163,13 +155,10 @@ def local_portal_host(request: Request) -> str | None:
     if (port is None or not server or server[1] != port or not is_loopback(server[0])
             or not request.client or not is_loopback(request.client.host)):
         return None
-    headers = request.headers
-    if any(name in {"forwarded", "via", "x-real-ip"} or name.startswith("x-forwarded-") for name in headers):
+    host = unproxied_host(request.headers.items())
+    if host not in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"):
         return None
-    hosts = headers.getlist("host")
-    if len(hosts) != 1 or hosts[0] not in (f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}"):
-        return None
-    return hosts[0]
+    return host
 
 
 def _local_portal_request(request: Request) -> bool:

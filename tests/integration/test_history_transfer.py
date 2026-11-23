@@ -338,7 +338,7 @@ async def test_history_round_trip_with_deleted_artifact_blob(history_databases, 
         orchestrator=SimpleNamespace(), object_store=target,
         authenticator=StaticTokenAuthenticator({"fixture": "eval:admin", "other": "other:viewer"}),
     )
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
         reason = "文件缺失（源机器上已清理）"
         auth = {"Authorization": "Bearer fixture"}
         assert (await client.get("/portal")).status_code == 200

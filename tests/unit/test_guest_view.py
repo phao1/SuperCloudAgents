@@ -30,6 +30,8 @@ from sca.core.task_dag import DAGEdge, DAGNode, TaskDAG
 from sca.evolve.solidify import SOLIDIFY_KIND
 from sca.storage.local import LocalObjectStore, key_for
 
+LOCAL_URL = "http://127.0.0.1:8000"
+
 
 def auth_app(settings, *, deleted=False):
     app = FastAPI()
@@ -46,25 +48,21 @@ def auth_app(settings, *, deleted=False):
 
 
 @pytest.mark.parametrize(
-    ("mode", "peer", "forwarded", "status"),
+    ("mode", "peer", "status"),
     [
-        ("off", "127.0.0.1", "127.0.0.1", 401),
-        ("local", "127.1.2.3", "203.0.113.5", 200),
-        ("local", "::1", "203.0.113.5", 200),
-        ("local", "::ffff:127.0.0.1", "203.0.113.5", 200),
-        ("local", "203.0.113.5", "127.0.0.1", 401),
-        ("local", "localhost", "127.0.0.1", 401),
-        ("all", "203.0.113.5", "203.0.113.5", 200),
+        ("off", "127.0.0.1", 401),
+        ("local", "127.1.2.3", 200),
+        ("local", "::1", 200),
+        ("local", "::ffff:127.0.0.1", 200),
+        ("local", "203.0.113.5", 401),
+        ("local", "localhost", 401),
     ],
 )
-async def test_guest_uses_the_socket_peer(mode, peer, forwarded, status):
-    app = auth_app(Settings(_env_file=None, guest_view=mode, guest_tenant="history",
-                            guest_view_acknowledge_risk="1"))
+async def test_guest_uses_the_socket_peer(mode, peer, status):
+    app = auth_app(Settings(_env_file=None, guest_view=mode, guest_tenant="history"))
     transport = httpx.ASGITransport(app=app, client=(peer, 50123))
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        response = await client.get("/history", headers={
-            "X-Forwarded-For": forwarded, "Forwarded": f"for={forwarded}",
-        })
+    async with httpx.AsyncClient(transport=transport, base_url=LOCAL_URL) as client:
+        response = await client.get("/history")
         assert response.status_code == status
         if status == 200:
             assert response.json() == {
@@ -72,6 +70,78 @@ async def test_guest_uses_the_socket_peer(mode, peer, forwarded, status):
                 "repo_url": None, "guest": True,
             }
         assert (await client.post("/history")).status_code == 401
+
+
+async def test_opted_in_guest_allows_remote_requests():
+    app = auth_app(Settings(_env_file=None, guest_view="all", guest_tenant="history",
+                            guest_view_acknowledge_risk="1"))
+    transport = httpx.ASGITransport(app=app, client=("203.0.113.5", 50123))
+    headers = {
+        "Forwarded": "for=203.0.113.5", "X-Forwarded-For": "203.0.113.5",
+        "Origin": "https://external.example", "Sec-Fetch-Site": "cross-site",
+    }
+    async with httpx.AsyncClient(transport=transport, base_url="http://history.example") as client:
+        response = await client.get("/history", headers=headers)
+        assert response.status_code == 200 and response.json()["guest"] is True
+        assert (await client.post("/history", headers=headers)).status_code == 401
+
+
+@pytest.fixture
+async def local_guest_client():
+    app = auth_app(Settings(_env_file=None, guest_view="local", guest_tenant="history"))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=LOCAL_URL) as client:
+        yield client
+
+
+@pytest.mark.parametrize("hosts", [
+    (),
+    ("evil.example:8000",),
+    ("127.0.0.1:8000", "evil.example:8000"),
+    ("localhost", "localhost"),
+    ("127.0.0.1:8000, localhost:8000",),
+    ("localhost.example:8000",),
+    ("127.0.0.2:8000",),
+    ("localhost:8000/path",),
+    ("localhost:invalid",),
+])
+async def test_local_guest_requires_one_loopback_host(local_guest_client, hosts):
+    request = local_guest_client.build_request("GET", "/history")
+    request.headers = httpx.Headers([("Host", host) for host in hosts])
+    assert (await local_guest_client.send(request)).status_code == 401
+
+
+@pytest.mark.parametrize("headers", [
+    [("Forwarded", "for=127.0.0.1")],
+    [("X-Forwarded-For", "127.0.0.1")],
+    [("X-Forwarded-Host", "localhost")],
+    [("X-Forwarded-Proto", "http")],
+    [("X-Real-IP", "127.0.0.1")],
+    [("Via", "1.1 proxy")],
+    [("Sec-Fetch-Site", "cross-site")],
+    [("Sec-Fetch-Site", "same-site")],
+    [("Sec-Fetch-Site", "same-origin"), ("Sec-Fetch-Site", "cross-site")],
+    [("Sec-Fetch-Site", "same-origin, same-site")],
+    [("Origin", "http://evil.example:8000")],
+    [("Origin", "null")],
+    [("Origin", "")],
+    [("Origin", "http://localhost@evil.example")],
+    [("Origin", "http://localhost:65536")],
+    [("Origin", "http://localhost"), ("Origin", "http://127.0.0.1")],
+])
+async def test_local_guest_rejects_proxy_and_foreign_browser_headers(local_guest_client, headers):
+    assert (await local_guest_client.get("/history", headers=headers)).status_code == 401
+
+
+@pytest.mark.parametrize("headers", [
+    {"Host": "127.0.0.1:18000"},
+    {"Host": "localhost:18000", "Origin": "http://localhost:18000", "Sec-Fetch-Site": "same-origin"},
+    {"Host": "[::1]:18000", "Origin": "http://[::1]:18000"},
+    {"Host": "127.0.0.1", "Origin": "https://127.0.0.1:8443", "Sec-Fetch-Site": "none"},
+    {"Host": "LOCALHOST"},
+])
+async def test_local_guest_allows_loopback_hosts_and_forwarded_ports(local_guest_client, headers):
+    response = await local_guest_client.get("/history", headers=headers)
+    assert response.status_code == 200 and response.json()["guest"] is True
 
 
 def test_guest_default_and_risk_acknowledgement(monkeypatch):
@@ -94,11 +164,11 @@ async def test_guest_fallback_respects_tokens_and_deleted_tenants(monkeypatch):
     monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
     settings = Settings(_env_file=None, guest_view="local", guest_tenant=None)
     app = auth_app(settings)
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=LOCAL_URL) as client:
         assert (await client.get("/history")).json()["tenant_id"] == "default"
         for header in ("Bearer bad", "Bearer ", "", "Basic fixture"):
             assert (await client.get("/history", headers={"Authorization": header})).status_code == 401
-        response = await client.get("/history", headers={"Authorization": "Bearer fixture"})
+        response = await client.get("/history", headers={"Host": "api.example", "Authorization": "Bearer fixture"})
         assert response.json()["tenant_id"] == "other"
         assert response.json()["guest"] is False
         app.state.store.tenant_deleted.return_value = True
@@ -111,7 +181,7 @@ async def test_guest_tenant_defaults_to_eval_in_legacy_demo(monkeypatch, mode):
     monkeypatch.delenv("SCA_GUEST_TENANT", raising=False)
     monkeypatch.setenv("SCA_RUNTIME_MODE", mode)
     app = auth_app(Settings(_env_file=None, guest_view="local"))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=LOCAL_URL) as client:
         assert (await client.get("/history")).json()["tenant_id"] == "eval"
         monkeypatch.setenv("SCA_GUEST_TENANT", "custom")
         app.state.settings = Settings(_env_file=None, guest_view="local")
@@ -166,12 +236,14 @@ async def demo_api(monkeypatch, tmp_path):
     await objects.put(key_for(task_id, "changes.patch"), patch)
     app = create_app(store=store, object_store=objects, orchestrator=SimpleNamespace(), local_portal_port=8000,
                      authenticator=StaticTokenAuthenticator({"fixture": "eval:admin", "viewer": "eval:viewer"}))
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000") as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=LOCAL_URL) as client:
         yield client, scoped, task_id, other_id
 
 
 async def test_guest_history_and_credential_fields(demo_api):
     client, store, task_id, other_id = demo_api
+    assert (await client.get("/v1/tasks", headers={"Host": "evil.example:8000"})).status_code == 401
+    store.list_tasks.assert_not_awaited()
     assert (await client.get("/v1/portal/config")).json() == {
         "guest_view": True, "guest_tenant": "eval", "model_configured": False,
     }

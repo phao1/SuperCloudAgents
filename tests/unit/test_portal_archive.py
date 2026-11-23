@@ -1,6 +1,10 @@
 import json
 import runpy
+from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 
 def test_windows_archive_uses_portal_shell_and_published_records():
@@ -58,3 +62,35 @@ def test_task_progress_and_memory_use_the_published_events():
             "status": [status], "scope": [scope],
         })
         assert json.loads(body) == expected
+
+
+@pytest.fixture(scope="module")
+def archive_handler():
+    return runpy.run_path("scripts/serve_portal_history.py")["HistoryHandler"]
+
+
+@pytest.mark.parametrize(("method", "headers", "status"), [
+    ("GET", "Host: localhost:18001\r\nOrigin: http://localhost:18001\r\n", 200),
+    ("GET", "Host: 127.0.0.1:18001\r\nSec-Fetch-Site: same-origin\r\n", 200),
+    ("HEAD", "Host: localhost:18001\r\n", 200),
+    ("GET", "", 403),
+    ("GET", "Host: archive.example:8001\r\n", 403),
+    ("HEAD", "Host: archive.example:8001\r\n", 403),
+    ("GET", "Host: localhost:8001\r\nhost: localhost:8001\r\n", 403),
+    ("GET", "Host: localhost:8001\r\nX-Forwarded-For: 127.0.0.1\r\n", 403),
+    ("GET", "Host: localhost:8001\r\nSec-Fetch-Site: cross-site\r\n", 403),
+    ("GET", "Host: localhost:8001\r\nSec-Fetch-Site: same-site\r\n", 403),
+    ("GET", "Host: localhost:8001\r\nOrigin: http://archive.example\r\n", 403),
+])
+def test_archive_guest_headers(archive_handler, method, headers, status):
+    handler = archive_handler.__new__(archive_handler)
+    handler.client_address = ("127.0.0.1", 50123)
+    handler.server = SimpleNamespace(responses={"/v1/tasks": ("application/json", b'[{"id":"archive-task"}]')})
+    handler.rfile = BytesIO(f"{method} /v1/tasks HTTP/1.1\r\n{headers}\r\n".encode())
+    handler.wfile = BytesIO()
+
+    handler.handle()
+
+    head, _, body = handler.wfile.getvalue().partition(b"\r\n\r\n")
+    assert int(head.split()[1]) == status
+    assert (b"archive-task" in body) is (status == 200 and method == "GET")
