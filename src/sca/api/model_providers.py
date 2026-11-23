@@ -6,11 +6,11 @@ from uuid import UUID, uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, StrictBool
 
 from sca.api.portal import gateway_restarts, model_admin
 from sca.core.model_provider import classify_model_error
-from sca.gateway.configuration import deepseek_configured, demo_config_path
+from sca.gateway.configuration import active_model_names, deepseek_configured, demo_config_path
 from sca.gateway.model_providers import (
     DEEPSEEK_MODELS,
     ModelName,
@@ -28,6 +28,9 @@ ModelAdmin = Annotated[list[str], Depends(model_admin)]
 class ProviderList(BaseModel):
     providers: list[Provider]
     deepseek_models: list[str]
+    deepseek_has_key: bool
+    deepseek_enabled: bool
+    default_model: ModelName | None
 
 
 class RestartStatus(BaseModel):
@@ -50,6 +53,16 @@ class ConnectionResult(BaseModel):
     message: str
 
 
+class ProviderStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    enabled: StrictBool
+
+
+class DefaultModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    model: ModelName | None
+
+
 def configured_deepseek() -> bool:
     path = demo_config_path()
     return path is not None and deepseek_configured(path)
@@ -69,19 +82,55 @@ def find_provider(registry: ProviderRegistry, provider_id: UUID) -> Provider:
     raise HTTPException(404, "供应商不存在")
 
 
-def apply_registry(request: Request, registry: ProviderRegistry, command: list[str]) -> RestartStatus:
+def save_registry(request: Request, registry: ProviderRegistry) -> None:
     try:
         registry.save(request.app.state.settings.data_dir)
     except OSError:
         raise HTTPException(503, "无法保存本机模型接入配置") from None
+
+
+def apply_registry(request: Request, registry: ProviderRegistry, command: list[str]) -> RestartStatus:
+    save_registry(request, registry)
     restart_id, _ = gateway_restarts(request).start(command)
     return RestartStatus(id=restart_id, status="restarting")
 
 
 @router.get("", dependencies=[Depends(model_admin)])
 async def list_providers(request: Request) -> ProviderList:
-    return ProviderList(providers=registry_for(request).providers,
-                        deepseek_models=list(DEEPSEEK_MODELS) if configured_deepseek() else [])
+    registry = registry_for(request)
+    has_key = configured_deepseek()
+    return ProviderList(providers=registry.providers, default_model=registry.default_model,
+                        deepseek_enabled=registry.deepseek_enabled, deepseek_has_key=has_key,
+                        deepseek_models=list(DEEPSEEK_MODELS) if registry.deepseek_enabled and has_key else [])
+
+
+@router.put("/default", dependencies=[Depends(model_admin)])
+async def set_default_model(body: DefaultModel, request: Request) -> DefaultModel:
+    gateway_restarts(request).require_idle()
+    registry = registry_for(request)
+    if body.model is not None and body.model not in active_model_names(registry, demo_config_path()):
+        raise HTTPException(422, "请选择已启用的模型")
+    save_registry(request, registry.model_copy(update={"default_model": body.model}))
+    return body
+
+
+@router.put("/deepseek/enabled", status_code=202, response_model_exclude_none=True)
+async def set_deepseek_enabled(body: ProviderStatus, request: Request, command: ModelAdmin) -> ProviderChange:
+    gateway_restarts(request).require_idle()
+    if body.enabled and not configured_deepseek():
+        raise HTTPException(409, "请先填写 DeepSeek API Key")
+    updated = registry_for(request).model_copy(update={"deepseek_enabled": body.enabled})
+    return ProviderChange(restart=apply_registry(request, updated, command))
+
+
+@router.put("/{provider_id}/enabled", status_code=202)
+async def set_provider_enabled(provider_id: UUID, body: ProviderStatus, request: Request,
+                               command: ModelAdmin) -> ProviderChange:
+    gateway_restarts(request).require_idle()
+    registry = registry_for(request)
+    updated = registry.with_provider_enabled(find_provider(registry, provider_id), body.enabled)
+    restart = apply_registry(request, updated, command)
+    return ProviderChange(provider=find_provider(updated, provider_id), restart=restart)
 
 
 @router.get("/{provider_id}", dependencies=[Depends(model_admin)])
@@ -140,10 +189,8 @@ async def get_restart(restart_id: UUID, request: Request, response: Response) ->
 @router.post("/test", dependencies=[Depends(model_admin)])
 async def test_connection(body: ConnectionInput, request: Request) -> ConnectionResult:
     gateway_restarts(request).require_idle()
-    if body.model not in registry_for(request).models and not (
-        body.model in DEEPSEEK_MODELS and configured_deepseek()
-    ):
-        raise HTTPException(404, "请先保存要测试的模型")
+    if body.model not in active_model_names(registry_for(request), demo_config_path()):
+        raise HTTPException(404, "请先保存并启用要测试的模型")
     settings = request.app.state.settings
     if not settings.model_gateway_url:
         raise HTTPException(503, "模型网关未配置")

@@ -43,8 +43,9 @@ winget install -e --id Microsoft.VCRedist.2015+.x64
 Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz'
 ```
 
-打开 <http://127.0.0.1:8000/portal>。默认本机免令牌，以 `eval` 管理员身份进入工作空间。
-在「概览 → 工作空间连接」打开「需要访问令牌」，随后用 `.data/portal.env` 中的
+打开 <http://127.0.0.1:8000/portal>。默认本机免令牌，以 `eval` 管理员身份进入首页。
+在「设置 → 运行环境」可以查看当前运行模式。
+在「设置 → 访问与安全」打开「需要访问令牌」，随后用 `.data/portal.env` 中的
 `SCA_EVAL_API_TOKEN` 登录。在本机 PowerShell 私下运行以下命令查看令牌。
 
 ```powershell
@@ -60,12 +61,13 @@ $env:PORTAL_TOKEN = [System.Net.NetworkCredential]::new('', (Read-Host 'Portal �
 Remove-Item Env:PORTAL_TOKEN
 ```
 
-在「概览」填写 DeepSeek API Key 并保存，Portal 会重启本机 LiteLLM 网关。
+在「设置 → 模型」的 DeepSeek 卡片填写 API Key 并保存，Portal 会重启本机 LiteLLM 网关。
 也可以在启动前将密钥填入仓库根目录的 `.env`；脚本会复用现有配置。在获取密钥前可以
 查看历史记录。请妥善保存 `.env` 和 `.data/portal.env`。
 
-连接本机的 Ollama、LM Studio 或网络上的 vLLM 时，在「概览 → 模型接入」填写基础 URL 和模型 ID。
-同机服务可以使用 `127.0.0.1`，免密服务的 API Key 可留空。[模型接入与预算](models.md)
+连接 Ollama、LM Studio 或 vLLM 时，在「设置 → 模型 → 本地模型」选择服务，填写基础 URL 和模型 ID。
+同机服务可以使用 `127.0.0.1`，免密服务的 API Key 可留空。保存后测试连接，再按需选择「默认模型」。
+[模型接入与 API 示例](models.md)
 
 ## 导入 Linux 历史
 
@@ -86,13 +88,13 @@ Windows 本机可用 `export-history <zip>` 导出。[历史归档内容与高�
 
 ## 运行任务与演进
 
-1. 在「提交任务」选择「DeepSeek Harness」。填写仓库地址、基线分支、任务要求和验证命令。
+1. 在「首页」或「任务」点击「新建任务」，选择 DeepSeek Harness。填写仓库地址、基线分支、任务要求和验证命令。
    仓库可使用本机绝对路径，例如 `C:/work/demo`。平台的准备和验证命令由 Git Bash
    执行，使用相对于任务工作目录的路径，例如 `python -m pytest -q`。在「冠军覆盖」选择
    「使用当前冠军」，可应用同一 DSH 版本和模型的冠军指引。
 2. 提交后进入任务详情，在「执行图 DAG」和「对话」查看进展。需要人工确认时，在对话顶部
    审阅规划或任务结果。卡片可打开最终补丁和「任务证据 → 任务审核」。
-3. 在「自动演进」选择 DeepSeek Harness、评测套件、模型和预算，点击「开始演进」。
+3. 在首页点击「开始演进」，或打开「自动演进 → 演进记录」。选择 DeepSeek Harness、评测套件、模型和预算，再提交运行。
    首次建议用内置套件 `dsh-smoke` 和 `deepseek-flash`，按下方参数试跑预计花费 ¥1–2。
    基线版本留空时使用 `SCA_DSH_VERSION`。打开演进记录查看执行图与评测结果。
    启动脚本会应用 DSH 演进所需的迁移 `0025`。
@@ -181,7 +183,7 @@ Remove-Variable token, headers
 - 端口 7233、4000 或 8000 被占用时，先停止占用端口的服务，再运行 `up`。
   `logs postgres` 同时显示 `.data/run/postgres.log` 的初始化及 `pg_ctl` 输出和
   `.data/run/postgres-server.log` 的数据库进程输出。工具版本需与 `.data/pg/PG_VERSION` 匹配。
-- 网关启动失败时查看 `.data/run/litellm.log`。若 Portal 提示密钥未配置，在「概览」保存密钥后重试。
+- 网关启动失败时查看 `.data/run/litellm.log`。若 Portal 提示密钥未配置，在「设置 → 模型」保存密钥后重试。
   `restart-gateway` 可加载从 `.env` 手工更新的密钥。
 - 源码模式可选 OpenCode、Codex 或 Pi。用 `SCA_AGENT_BACKEND` 选择默认后端。
   OpenCode 首次选用时下载本机发布包。Codex 需要将 `codex.exe` 加入 `PATH`，

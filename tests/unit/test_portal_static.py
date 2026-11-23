@@ -52,9 +52,9 @@ def test_portal_workbench_sections_and_safe_rendering():
     assert "data('/agents/opencode/builds')" in source
 
 
-def test_portal_places_provider_alerts_in_overview_and_tasks():
+def test_portal_places_provider_alerts_in_home_and_tasks():
     source = Path('src/sca/api/static/portal.html').read_text()
-    for section, banner in [('overview', 'overview-provider-error'), ('trace', 'task-provider-error')]:
+    for section, banner in [('home-page', 'overview-provider-error'), ('trace', 'task-provider-error')]:
         content = source.split(f'<section id="{section}"', 1)[1].split('</section>', 1)[0]
         assert f'id="{banner}" class="provider-error-banner" role="alert" hidden' in content
     assert '.provider-error-banner { color: var(--bad); background: var(--bad-bg)' in source
@@ -425,8 +425,9 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
 
 def test_portal_routes_evidence_and_themes():
     source = Path('src/sca/api/static/portal.html').read_text()
+    navigation = Path('src/sca/api/static/portal-nav.js').read_text()
     for route in ('overview', 'evals', 'runs', 'compare', 'tasks', 'loop', 'versions'):
-        assert route in source
+        assert route in navigation
     for feature in ('swimlane', 'evidence', 'run-diagnostics', 'task-diagnostics',
                     'run-metrics', 'task-metrics', 'theme', 'architecture-progress'):
         assert f'id="{feature}"' in source

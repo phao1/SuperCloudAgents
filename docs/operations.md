@@ -55,7 +55,7 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 ## 本机 Portal 访问令牌
 
 源码和 Docker 演示启动脚本默认允许本机浏览器以 `eval` 管理员身份免令牌访问。打开
-`http://127.0.0.1:8000/portal`，在「概览 → 工作空间连接」打开「需要访问令牌」后，
+`http://127.0.0.1:8000/portal`，在「设置 → 访问与安全」打开「需要访问令牌」后，
 新请求立即需要令牌才能以管理员身份操作。用 Bash 的 `grep SCA_EVAL_API_TOKEN .data/portal.env`
 或 PowerShell 的 `Select-String SCA_EVAL_API_TOKEN .\.data\portal.env` 在本机私下查看令牌。
 
@@ -114,8 +114,8 @@ curl -fsS "$API/v1/tasks/$TASK_ID/messages"
 
 访客的配置响应包含 `guest_view: true`、`guest_tenant` 和 `model_configured`。
 演示环境没有 DeepSeek 密钥时，Docker 和源码模式均以空模型列表启动 LiteLLM。此时用令牌提交
-任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在本机 Portal 概览
-保存密钥会重启网关。手工更新 `.env` 后可用
+任务、评测或演进会得到 HTTP 409 和 `error.code: "model_not_configured"`。在本机 Portal 的
+「设置 → 模型」保存密钥会重启网关。手工更新 `.env` 后可用
 `bash scripts/portal_demo.sh restart-gateway` 应用变更。
 
 ## 套餐与用量
@@ -260,7 +260,7 @@ bash scripts/portal_demo.sh down
 它为 API 和 Worker 设置 `SCA_DATABASE_URL`、执行 `alembic upgrade head`，并为网关创建独立的
 `litellm` 数据库。原生 Postgres 可选安装 pgvector，缺少扩展时记忆检索使用近期记录。
 Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/temporal/dev.db`。LiteLLM 1.110.2 在
-`.data/litellm-venv` 中运行，监听 `127.0.0.1:4000`。可以在 Portal 概览保存 DeepSeek API Key，
+`.data/litellm-venv` 中运行，监听 `127.0.0.1:4000`。可以在 Portal 的「设置 → 模型」保存 DeepSeek API Key，
 保存会重启本机网关。 [Temporal 发布包](https://github.com/temporalio/cli/releases/tag/v1.5.0) [LiteLLM 版本](https://pypi.org/project/litellm/1.110.2/)
 
 脚本把当前模式保存在 `.data/portal.env`，并把 PID 和日志保存在 `.data/run/`。
@@ -268,7 +268,7 @@ Temporal CLI 1.5.0 的开发服务监听 7233，数据库保存在 `.data/tempor
 停止源码模式会保留本机数据库。切换到源码模式前，可在 Docker 模式执行
 `bash scripts/portal_demo.sh down --all` 释放网关和 Temporal 的端口，两种模式分别使用各自的数据库。
 
-在 Portal 的「提交任务」页面选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
+在 Portal 的「任务 → 新建任务」选择 OpenCode。源码模式把上游 OpenCode v2.3.0 注册为
 `2.3.0-sca.0`，支持该版本和模型对应的运行时冠军覆盖。OpenCode 源码修复、构建和冠军固化
 需要 Docker。Codex 和 Pi 仅在找到本机可执行文件时提供。Pi 使用兼容 1.5.2 的 CLI。
 选择 DeepSeek Harness 可运行本机 `dsh`。启动脚本用 npm 安装 `SCA_DSH_VERSION` 指定的

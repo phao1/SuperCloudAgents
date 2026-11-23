@@ -156,7 +156,10 @@ const portalTasks = (() => {
   }
 
   async function loadSubmit(target = $('submit-form'), project = null) {
-    if (!project && target.hasChildNodes()) return refreshTools();
+    if (!project && target.hasChildNodes()) {
+      target.querySelector('[name="model"]').placeholder = portalConfig?.default_model || '';
+      return refreshTools();
+    }
     const identity = portalIdentity, hash = location.hash;
     const current = () => identity === portalIdentity && hash === location.hash && target.isConnected;
     await Promise.all([
