@@ -63,6 +63,41 @@ async def test_eval_workflow_loads_in_temporal_sandbox():
     SandboxedWorkflowRunner().prepare_workflow(workflow._Definition.must_from_class(EvalRunWorkflow))
 
 
+async def test_guidance_cancel_keeps_case_cost_and_accepts_a_concurrent_terminal_response(monkeypatch):
+    task_id, ended = str(uuid4()), str(uuid4())
+    store = SimpleNamespace(record_eval_result=AsyncMock())
+    activities = EvalActivities(Settings(_env_file=None), store)
+    cancelled = []
+
+    def api(request):
+        path = request.url.path.split("/")
+        if path[-1] == "cancel":
+            cancelled.append(path[3])
+            return httpx.Response(409 if path[3] == ended else 200, json={})
+        if path[-1] == "events":
+            return httpx.Response(200, json=[
+                {"seq": 1, "type": "agent.turn_completed", "payload": {"turn": 1}},
+            ])
+        return httpx.Response(200, json={
+            "id": path[3], "state": "CANCELLED", "result": {"acceptance_passed": True},
+            "usage": {"cost_micro_usd": 10000}, "created_at": "2026-11-22T00:00:00Z",
+            "updated_at": "2026-11-22T00:00:09Z",
+        })
+
+    monkeypatch.setattr(activities, "http", lambda: httpx.AsyncClient(
+        base_url="http://fixture", transport=httpx.MockTransport(api),
+    ))
+    await activities.cancel_cases([task_id, ended])
+    assert set(cancelled) == {task_id, ended}
+    outcome = await activities.collect({
+        "id": str(uuid4()), "task_id": task_id, "case": {"id": "fixture"}, "iteration": 0,
+        "guidance_abort": True, "report_outcome": True,
+    })
+    assert outcome == {"cost_usd": .01, "errored": True}
+    saved = store.record_eval_result.await_args.args[0]
+    assert saved["cost_usd"] == .01 and saved["acceptance_passed"] is None
+
+
 @pytest.mark.parametrize('mixed', [False, True])
 async def test_unpriced_cases_run_when_usd_budget_cannot_cover_a_priced_case(monkeypatch, mixed):
     cases = [{'id': 'local', 'model_unpriced': True}]

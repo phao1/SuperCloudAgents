@@ -528,7 +528,8 @@ class TaskWorkflow:
         prompt = with_guidance(prompt, [message.text for message in messages])
         return await self._interjections.run_activity(
             "run_agent_turn",
-            TurnInput(task_id, turn, prompt, session, self._interjections.enabled),
+            TurnInput(task_id, turn, prompt, session, self._interjections.enabled,
+                      self._interjections.turn_guidance(messages)),
             result_type=TurnResult,
             start_to_close_timeout=timedelta(seconds=spec["turn_timeout_s"] + 60),
             heartbeat_timeout=timedelta(seconds=spec.get("turn_heartbeat_timeout_s", 120)),

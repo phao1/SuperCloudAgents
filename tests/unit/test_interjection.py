@@ -7,10 +7,14 @@ from temporalio import workflow
 from temporalio.testing import ActivityEnvironment
 
 from sca.agents.codex import CodexBackend
+from sca.agents.dsh import DshBackend
+from sca.agents.fake import FakeBackend
+from sca.agents.opencode import OpenCodeBackend
+from sca.agents.pi import PiBackend
 from sca.config import Settings
-from sca.core.models import ExecOutput
+from sca.core.models import AgentContext, ExecOutput
 from sca.kernel.activities import KernelActivities, TurnInput
-from sca.kernel.interjection import with_guidance
+from sca.kernel.interjection import TurnGuidance, with_guidance
 from sca.kinds.coding.workflow import CodingTaskWorkflow
 from tests.interjection_harness import GUIDANCE_HEADER, InterjectionScript
 
@@ -96,6 +100,9 @@ async def test_interrupt_waits_for_cleanup_then_checkpoints_and_restarts(monkeyp
         GUIDANCE_HEADER + "\n\noriginal guidance\n\nchange direction\n\n",
     )
     assert script.applied == [first, update]
+    guide = script.turns[-1].guidance
+    assert guide.message_ids == [first, update]
+    assert guide.interrupted_ids == [update]
 
 
 async def test_guidance_during_review_requests_revision(monkeypatch):
@@ -117,6 +124,8 @@ async def test_guidance_during_review_requests_revision(monkeypatch):
 async def test_cancel_while_saving_an_agent_event_awaits_process_cleanup(tmp_path):
     writing_session = asyncio.Event()
     process_stopped = asyncio.Event()
+    settling_key = asyncio.Event()
+    release_key = asyncio.Event()
 
     class Sandbox:
         async def exec(self, *args, **kwargs):
@@ -132,6 +141,8 @@ async def test_cancel_while_saving_an_agent_event_awaits_process_cleanup(tmp_pat
 
     async def revoke_key(alias):
         assert process_stopped.is_set()
+        settling_key.set()
+        await release_key.wait()
 
     store = SimpleNamespace(
         get_task_champion=AsyncMock(return_value=None), get_session_id=AsyncMock(return_value=None),
@@ -155,7 +166,78 @@ async def test_cancel_while_saving_an_agent_event_awaits_process_cleanup(tmp_pat
         running = asyncio.create_task(env.run(acts.run_agent_turn, TurnInput("task", 1, "work", interjectible=True)))
         await writing_session.wait()
         running.cancel()
+        await asyncio.wait_for(settling_key.wait(), .5)
+        assert process_stopped.is_set() and not running.done()
+        assert any(call.args[1] == "agent.turn_interrupted" for call in store.append_event.await_args_list)
+        release_key.set()
         with pytest.raises(asyncio.CancelledError):
             await running
     assert process_stopped.is_set()
     gateway.revoke_key.assert_awaited_once_with("task-task-turn1-attempt1")
+
+
+@pytest.mark.parametrize("backend", ["codex", "dsh", "fake", "opencode", "pi"])
+async def test_cancelling_a_quiet_turn_immediately_closes_execution_stream(backend, tmp_path):
+    started, killed = asyncio.Event(), asyncio.Event()
+    version = "2.3.0-sca.0"
+    executable = tmp_path / version / "opencode"
+    executable.parent.mkdir()
+    executable.touch()
+    agent = {
+        "codex": CodexBackend(tmp_path, None, "fixture"),
+        "dsh": DshBackend("fixture"),
+        "fake": FakeBackend(),
+        "opencode": OpenCodeBackend(tmp_path, version, "fixture"),
+        "pi": PiBackend("fixture"),
+    }[backend]
+
+    class Sandbox:
+        async def exec(self, *args, **kwargs):
+            started.set()
+            try:
+                yield ExecOutput(stream="stdout", text="")
+                await asyncio.Future()
+            finally:
+                killed.set()
+
+    async def run():
+        ctx = AgentContext(task_id="task", agent_home_host=str(tmp_path), model_base_url="http://model.invalid/v1",
+                           model_api_key="fixture")
+        async for _ in agent.run_turn(Sandbox(), "sandbox", ctx, "```sca-fake\nsleep 120\n```",
+                                      session_id=None, timeout_s=180):
+            pass
+
+    task = asyncio.create_task(run())
+    async with asyncio.timeout(1):
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    assert killed.is_set()
+
+
+@pytest.mark.parametrize("driver", ["docker", "local"])
+async def test_scripted_turn_bypasses_model_key_settlement(driver, tmp_path):
+    store = SimpleNamespace(
+        get_task_champion=AsyncMock(return_value=None), get_session_id=AsyncMock(return_value=None),
+        get_task=AsyncMock(return_value=SimpleNamespace(kind="coding")),
+        start_guided_turn=AsyncMock(), append_event=AsyncMock(), set_session=AsyncMock(), add_usage=AsyncMock(),
+    )
+    gateway = SimpleNamespace(issue_key=AsyncMock(), revoke_key=AsyncMock())
+    acts = KernelActivities(
+        settings=Settings(_env_file=None, data_dir=tmp_path, sandbox_driver=driver), store=store,
+        sandbox=SimpleNamespace(), agent=FakeBackend(), objects=SimpleNamespace(), gateway=gateway,
+    )
+    acts._ensure_state = AsyncMock(return_value=False)
+    acts._spec = AsyncMock(return_value=SimpleNamespace(model=None, max_cost_usd=None, turn_timeout_s=30))
+    acts._sandbox_id = AsyncMock(return_value="sandbox")
+    acts._before_agent_turn = AsyncMock()
+    acts._sync_fake_home = AsyncMock()
+    result = await ActivityEnvironment().run(acts.run_agent_turn, TurnInput(
+        "task", 2, "fixture", interjectible=True, guidance=TurnGuidance(["guide"], ["guide"]),
+    ))
+    assert result.final_message == "Fake turn completed."
+    start = store.start_guided_turn.await_args.args
+    assert start[1]["turn"] == 2 and start[3:] == (["guide"], ["guide"])
+    gateway.issue_key.assert_not_awaited()
+    gateway.revoke_key.assert_not_awaited()

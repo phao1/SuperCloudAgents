@@ -3291,3 +3291,46 @@ class Store:
                 rows.extend({'source': 'harvest', **row}
                             for row in (await session.execute(harvest_query)).mappings())
         return rows
+
+    # Task interjection start receipts
+
+    async def pending_task_messages(self, task_id: str) -> list[TaskMessage]:
+        from sca.db.schema import task_messages
+
+        async with self._transaction() as session:
+            task = await self._task(session, task_id)
+            rows = (await session.execute(self._task_messages(task).where(
+                task_messages.c.status != "applied",
+            ))).mappings()
+            return [TaskMessage.model_validate(dict(row)) for row in rows]
+
+    async def start_guided_turn(
+        self, task_id: str, start: dict, key: str, message_ids: list[str], interrupted_ids: list[str],
+        *, plan_attempt: int | None = None,
+    ) -> None:
+        from sca.db.schema import task_messages
+
+        c = task_messages.c
+        position = {"turn": start["turn"] if plan_attempt is None else None, "plan_attempt": plan_attempt}
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            begun = await self._event(
+                session, task["id"], "agent.turn_started",
+                {**start, "interjectible": True, "following_guidance": bool(message_ids)}, key,
+            )
+            if begun is None or not message_ids:
+                return
+            rows = (await session.execute(self._task_messages(task).where(
+                c.status != "applied", c.id.in_([UUID(id_) for id_ in message_ids]),
+            ))).mappings().all()
+            for row in rows:
+                await session.execute(update(task_messages).where(c.id == row["id"]).values(
+                    status="delivered", **position,
+                ))
+                id_ = str(row["id"])
+                await self._event(
+                    session, task["id"], "user.message.delivered",
+                    {"message_id": id_, "status": "delivered", **position,
+                     "interrupted": row["mode"] == "interrupt" and id_ in interrupted_ids},
+                    f"{key}.message.{id_}",
+                )

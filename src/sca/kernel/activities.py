@@ -58,6 +58,7 @@ from sca.kernel.interjection import (
     ApplyMessages,
     DeliverMessages,
     Guidance,
+    TurnGuidance,
 )
 from sca.kernel.kind import ExecutionSpec, get
 from sca.kernel.prompts import EvaluationSettings, render_prompt
@@ -107,6 +108,7 @@ class TurnInput:
     prompt: str
     session_id: str | None = None
     interjectible: bool = False
+    guidance: TurnGuidance | None = None
 
 
 @dataclass
@@ -878,16 +880,8 @@ class KernelActivities:
 
     @activity.defn
     async def run_agent_turn(self, inp: TurnInput) -> TurnResult:
-        try:
-            async with self._turn_heartbeats(interjectible=inp.interjectible):
-                return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
-        except asyncio.CancelledError:
-            if inp.interjectible:
-                await self.store.append_event(
-                    inp.task_id, "agent.turn_interrupted", {"turn": inp.turn},
-                    dedup_key=f"turn{inp.turn}.interrupted",
-                )
-            raise
+        async with self._turn_heartbeats(interjectible=inp.interjectible):
+            return await self._run_agent_turn(inp, await self.store.get_task_champion(inp.task_id))
 
     @contextlib.asynccontextmanager
     async def _turn_heartbeats(self, *, interjectible: bool) -> AsyncIterator[None]:
@@ -920,7 +914,7 @@ class KernelActivities:
             await self.restore_sandbox(StepInput(task_id, turn - 1))
         spec = await self._spec(task_id)
         agent = self._backend(spec)
-        gateway = None if self.settings.sandbox_driver == "local" and agent.name == "fake" else self.gateway
+        gateway = self.gateway if getattr(agent, "uses_model_gateway", True) else None
         sandbox_id = await self._sandbox_id(task_id)
         await self._before_agent_turn(task_id, sandbox_id)
         # A session first created by the interrupted turn is absent from the snapshot.
@@ -949,14 +943,11 @@ class KernelActivities:
                             if ctx.agent_overlay is not None else {})
         if overlay_metadata:
             await self.store.update_result(task_id, overlay_metadata)
-        await self.store.append_event(
-            task_id,
-            EventType.AGENT_TURN_STARTED,
-            {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name,
-             "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version,
-             **overlay_metadata, **self._activity_route()},
-            dedup_key=f"{key}.started",
-        )
+        start = {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name,
+                 "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version,
+                 **overlay_metadata, **self._activity_route()}
+        if inp.guidance is None:
+            await self.store.append_event(task_id, EventType.AGENT_TURN_STARTED, start, dedup_key=f"{key}.started")
         await self._resolve_opencode_version(ctx, agent, task_id)
 
         key_alias = f"task-{task_id}-turn{turn}-attempt{attempt}"
@@ -982,6 +973,14 @@ class KernelActivities:
         provider_error: ModelProviderError | None = None
         n = 0
         issued = False
+        started = inp.guidance is None
+
+        async def note_interrupted() -> None:
+            if started and (inp.interjectible or inp.guidance is not None):
+                await self.store.append_event(
+                    task_id, "agent.turn_interrupted", {"turn": turn}, dedup_key=f"{key}.interrupted",
+                )
+
         try:
             if gateway:
                 # Wait for an in-progress issuance before revoking the alias on cancellation.
@@ -1004,6 +1003,12 @@ class KernelActivities:
                     task_id, EventType.MODEL_KEY_ISSUED, {"turn": turn, "model": ctx.model},
                     dedup_key=f"{key}.model_key_issued",
                 )
+            if guide := inp.guidance:
+                await self.store.start_guided_turn(
+                    task_id, start, f"{key}.started", guide.message_ids, guide.interrupted_ids,
+                    plan_attempt=guide.plan_attempt,
+                )
+                started = True
             stream = agent.run_turn(
                 self.sandbox, sandbox_id, ctx, inp.prompt,
                 session_id=session_id, timeout_s=spec.turn_timeout_s,
@@ -1054,6 +1059,10 @@ class KernelActivities:
                         {"turn": turn, **ev.data},
                         dedup_key=f"{key}.{n}",
                     )
+        except asyncio.CancelledError:
+            # The execution stream has closed. Spend settlement can take several seconds.
+            await note_interrupted()
+            raise
         except (AgentTurnError, ModelProviderError) as e:
             if isinstance(e, ModelProviderError):
                 provider_error = e
@@ -1078,11 +1087,19 @@ class KernelActivities:
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
             if gateway and issued:
                 finalize = getattr(gateway, "finalize_key", None)
+                cancelled = None
                 try:
+                    settle = asyncio.create_task(finalize(key_alias) if finalize else gateway.revoke_key(key_alias))
+                    try:
+                        charge = await asyncio.shield(settle)
+                    except asyncio.CancelledError as exc:
+                        cancelled = exc
+                        await note_interrupted()
+                        charge = await settle
                     if finalize is not None:
-                        spend, cost_final = await asyncio.shield(finalize(key_alias))
+                        spend, cost_final = charge
                     else:
-                        spend = await asyncio.shield(gateway.revoke_key(key_alias))
+                        spend = charge
                 except GatewayError:
                     if provider_error is None or not provider_error.is_account_error:
                         raise
@@ -1091,6 +1108,8 @@ class KernelActivities:
                     await self.store.add_usage(task_id, {"cost_micro_usd": round(spend * 1e6)})
                     with metric_guard():
                         business_metrics.cost.labels(task_kind).inc(spend)
+                if cancelled is not None:
+                    raise cancelled
 
         if turn_error is not None:
             if provider_error is not None and provider_error.is_account_error:
@@ -1380,7 +1399,10 @@ class KernelActivities:
 
     @activity.defn
     async def deliver_task_messages(self, inp: DeliverMessages) -> list[Guidance]:
-        rows = await self.store.deliver_task_messages(inp.task_id, inp.turn, planning=inp.planning)
+        if inp.pending_only:
+            rows = await self.store.pending_task_messages(inp.task_id)
+        else:
+            rows = await self.store.deliver_task_messages(inp.task_id, inp.turn, planning=inp.planning)
         return [Guidance(str(row.id), row.text) for row in rows]
 
     @activity.defn

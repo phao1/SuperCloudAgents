@@ -176,7 +176,7 @@ class PlanningActivities:
                 task.result.get("memory_note", ""),
             ])
             await child.run_agent_turn(
-                TurnInput(inp.task_id, 0, with_guidance(prompt, inp.guidance))
+                TurnInput(inp.task_id, 0, with_guidance(prompt, inp.guidance), guidance=inp.turn_guidance)
             )
             exit_event, output = await child._run(
                 sandbox_id,

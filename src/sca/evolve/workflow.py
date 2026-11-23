@@ -7,16 +7,26 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, FailureError
 
-from sca.eval.errors import eval_failure_reason
+from sca.eval.errors import GUIDANCE_ABORT, eval_failure_reason
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
     from sca.evolve.checks import dev_basis, gate, invalid_run_reason, metrics, select_best
     from sca.evolve.progress import evaluation_text, finish_text, gate_text, one_line, progress
-    from sca.evolve.steering import JournalItem, SteeringMessage, SteeringState, receipt
+    from sca.evolve.steering import (
+        GUIDANCE_MODES,
+        JournalItem,
+        SteeringMessage,
+        SteeringState,
+        receipt,
+    )
 
 
 class EvalRunFailed(Exception):
+    pass
+
+
+class RestartProposal(Exception):
     pass
 
 
@@ -41,6 +51,10 @@ class EvolutionWorkflow:
         self.evaluating_candidate = False
         self.active_candidate: workflow.ChildWorkflowHandle | None = None
         self.skip_message: SteeringMessage | None = None
+        self.immediate_guidance = False
+        self.proposal_started = False
+        self.restart_proposal = False
+        self.next_guidance: SteeringMessage | None = None
 
     @workflow.signal
     def stop(self) -> None:
@@ -73,17 +87,26 @@ class EvolutionWorkflow:
         if steered:
             params['evolution_step'] = {'generation': self.current_generation, 'role': role,
                                         'candidate_id': candidate_id}
+        abortable = self.immediate_guidance and self.proposal_started
+        if abortable:
+            params['guidance_abortable'] = True
         payload = await self.act('prepare_run', params)
         skip = None
-        if steered and candidate_id:
+        if abortable:
+            skip = await self.evaluate_with_guidance(payload, run_id, candidate_id is not None)
+        elif steered and candidate_id:
             skip = await self.evaluate_candidate(payload, run_id)
         else:
             await workflow.execute_child_workflow('EvalRunWorkflow', payload, id='eval-' + run_id)
         run = await self.act('read_run', {'run_id': run_id})
         self.spent += metrics(run)['cost_usd']
         if skip is not None:
-            run = {**run, 'status': 'cancelled', 'reason': '操作者已跳过候选'}
-            await self.conversation(receipt(skip, '已跳过当前候选', f'candidate:{candidate_id}'))
+            node = f'candidate:{candidate_id}'
+            if run.get('reason') == GUIDANCE_ABORT:
+                await self.conversation(receipt(skip, GUIDANCE_ABORT, node, status='superseded'))
+            else:
+                run = {**run, 'status': 'cancelled', 'reason': '操作者已跳过候选'}
+                await self.conversation(receipt(skip, '已跳过当前候选', node))
         if self.journal_enabled:
             await self.conversation(progress(f'eval:{run_id}', 'evaluation', evaluation_text(
                 role, split, run['results'], run['status'], run.get('reason'),
@@ -118,6 +141,7 @@ class EvolutionWorkflow:
         self.budget_usd = self.config['budget_usd']
         self.enforce_eval_integrity = workflow.patched("evolution-eval-integrity")
         self.journal_enabled = workflow.patched('evolution-conversation')
+        self.immediate_guidance = self.journal_enabled and workflow.patched('evolution-guidance-now')
         status = 'completed'
         try:
             if self.journal_enabled:
@@ -125,6 +149,9 @@ class EvolutionWorkflow:
             champion = await self.act('initialize')
             dev_run, holdout_run, stale = None, None, 0
             for generation in range(1, self.config['generations'] + 1):
+                if self.next_guidance is not None:
+                    message, self.next_guidance = self.next_guidance, None
+                    await self.apply_message(message, 'running')
                 await self.step_boundary()
                 if self.stopped:
                     status = 'stopped'
@@ -155,90 +182,26 @@ class EvolutionWorkflow:
                 if self.stopped:
                     status = 'stopped'
                     break
-                proposals = await self.propose(champion['overlay'], str(dev_run['id']), generation)
-                if self.journal_enabled:
-                    proposals = [await self.register_candidate(proposal, generation, champion, number)
-                                 for number, proposal in enumerate(proposals, start=1)]
-                candidates, runs = [], []
-                for proposal in proposals:
-                    candidate = proposal if self.journal_enabled else await self.register_candidate(
-                        proposal, generation, champion,
-                    )
-                    if not candidate['static_check']['valid']:
-                        candidate.update(decision='invalid', reason='static checks failed')
-                    else:
+                while True:
+                    candidates: list[dict] = []
+                    try:
+                        champion, dev_run, holdout_run, promoted = await self.run_proposal(
+                            generation, champion, dev_run, holdout_run, candidates,
+                        )
+                        break
+                    except RestartProposal:
+                        await self.abort_proposal(candidates)
                         await self.step_boundary()
-                        run = await self.evaluate(candidate['overlay'], 'dev', candidate_id=candidate['id'])
-                        if run:
-                            candidate.update(dev_run_id=str(run['id']), dev_metrics=metrics(run))
-                            if reason := self.evaluation_failure(run, candidate=True):
-                                candidate.update(decision='rejected', reason=reason)
-                            else:
-                                runs.append(run)
-                        else:
-                            candidate.update(decision='rejected', reason='evaluation stopped')
-                    candidates.append(candidate)
-                    await self.record(candidate)
-                best = select_best(runs)
-                winner = next((c for c in candidates if best and c.get('dev_run_id') == str(best['id'])), None)
-                promoted = False
-                basis = dev_basis(dev_run, best, self.config.get('min_cost_saving', .15),
-                                  legacy=not self.enforce_eval_integrity) if winner else None
-                await self.step_boundary()
-                if winner and basis and not self.stopped:
-                    holdout_run = holdout_run or await self.evaluate(champion['overlay'], 'holdout', role='comparison')
-                    if reason := self.evaluation_failure(holdout_run):
-                        winner.update(decision='rejected', reason=reason)
-                        await self.record(winner)
-                        await self.note_gate(winner)
-                        raise EvalRunFailed(reason)
-                    can_evaluate = holdout_run and (
-                        not self.enforce_eval_integrity or holdout_run['status'] == 'completed')
-                    await self.step_boundary()
-                    challenger = await self.evaluate(winner['overlay'], 'holdout',
-                                                     candidate_id=winner['id']) if can_evaluate else None
-                    if challenger:
-                        winner.update(holdout_run_id=str(challenger['id']), holdout_metrics=metrics(challenger))
-                    await self.step_boundary()
-                    # An efficiency win must not cost more on holdout; a quality win may cost a bit more.
-                    allowance = self.config['max_cost_increase'] if basis == 'quality' else 0.0
-                    if challenger and gate(holdout_run, challenger, allowance,
-                                           legacy=not self.enforce_eval_integrity):
-                        approved = True
-                        if self.config['require_approval']:
-                            self.approval, self.waiting_candidate = None, winner['id']
-                            winner['reason'] = 'awaiting approval'
-                            await self.record(winner)
-                            await self.note_gate(winner, pending=True)
-                            await self.act('status', {'status': 'awaiting_approval', 'spent_usd': self.spent})
-                            while self.approval is None and not self.stopped:
-                                await workflow.wait_condition(lambda: self.approval is not None or self.stopped
-                                                              or bool(self.steering.pending))
-                                await self.step_boundary(resume_status='awaiting_approval')
-                            approved = self.approval is True
-                            self.waiting_candidate = None
-                            await self.act('status', {'status': 'running', 'spent_usd': self.spent})
-                        if approved and not self.stopped:
-                            champion = await self.act('promote', {'candidate': winner,
-                                'champion_id': str(workflow.uuid4()), 'parent_champion_id': champion['id']})
-                            winner.update(decision='promoted', reason=f'holdout gate passed ({basis})')
-                            dev_run, holdout_run, stale, promoted = best, challenger, 0, True
-                            await self.note_gate(winner)
-                            if self.journal_enabled:
-                                key = f'champion:{champion["id"]}'
-                                await self.conversation(progress(key, 'champion',
-                                    f'产生冠军 · {str(champion["id"])[:8]}', key))
-                    if not promoted:
-                        reason = self.evaluation_failure(challenger, candidate=True)
-                        winner.update(decision='rejected', reason=reason or
-                                      f'{basis} win on dev; holdout gate or approval rejected')
-                for candidate in candidates:
-                    if candidate['decision'] == 'pending':
-                        candidate.update(decision='rejected', reason='not selected or dev gate failed')
-                    await self.record(candidate)
-                    await self.note_gate(candidate)
+                        self.restart_proposal = False
+                        if self.stopped or self.budget_exhausted():
+                            status = 'stopped' if self.stopped else 'budget_exhausted'
+                            break
+                if status != 'completed':
+                    break
                 if not promoted:
                     stale += 1
+                else:
+                    stale = 0
                 self.current_generation = None
                 await self.step_boundary()
                 if self.stopped or self.steering.stop_after_generation:
@@ -269,6 +232,116 @@ class EvolutionWorkflow:
             raise
         await self.finish(status)
         return status
+
+    async def run_proposal(
+        self, generation: int, champion: dict, dev_run: dict, holdout_run: dict | None,
+        candidates: list[dict],
+    ) -> tuple[dict, dict, dict | None, bool]:
+        self.proposal_started = True
+        proposals = await self.propose(champion['overlay'], str(dev_run['id']), generation)
+        if self.journal_enabled:
+            proposals = [await self.register_candidate(proposal, generation, champion, number)
+                         for number, proposal in enumerate(proposals, start=1)]
+            candidates.extend(proposals)
+        runs = []
+        for proposal in proposals:
+            candidate = proposal if self.journal_enabled else await self.register_candidate(
+                proposal, generation, champion,
+            )
+            if not self.journal_enabled:
+                candidates.append(candidate)
+            if self.immediate_guidance or candidate['static_check']['valid']:
+                await self.generation_boundary()
+            if not candidate['static_check']['valid']:
+                candidate.update(decision='invalid', reason='static checks failed')
+            else:
+                run = await self.evaluate(candidate['overlay'], 'dev', candidate_id=candidate['id'])
+                if run:
+                    candidate.update(dev_run_id=str(run['id']), dev_metrics=metrics(run))
+                    if reason := self.evaluation_failure(run, candidate=True):
+                        candidate.update(decision='rejected', reason=reason)
+                    else:
+                        runs.append(run)
+                else:
+                    candidate.update(decision='rejected', reason='evaluation stopped')
+            await self.record(candidate)
+        best = select_best(runs)
+        winner = next((c for c in candidates if best and c.get('dev_run_id') == str(best['id'])), None)
+        promoted = False
+        basis = dev_basis(dev_run, best, self.config.get('min_cost_saving', .15),
+                          legacy=not self.enforce_eval_integrity) if winner else None
+        await self.generation_boundary()
+        if winner and basis and not self.stopped:
+            holdout_run = holdout_run or await self.evaluate(champion['overlay'], 'holdout', role='comparison')
+            if self.immediate_guidance:
+                await self.generation_boundary()
+            if reason := self.evaluation_failure(holdout_run):
+                winner.update(decision='rejected', reason=reason)
+                await self.record(winner)
+                await self.note_gate(winner)
+                raise EvalRunFailed(reason)
+            can_evaluate = holdout_run and (
+                not self.enforce_eval_integrity or holdout_run['status'] == 'completed')
+            await self.generation_boundary()
+            challenger = await self.evaluate(winner['overlay'], 'holdout',
+                                             candidate_id=winner['id']) if can_evaluate else None
+            if challenger:
+                winner.update(holdout_run_id=str(challenger['id']), holdout_metrics=metrics(challenger))
+            await self.generation_boundary()
+            # An efficiency win must not cost more on holdout; a quality win may cost a bit more.
+            allowance = self.config['max_cost_increase'] if basis == 'quality' else 0.0
+            if challenger and gate(holdout_run, challenger, allowance,
+                                   legacy=not self.enforce_eval_integrity):
+                approved = True
+                if self.config['require_approval']:
+                    self.approval, self.waiting_candidate = None, winner['id']
+                    winner['reason'] = 'awaiting approval'
+                    await self.record(winner)
+                    await self.note_gate(winner, pending=True)
+                    await self.act('status', {'status': 'awaiting_approval', 'spent_usd': self.spent})
+                    while self.approval is None and not self.stopped and not self.restart_proposal:
+                        await workflow.wait_condition(lambda: self.approval is not None or self.stopped
+                                                      or bool(self.steering.pending))
+                        await self.step_boundary(resume_status='awaiting_approval')
+                    approved = self.approval is True
+                    self.waiting_candidate = None
+                    await self.act('status', {'status': 'running', 'spent_usd': self.spent})
+                    if self.immediate_guidance:
+                        await self.generation_boundary()
+                if approved and not self.stopped:
+                    self.proposal_started = False
+                    champion = await self.act('promote', {'candidate': winner,
+                        'champion_id': str(workflow.uuid4()), 'parent_champion_id': champion['id']})
+                    winner.update(decision='promoted', reason=f'holdout gate passed ({basis})')
+                    dev_run, holdout_run, promoted = best, challenger, True
+                    await self.note_gate(winner)
+                    if self.journal_enabled:
+                        key = f'champion:{champion["id"]}'
+                        await self.conversation(progress(key, 'champion',
+                            f'产生冠军 · {str(champion["id"])[:8]}', key))
+            if not promoted:
+                reason = self.evaluation_failure(challenger, candidate=True)
+                winner.update(decision='rejected', reason=reason or
+                              f'{basis} win on dev; holdout gate or approval rejected')
+        self.proposal_started = False
+        for candidate in candidates:
+            if candidate['decision'] == 'pending':
+                candidate.update(decision='rejected', reason='not selected or dev gate failed')
+            await self.record(candidate)
+            await self.note_gate(candidate)
+        return champion, dev_run, holdout_run, promoted
+
+    async def generation_boundary(self) -> None:
+        await self.step_boundary()
+        if self.restart_proposal:
+            raise RestartProposal
+
+    async def abort_proposal(self, candidates: list[dict]) -> None:
+        for candidate in candidates:
+            if candidate['decision'] == 'pending' or candidate.get('reason') == GUIDANCE_ABORT:
+                candidate.update(decision='rejected', reason=GUIDANCE_ABORT)
+                await self.record(candidate)
+                await self.note_gate(candidate)
 
     # Evolution conversation
 
@@ -313,16 +386,54 @@ class EvolutionWorkflow:
             self.evaluating_candidate = False
             self.active_candidate = self.skip_message = None
 
+    def guidance_waiting(self) -> bool:
+        current = self.steering.guidance
+        return any(message['mode'] == 'now' and (current is None or message.get('seq', 0) >= current.get('seq', 0))
+                   for message in self.steering.pending)
+
+    async def evaluate_with_guidance(
+        self, payload: dict, run_id: str, candidate: bool,
+    ) -> SteeringMessage | None:
+        self.evaluating_candidate = candidate
+        skipped = False
+        try:
+            child = await workflow.start_child_workflow('EvalRunWorkflow', payload, id='eval-' + run_id)
+            self.active_candidate = child
+            while not child.done():
+                await workflow.wait_condition(lambda skipped=skipped: child.done() or self.guidance_waiting()
+                                              or (self.skip_message is not None and not skipped))
+                if child.done():
+                    break
+                abort = self.guidance_waiting()
+                try:
+                    await child.signal('abort_for_guidance' if abort else 'skip_evolution_candidate')
+                except ApplicationError:
+                    # The child may have finished between the condition and the signal.
+                    pass
+                if abort:
+                    break
+                skipped = True
+            await child
+            return self.skip_message
+        finally:
+            self.evaluating_candidate = False
+            self.active_candidate = self.skip_message = None
+
     async def propose(self, overlay: dict, run_id: str, generation: int) -> list[dict]:
         guidance = self.steering.guidance
         payload = {'overlay': overlay, 'dev_run_id': run_id}
+        item = None
         if guidance is not None:
             payload['operator_guidance'] = guidance['text']
+            if not self.steering.guidance_applied:
+                item = receipt(guidance, f'已应用于第 {generation} 代提议', self.current_node)
+                item['generation'] = generation
+                if self.immediate_guidance:
+                    payload['guidance_receipt'] = item
         proposals = await self.act('propose', payload)
-        if guidance is not None and not self.steering.guidance_applied:
-            item = receipt(guidance, f'已应用于第 {generation} 代提议', self.current_node)
-            item['generation'] = generation
-            await self.conversation(item)
+        if item is not None:
+            if not self.immediate_guidance:
+                await self.conversation(item)
             self.steering.guidance_applied = True
         return proposals
 
@@ -348,13 +459,28 @@ class EvolutionWorkflow:
     async def apply_message(self, message: SteeringMessage, resume_status: str) -> None:
         state = self.steering
         mode, node = message['mode'], self.current_node
-        if mode == 'guidance':
+        if mode in GUIDANCE_MODES:
+            if mode == 'now' and not self.immediate_guidance:
+                await self.conversation(receipt(message, '此演进仅支持下一代指引', node, status='rejected'))
+                return
             if state.guidance is not None and message.get('seq', 0) < state.guidance.get('seq', 0):
                 await self.conversation(receipt(message, '新指引已取代此条', node, status='superseded'))
+                return
+            if queued := self.next_guidance:
+                if message.get('seq', 0) >= queued.get('seq', 0):
+                    await self.conversation(receipt(queued, '新指引已取代此条', node, status='superseded'))
+                    self.next_guidance = None
+                elif mode != 'now':
+                    await self.conversation(receipt(message, '新指引已取代此条', node, status='superseded'))
+                    return
+            if self.immediate_guidance and self.proposal_started and mode != 'now':
+                self.next_guidance = message
                 return
             if state.guidance is not None and not state.guidance_applied:
                 await self.conversation(receipt(state.guidance, '新指引已取代此条', node, status='superseded'))
             state.guidance, state.guidance_applied = message, False
+            if mode == 'now' and self.proposal_started:
+                self.restart_proposal = True
             return
         if mode == 'budget':
             total = await self.act('conversation_budget', {
@@ -405,7 +531,11 @@ class EvolutionWorkflow:
             values['status_progress'] = progress('finished', 'finish', finish_text(status, reason), target)
         guidance = self.steering.guidance
         if guidance is not None and not self.steering.guidance_applied:
-            await self.conversation(receipt(guidance, '演进结束前没有下一代提议', self.current_node, status='rejected'))
+            note = '演进结束前未开始使用此指引的提议' if self.immediate_guidance else '演进结束前没有下一代提议'
+            await self.conversation(receipt(guidance, note, self.current_node, status='rejected'))
+        if self.next_guidance is not None:
+            await self.conversation(receipt(self.next_guidance, '演进结束前没有下一代提议',
+                                            self.current_node, status='rejected'))
         for message in self.steering.pending:
             await self.conversation(receipt(message, '演进已结束', self.current_node, status='rejected'))
         await self.act('status', values)

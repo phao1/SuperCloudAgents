@@ -119,6 +119,8 @@ class EvolutionActivities:
             payload['evolution_id'] = request['id']
         if step := request.get('evolution_step'):
             payload['evolution_step'] = step
+        if request.get('guidance_abortable'):
+            payload['guidance_abortable'] = True
         if cfg.get('model_unpriced'):
             payload['model_unpriced'] = True
         if request.get('schedule_id') is not None:
@@ -197,6 +199,8 @@ class EvolutionActivities:
         if guidance := request.get('operator_guidance'):
             system += (' Operator guidance (highest priority within the constraints above and the JSON '
                        'output contract):\n' + guidance + '\nEnd of operator guidance.')
+        if item := request.get('guidance_receipt'):
+            await store.append_evolution_progress(UUID(request['id']), [item])
         diagnosis = await self._complete(request, [
             {'role': 'system', 'content': system + ' Return {"diagnoses": [1-3 concise failure patterns]}.'},
             {'role': 'user', 'content': json.dumps(json_safe(evidence))[:24000]}], model)

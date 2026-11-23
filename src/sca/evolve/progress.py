@@ -1,5 +1,6 @@
 """Short descriptions shared by evolution activities and historical projections."""
 
+from sca.eval.errors import GUIDANCE_ABORT
 from sca.eval.trajectory import is_errored, overall_passed
 from sca.evolve.steering import JournalItem
 from sca.history.privacy import clean_text
@@ -36,14 +37,18 @@ def evaluation_text(role: str, split: str, rows: list[dict], status: str, reason
     split_name = SPLIT_NAMES.get(split, split)
     passed = sum(not is_errored(row) and overall_passed(row) for row in rows)
     cost = sum(float(row['cost_usd']) for row in rows)
-    suffix = {'failed': ' · 评测失败', 'cancelled': ' · 已跳过', 'stopped': ' · 已停止',
-              'budget_exhausted': ' · 预算用尽'}.get(status, '')
+    suffix = '' if reason == GUIDANCE_ABORT else {
+        'failed': ' · 评测失败', 'cancelled': ' · 已跳过', 'stopped': ' · 已停止',
+        'budget_exhausted': ' · 预算用尽',
+    }.get(status, '')
     if reason:
         suffix += f' · {one_line(reason)}'
     return f'{title}（{split_name}） · {passed}/{len(rows)} 通过 · ${cost:.6g}{suffix}'
 
 
 def gate_text(decision: str, reason: str | None) -> str:
+    if reason == GUIDANCE_ABORT:
+        return reason
     label = {'promoted': '通过', 'invalid': '未通过', 'rejected': '未通过', 'pending': '待审批'}[decision]
     note = GATE_REASONS.get(reason, reason) if reason else None
     return f'门禁{label}' + (f' · {one_line(note)}' if note else '')

@@ -408,7 +408,7 @@ const portalTasks = (() => {
       });
       conversation = {id: task.id, identity, panel};
     }
-    conversation.panel.setState(finishedTask(task.state) ? '任务已结束' : '');
+    conversation.panel.updateTask(task, events);
     renderApproval(task, events);
   }
 

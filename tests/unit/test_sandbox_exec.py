@@ -9,6 +9,7 @@ import pytest
 
 from sca.core.models import SandboxSpec
 from sca.host import host_executable
+from sca.sandbox import local
 from sca.sandbox._exec import stream_exec
 from sca.sandbox.local import LocalSandboxProvider
 
@@ -92,3 +93,25 @@ async def test_cancel_during_exec_startup_kills_process_group(driver, tmp_path, 
                     os.killpg(group_id or proc.pid, signal.SIGKILL)
                 await proc.wait()
             await asyncio.gather(pending, return_exceptions=True)
+
+
+async def test_local_cancellation_kills_a_running_group_without_waiting_for_timeout(tmp_path, monkeypatch):
+    killed = asyncio.Event()
+    stop = local._stop_process
+
+    def stop_process(proc):
+        stop(proc)
+        killed.set()
+
+    monkeypatch.setattr(local, "_stop_process", stop_process)
+    provider = LocalSandboxProvider(tmp_path / "sandboxes")
+    sandbox_id = await provider.create("task", SandboxSpec(image="unused"))
+    stream = provider.exec(sandbox_id, ["bash", "-c", "sleep 120 & echo ready; wait"], timeout_s=180)
+    async with asyncio.timeout(5), aclosing(stream):
+        assert (await anext(stream)).text == "ready"
+        waiting = asyncio.create_task(anext(stream))
+        await asyncio.sleep(0)
+        waiting.cancel()
+        await asyncio.wait_for(killed.wait(), .5)
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(waiting, 1)

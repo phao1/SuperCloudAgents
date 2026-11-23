@@ -83,6 +83,15 @@ class ChildStore:
     async def get_session_id(self, task_id: str) -> str | None:
         return (await self.get_task(task_id)).result.get("session_id")
 
+    async def start_guided_turn(
+        self, task_id: str, start: dict, key: str, message_ids: list[str], interrupted_ids: list[str],
+        *, plan_attempt: int | None = None,
+    ) -> None:
+        await self.store.start_guided_turn(
+            task_id, {**start, "subtask": self.name}, f"{self.name}.{key}",
+            message_ids, interrupted_ids, plan_attempt=plan_attempt,
+        )
+
     async def set_session(self, task_id: str, backend: str, backend_session_id: str) -> None:
         await self.update_result(task_id, {"session_id": backend_session_id})
 

@@ -136,6 +136,24 @@ def test_live_case_links_and_status_are_preserved_before_collection():
     assert next(node for node in updated.nodes if node.id == "promotion:1").status == "running"
 
 
+def test_reproposal_stops_old_candidates_in_the_same_generation_band():
+    from sca.eval.errors import GUIDANCE_ABORT
+
+    old = {**candidate(1, 1, decision="rejected"), "reason": GUIDANCE_ABORT}
+    data = history("running", candidates=[old])
+    dag = build_evolution_dag(data)
+    nodes = {node.id: node for node in dag.nodes}
+    stopped = nodes[f"candidate:{old['id']}"]
+    assert stopped.status == "stopped" and GUIDANCE_ABORT in stopped.label
+    assert nodes["generation:1"].status == "running"
+    new = candidate(2, 1)
+    data["candidates"].append(new)
+    dag = build_evolution_dag(data)
+    assert {edge.target for edge in dag.edges if edge.source == "generation:1"} == {
+        stopped.id, f"candidate:{new['id']}",
+    }
+
+
 def test_partial_eval_scores_are_hidden_and_live_spend_counts_each_case_once():
     base = run(1, status="running")
     first, second = task(base), task(base, state="RUNNING", name="second")

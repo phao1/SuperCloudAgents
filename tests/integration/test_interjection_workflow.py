@@ -2,13 +2,13 @@
 
 import asyncio
 import socket
-from datetime import timedelta
 from uuid import uuid4
 
 import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
+from sca.kernel.interjection import HEARTBEAT_INTERVAL
 from sca.kinds.coding.workflow import CodingTaskWorkflow
 from tests.interjection_harness import GUIDANCE_HEADER, InterjectionScript
 
@@ -35,7 +35,7 @@ def worker(env, script, queue):
     return Worker(
         env.client, task_queue=queue, workflows=[CodingTaskWorkflow],
         activities=list(script.activities().values()),
-        max_heartbeat_throttle_interval=timedelta(milliseconds=100),
+        max_heartbeat_throttle_interval=HEARTBEAT_INTERVAL,
     )
 
 
@@ -66,6 +66,7 @@ async def test_signal_during_a_turn(env, mode):
     assert script.applied == [first, second]
     if mode == "interrupt":
         assert script.steps[1:4] == [("cancelled", 1), ("checkpoint", 1), ("start", 2)]
+        assert script.turns[-1].guidance.interrupted_ids == [first]
         assert script.verify_turns == [2]
     else:
         assert script.turns[-1].session_id == "session-1"

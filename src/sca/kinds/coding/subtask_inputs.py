@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 
+from sca.kernel.interjection import TurnGuidance
 from sca.workspace.merge import SubtaskResult
 
 
@@ -26,6 +27,7 @@ class PlanningInput:
     feedback: str | None = None
     guidance: list[str] = field(default_factory=list)
     interjectible: bool = False
+    turn_guidance: TurnGuidance | None = None
 
 
 @dataclass

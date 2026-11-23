@@ -13,7 +13,7 @@ from sca.api.auth import StaticTokenAuthenticator
 from sca.archive import archive_task
 from sca.config import Settings
 from sca.core.errors import NotFoundError
-from sca.core.models import Principal, TaskState
+from sca.core.models import Principal, TaskMessageInput, TaskState
 from sca.db.schema import evolution_events
 from sca.evolve.steering import MESSAGE_EVENT
 from sca.storage.local import LocalObjectStore
@@ -100,6 +100,28 @@ async def test_task_conversation_cursor_has_the_same_node_ids_after_archive(post
     assert items[3].dag_node_id == items[4].dag_node_id == items[5].dag_node_id
     assert items[4].activity.operations[0].name == 'read'
     assert 'fixture log' not in first.model_dump_json()
+
+
+async def test_turn_start_receipts_are_atomic_scoped_and_retry_safe(postgres, store, api_store):
+    owner = store.for_tenant('team')
+    task, _ = await owner.create_task(tenant_id='team', kind='coding', spec={}, idempotency_key=None)
+    team = api_store.for_tenant('team')
+    other = api_store.for_tenant('other')
+    sent = await team.add_task_message(task.id, TaskMessageInput(text='修复输入', mode='interrupt'), 'member')
+    late = await team.add_task_message(task.id, TaskMessageInput(text='再检查输出'), 'member')
+    assert [message.status for message in await team.list_task_messages(task.id)] == ['pending', 'pending']
+    assert [message.id for message in await owner.pending_task_messages(str(task.id))] == [sent.id, late.id]
+    with pytest.raises(NotFoundError):
+        await other.list_task_messages(task.id)
+    args = (str(task.id), {'turn': 2}, 'turn2.attempt1.started', [str(sent.id)], [str(sent.id)])
+    await owner.start_guided_turn(*args)
+    await owner.start_guided_turn(*args)
+    events = await owner.list_events(task.id)
+    assert [event.type for event in events[-2:]] == ['agent.turn_started', 'user.message.delivered']
+    assert events[-1].payload['message_id'] == str(sent.id) and events[-1].payload['interrupted'] is True
+    assert [message.status for message in await team.list_task_messages(task.id)] == ['delivered', 'pending']
+    await owner.apply_task_messages(str(task.id), [str(sent.id)])
+    assert [message.status for message in await team.list_task_messages(task.id)] == ['applied', 'pending']
 
 
 async def test_approvals_inbox_reads_only_pending_rows_for_the_token_tenant(postgres, store, api_store, monkeypatch,

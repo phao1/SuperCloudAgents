@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from sca.core.models import TERMINAL_STATES, TaskState
 from sca.core.task_dag import DAGEdge, EdgeKind
+from sca.eval.errors import GUIDANCE_ABORT
 from sca.eval.trajectory import is_errored, overall_passed
 
 Status = Literal["queued", "running", "paused", "succeeded", "failed", "stopped"]
@@ -250,8 +251,10 @@ def _add_candidate(
         meta={"hypothesis": row["hypothesis"], "decision": decision, "reason": row.get("reason"),
               "band": row['generation'], "level": 1, "column": number},
     )
-    if row.get('reason') == '操作者已跳过候选':
+    if row.get('reason') in ('操作者已跳过候选', GUIDANCE_ABORT):
         node.status = 'stopped'
+    if row.get('reason') == GUIDANCE_ABORT:
+        node.label = f"候选 {number} · {GUIDANCE_ABORT} · {row['hypothesis']}"
     dag.add(node, [generation], "spawn")
     costs = []
     tail = [node]
@@ -357,9 +360,10 @@ def build_evolution_dag(history: EvolutionHistory) -> EvolutionDAG:
         active_eval = any(RUN_STATUS[run["status"]] in ACTIVE for candidate in group
                           for run in owned[candidate["id"]].values()) or any(
                               node.status in ACTIVE for node in evaluations)
-        if status in ACTIVE and (pending or active_eval):
+        restarting = number == last and group[-1].get('reason') == GUIDANCE_ABORT
+        if status in ACTIVE and (pending or active_eval or restarting):
             generation.status = "running"
-        elif pending or active_eval or any(run.status == "failed" for run in evaluations):
+        elif pending or active_eval or restarting or any(run.status == "failed" for run in evaluations):
             generation.status = "failed" if status == "failed" else "stopped"
         else:
             generation.status = "succeeded"

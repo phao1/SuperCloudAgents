@@ -92,7 +92,9 @@ async def stream_exec(
         "import os,sys\n"
         "try: os.setsid()\n"
         "except OSError: pass\n"
-        "open(sys.argv[1], 'w').write(str(os.getpgid(0)))\n"
+        "marker=sys.argv[1]\n"
+        "with open(marker+'.pid','x') as f: f.write(str(os.getpgid(0)))\n"
+        "os.rename(marker+'.pid', marker)\n"
         "os.execvp(sys.argv[2],sys.argv[2:])"
     )
     args = command(NODE_WRAP if node else wrapper, marker)

@@ -82,10 +82,11 @@ class Element {
  this.parentElement={};this.style={};this.classList={add: name=>{this.className+=' '+name},toggle:()=>{}}}
  append(...items){this.children.push(...items)}
  replaceChildren(...items){this.children=items}
+ hasChildNodes(){return this.children.length>0}
  get elements(){return {namedItem:name=>this.querySelector('[name="'+name+'"]')}}
  querySelector(selector){
    for(const node of this.children){
-     if(node.tag===selector||'[name="'+node.name+'"]'===selector)return node;
+     if(node.tag===selector||'[name="'+node.name+'"]'===selector||'[value="'+node.value+'"]'===selector)return node;
      const child=node.querySelector?.(selector);
      if(child)return child;
    }
@@ -346,7 +347,7 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  const form=conversation.querySelector('form'),controls=form.querySelector('fieldset'),input=form.querySelector('textarea');
  assert(!controls.disabled);
  let submitted;
- form.requestSubmit=()=>{submitted=form.onsubmit({preventDefault(){}})};
+ form.requestSubmit=submitter=>{submitted=form.onsubmit({submitter,preventDefault(){}})};
  const enter={key:'Enter',preventDefault(){}};
  input.value='添加测试';
  Object.assign(input,{scrollHeight:78,offsetHeight:40,clientHeight:38});
@@ -354,14 +355,18 @@ assert.equal(buildRecords(taskEvents)[0].kind,'input');
  assert.equal(input.style.blockSize,'80px');
  input.onkeydown({...enter,isComposing:true});assert(!submitted);
  input.onkeydown({...enter,shiftKey:true});assert(!submitted);
- form.querySelector('select').value='interrupt';
+ const interrupt=form.querySelector('[value="interrupt"]');
+ assert(interrupt.disabled);
+ input.onkeydown({...enter,ctrlKey:true});assert(!submitted);
  data=async(path,body)=>{
    if(path==='/tasks/task-id/conversation?limit=100')return {items:[],cursor:'0',has_more:false};
    assert.equal(path,'/tasks/task-id/messages');
    assert.deepEqual(body,{text:'添加测试',mode:'interrupt'});
    assert(controls.disabled);
  };
- input.onkeydown(enter);
+ portalTasks.render(currentTask,[{seq:1,type:'agent.turn_started',payload:{turn:1}}]);
+ assert(!interrupt.disabled);
+ input.onkeydown({...enter,ctrlKey:true});
  await submitted;
  assert.equal(input.value,'');
  assert(!controls.disabled);

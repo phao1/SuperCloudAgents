@@ -3,7 +3,7 @@
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from temporalio.exceptions import ApplicationError
@@ -12,6 +12,7 @@ from sca.config import Settings
 from sca.core.model_provider import ModelProviderError
 from sca.evolve.activities import EvolutionActivities
 from sca.evolve.models import EvolutionConfig
+from sca.evolve.steering import receipt
 
 
 def setup(tmp_path):
@@ -74,6 +75,22 @@ async def test_operator_guidance_has_priority_in_both_prompts(tmp_path):
         assert 'Agent overlay text may remain in English' in system['content']
         assert 'Prefer narrower checks.' not in context['content']
         assert 'HOLDOUT_MARKER' not in context['content']
+
+
+async def test_guidance_receipt_is_recorded_before_the_first_proposer_request(tmp_path):
+    activities, store, gateway, request = setup(tmp_path)
+    message = {'id': 'guide', 'mode': 'now', 'text': 'Check edge cases'}
+    item = receipt(message, '已应用于第 1 代提议', 'generation:1')
+    store.append_evolution_progress = AsyncMock()
+    outputs = iter(gateway.complete.side_effect)
+
+    async def complete(*args, **kwargs):
+        store.append_evolution_progress.assert_awaited_once_with(UUID(request['id']), [item])
+        return next(outputs)
+
+    gateway.complete.side_effect = complete
+    request.update(operator_guidance=message['text'], guidance_receipt=item)
+    await activities.propose(request)
 
 
 @pytest.mark.parametrize('response', ['not json', '{}', '[{"hypothesis": 3}]'])
