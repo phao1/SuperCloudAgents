@@ -229,21 +229,21 @@ const portalTasks = (() => {
       versionsList,
     ], project ? '提交线程' : '提交任务', async form => {
       const {spec, intents} = submitFields(form, list, defaultBackend);
-      const token = portalToken;
+      const identity = portalIdentity;
       spec.intents = [];
       for (const {source, file} of intents) {
-        if (token !== portalToken) return;
+        if (identity !== portalIdentity) return;
         if (file) {
           const id = uploadedFiles.get(file) || (await ui.upload(file)).id;
-          if (token !== portalToken) return;
+          if (identity !== portalIdentity) return;
           uploadedFiles.set(file, id);
           source.file_id = id;
         }
         spec.intents.push(source);
       }
-      if (token !== portalToken) return;
+      if (identity !== portalIdentity) return;
       const task = await data('/tasks', {kind: 'coding', spec, ...(project && {project_id: project.id})});
-      if (token !== portalToken) return;
+      if (identity !== portalIdentity) return;
       form.reset();
       for (const input of available.querySelectorAll('input')) input.checked = false;
       list.replaceChildren();
@@ -524,7 +524,7 @@ const portalTasks = (() => {
     const append = text => { log = (log + text).slice(-64000); };
     try {
       const response = await fetch('/v1' + taskPath(task) + '/terminal', {
-        headers: {Authorization: 'Bearer ' + portalToken}, signal: active.controller.signal,
+        headers: authHeaders(), signal: active.controller.signal,
       });
       if (!response.ok) throw await apiFailure(response);
       const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();

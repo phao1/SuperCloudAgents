@@ -182,7 +182,7 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("destination", ["guest", "projects", "task", "evolution", "archive"])
+@pytest.mark.parametrize("destination", ["guest", "local", "projects", "task", "evolution", "archive"])
 def test_portal_route_bootstrap(tmp_path, destination):
     responses = {}
     if destination == "archive":
@@ -214,6 +214,7 @@ const assert=require('node:assert/strict');
 const destination=process.argv[2];
 const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
+const local=destination==='local';
 const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
 const missingReason='文件缺失（源机器上已清理）';
 const artifacts=destination==='task'?['changes.patch','verify.log','report.md']
@@ -227,10 +228,14 @@ const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_ch
   agent_version:'fake',model:'fake',solidify_builds:[{version:'built',status:'succeeded',regression_status:'completed'}]};
 const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
-const location={hash:{guest:'#/projects/private-project',projects:'#/projects',task:'#/tasks/'+task.id,
+const location={hash:{guest:'#/projects/private-project',local:'#/projects',projects:'#/projects',task:'#/tasks/'+task.id,
   evolution:'#/evolutions',archive:''}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
-const localStorage={getItem:key=>key==='sca-portal-token'&&!guest?'fixture-member':null};
+const storage=new Map(!guest&&!local?[['sca-portal-token','fixture-member']]:[]);
+const localStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
+const evalAdmin={tenant_id:'eval',role:'admin',subject:'static-token'};
+let required=false, acceptWarning=false, warningText='', switchWrites=0;
+const confirm=text=>{warningText=text;return acceptWarning};
 class Element {
   constructor(id) {
     Object.assign(this,{id,hidden:true,children:[],value:'',textContent:'',dataset:{},parentElement:{}});
@@ -249,6 +254,7 @@ class Element {
   setAttribute(name,value){this.attributes.set(name,value)}
   getAttribute(name){return this.attributes.get(name)}
   removeAttribute(name){this.attributes.delete(name)}
+  hasChildNodes(){return this.children.length>0}
   querySelector(selector){
     if(!this.selectors.has(selector))this.selectors.set(selector,new Element());
     return this.selectors.get(selector);
@@ -315,11 +321,24 @@ global.fetch=async (path,request={})=>{
     assert(Object.hasOwn(config.archive,pathname),path);
     return {ok:true,json:async()=>config.archive[pathname]};
   }
-  if(['/v1/portal/whoami','/v1/projects'].includes(path))assert.equal(auth,'Bearer fixture-member');
+  if(local&&path==='/v1/portal/access'){
+    if(request.method==='PUT'){
+      assert.equal(auth,required?'Bearer fixture-admin':undefined);
+      required=JSON.parse(request.body).require_token;
+      switchWrites++;
+    }
+    return {ok:true,json:async()=>({require_token:required,local_no_token_active:!required})};
+  }
+  if(['/v1/portal/whoami','/v1/projects'].includes(path)){
+    assert.equal(auth,local?(required?'Bearer fixture-admin':undefined):'Bearer fixture-member');
+  }
   await blocked.get(path);
   const fixtures={
-    '/v1/portal/whoami':{tenant_id:'eval',role:'member'},
-    '/v1/portal/config':auth?config.tenant:config.guest,
+    '/v1/portal/whoami':local?evalAdmin:{tenant_id:'eval',role:'member'},
+    '/v1/portal/config':local?(
+      auth?{...config.tenant,portal_require_token:required}:
+      required?config.guest:{...config.tenant,portal_require_token:false,local_identity:evalAdmin}
+    ):auth?config.tenant:config.guest,
     '/v1/projects':[project],
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
     [taskPath]:task,
@@ -387,6 +406,49 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('guest-view-banner').hidden,true);
     assert.equal($('model-not-configured').hidden,true);
     assert.deepEqual(controls.map(control=>control.hidden),[false,false,true]);
+  }else if(local){
+    await waitForStartup();
+    assert.deepEqual(calls,['/v1/portal/config','/v1/projects']);
+    assert.equal($('projects-home').hidden,false);
+    assert.equal($('local-access-badge').hidden,false);
+    assert.equal($('connect-form').hidden,true);
+    assert.equal($('guest-view-banner').hidden,true);
+    assert.deepEqual(controls.map(control=>control.hidden),[false,false,false]);
+    assert.equal(storage.has('sca-portal-token'),false);
+
+    releaseSuites();
+    location.hash='#/overview';
+    await route();
+    const toggle=$('portal-require-token');
+    assert.equal($('portal-access-control').hidden,false);
+    assert.equal(toggle.checked,false);
+    toggle.checked=true;
+    await toggle.onchange();
+    assert.equal(toggle.checked,false);
+    assert.equal(switchWrites,0);
+    assert(warningText.includes('Select-String SCA_EVAL_API_TOKEN .\\.data\\portal.env'));
+    assert(warningText.includes('grep SCA_EVAL_API_TOKEN .data/portal.env'));
+
+    acceptWarning=true;
+    toggle.checked=true;
+    await toggle.onchange();
+    assert.equal(switchWrites,1);
+    assert.equal($('local-access-badge').hidden,true);
+    assert.equal($('connect-form').hidden,false);
+    assert.equal($('portal-access-control').hidden,true);
+    assert.equal($('guest-view-banner').hidden,false);
+    await assert.rejects(api('/tasks',{}),/请先登录/);
+
+    $('token').value='fixture-admin';
+    await $('connect-form').onsubmit({preventDefault(){}});
+    assert.equal(storage.get('sca-portal-token'),'fixture-admin');
+    assert.equal($('portal-access-control').hidden,false);
+    assert.equal(toggle.checked,true);
+    toggle.checked=false;
+    await toggle.onchange();
+    assert.equal(switchWrites,2);
+    assert.equal(storage.get('sca-portal-token'),'fixture-admin');
+    assert.deepEqual(authHeaders(),{Authorization:'Bearer fixture-admin'});
   }else if(destination==='projects'){
     assert.deepEqual(calls,['/v1/portal/whoami','/v1/projects']);
     const duplicate=route();
@@ -522,7 +584,8 @@ def serve_portal(route, path):
     return False
 
 
-def test_portal_browser_tracks_provider_restart_after_writes():
+@pytest.mark.parametrize("local", [False, True])
+def test_portal_browser_tracks_provider_restart_after_writes(local):
     providers_path = '/v1/portal/providers'
     provider = {'id': 'fixture-provider', 'name': 'Local', 'type': 'openai-compatible',
                 'base_url': 'http://127.0.0.1:8081/v1', 'models': [{'name': 'local-coder'}]}
@@ -533,6 +596,8 @@ def test_portal_browser_tracks_provider_restart_after_writes():
         path = urlsplit(route.request.url).path
         if serve_portal(route, path):
             return
+        if path.startswith(providers_path):
+            assert route.request.headers.get('authorization') == (None if local else 'Bearer fixture-admin')
         if path == providers_path and route.request.method == 'POST':
             providers.append(provider)
             route.fulfill(status=202, json={'provider': provider,
@@ -546,14 +611,19 @@ def test_portal_browser_tracks_provider_restart_after_writes():
         else:
             fixtures = {
                 '/v1/portal/whoami': {'role': 'admin', 'tenant_id': 'eval'},
-                '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'can_configure_model': True},
+                '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'can_configure_model': True, **(
+                    {'local_identity': {'role': 'admin', 'tenant_id': 'eval'}, 'portal_require_token': False}
+                    if local else {}
+                )},
+                '/v1/portal/access': {'require_token': False, 'local_no_token_active': True},
                 providers_path: {'providers': providers, 'deepseek_models': []},
             }
             route.fulfill(json=fixtures.get(path, []))
 
     with portal_browser() as browser:
         page = browser.new_page()
-        page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
+        if not local:
+            page.add_init_script("localStorage.setItem('sca-portal-token', 'fixture-admin')")
         page.route('**/*', handle)
         page.goto('http://portal.test/portal#/overview')
         panel = page.locator('#model-providers')

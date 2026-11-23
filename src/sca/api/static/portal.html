@@ -489,6 +489,7 @@ body[data-trace-expanded] { overflow: hidden; }
       <div><h1 id="page-title">概览</h1><p id="page-description"></p></div>
       <div class="header-actions">
         <span id="workspace-indicator" class="badge">待连接</span>
+        <span id="local-access-badge" class="badge complete" hidden>本机免令牌</span>
         <button id="refresh" type="button">刷新数据</button>
       </div>
     </header>
@@ -506,7 +507,7 @@ body[data-trace-expanded] { overflow: hidden; }
       <div class="panel" id="workspace-settings">
         <div class="panel-head"><div><h2>工作空间连接</h2><p id="connection-status" role="status">尚未连接</p></div><span id="health" class="badge" hidden></span></div>
         <div class="settings">
-          <form id="connect-form">
+          <form id="connect-form" hidden>
             <label for="token">Portal 访问令牌</label>
             <div class="input-row">
               <input id="token" type="password" autocomplete="off" required aria-describedby="token-note">
@@ -520,9 +521,12 @@ body[data-trace-expanded] { overflow: hidden; }
               <input id="provider-key" type="password" autocomplete="off" required disabled aria-describedby="provider-key-note">
               <button type="submit" disabled>保存密钥</button>
             </div>
-            <small id="provider-key-note">使用本机管理员令牌连接后即可保存。</small>
+            <small id="provider-key-note">连接本机 eval 管理员工作空间后即可保存。</small>
             <p id="provider-key-status" class="status-text" role="status"></p>
           </form>
+        </div>
+        <div id="portal-access-control" hidden>
+          <label class="portal-check"><input id="portal-require-token" type="checkbox" role="switch">需要访问令牌</label>
         </div>
         <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
       </div>
@@ -986,7 +990,7 @@ function authHeaders(){
 }
 async function api(path,body,method){
   const verb=method||(body===undefined?'GET':'POST');
-  if(!portalToken&&verb!=='GET')throw Error('请先登录。');
+  if(!portalToken&&!portalIdentity?.local_no_token&&verb!=='GET')throw Error('请先登录。');
   const r=await fetch('/v1'+path,{
     method:verb,headers:{
       ...authHeaders(),'Content-Type':'application/json'
@@ -1098,6 +1102,7 @@ async function loadConfig(c){
   const previousDefault=portalConfig?.default_model;
   portalConfig=c;
   $('model-not-configured').hidden=c.model_configured!==false;
+  portalSettings.configureAccess(c.portal_require_token);
   if(c.guest_view)return c;
   $('config').textContent=json(c);
   canRescore=c.can_rescore===true;
@@ -2426,18 +2431,15 @@ $('analysis-form').onsubmit=async event=>{
     const files=[...$('analysis-files').files],question=$('analysis-question').value.trim();
     const checks=$('analysis-checks').value.split('\n').map(line=>line.trim()).filter(Boolean);
     if(!question||!files.length||files.length>32||checks.length>16||files.some(file=>! /\.(csv|json)$/i.test(file.name)))throw Error('请填写问题，选择 1–32 个 CSV/JSON 文件，检查命令最多 16 条。');
-    const inputs=[], token=portalToken;
+    const inputs=[], identity=portalIdentity;
     for(const file of files){
-      if(token!==portalToken)return;
+      if(identity!==portalIdentity)return;
       $('analysis-status').textContent='正在上传：'+file.name;
-      const form=new FormData();form.append('file',file);
-      const response=await fetch('/v1/files',{method:'POST',headers:{Authorization:'Bearer '+portalToken},body:form,signal:AbortSignal.timeout(120000)});
-      if(!response.ok)throw await apiFailure(response);
-      inputs.push((await response.json()).id);
+      inputs.push((await portalUI.upload(file)).id);
     }
-    if(token!==portalToken)return;
+    if(identity!==portalIdentity)return;
     const task=await data('/tasks',{kind:'analysis',spec:{question,inputs,report_format:'markdown',checks}});
-    if(token!==portalToken)return;
+    if(identity!==portalIdentity)return;
     $('analysis-status').textContent='任务已创建：'+task.id;
     await openTask(task.id);
   }catch(e){error(e)}finally{control.disabled=false}
@@ -2700,7 +2702,7 @@ $('provider-key-form').onsubmit=async event=>{
   try{
     const response=await fetch('/v1/portal/provider-key',{
       method:'POST',
-      headers:{Authorization:'Bearer '+portalToken,'Content-Type':'application/json'},
+      headers:{...authHeaders(),'Content-Type':'application/json'},
       body:JSON.stringify({key:input.value.trim()}),
       signal:AbortSignal.timeout(130000),
     });
@@ -2853,6 +2855,11 @@ function displayConnection(text,style){
   indicator.textContent=style==='complete'?'已连接':style==='problem'?'连接异常':'待连接';
   if($('connection-status').textContent!==text)$('connection-status').textContent=text;
 }
+function syncPortalLogin(){
+  const local=portalIdentity?.local_no_token===true;
+  $('local-access-badge').hidden=!local;
+  $('connect-form').hidden=local;
+}
 function resetPortalSession(){
   stopTaskStream();
   taskDag?.reset();
@@ -2902,10 +2909,14 @@ async function loadRecentTasks(){
   renderTaskChoices();
 }
 async function refresh(manual=false){
-  const connect=manual||!portalIdentity;
+  let connect=manual||!portalIdentity;
   if(refreshing||(!connect&&routeLoad)||(!manual&&!portalToken&&!portalIdentity&&guestChecked))return;
   refreshing=true;
   try{
+    if(!connect&&portalIdentity.local_no_token&&!(await data('/portal/access')).local_no_token_active){
+      resetPortalSession();
+      connect=true;
+    }
     if(!connect){
       const {current:page,parts}=pageRoute();
       await loadPage(page,parts,true);
@@ -2918,9 +2929,12 @@ async function refresh(manual=false){
     }else{
       guestChecked=true;
       config=await data('/portal/config');
-      if(!config.guest_view)return;
-      identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
-      if(!location.hash)history.replaceState(null,'','#/tasks');
+      if(config.local_identity){
+        identity={...config.local_identity,local_no_token:true};
+      }else if(config.guest_view){
+        identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
+        if(!location.hash)history.replaceState(null,'','#/tasks');
+      }else return;
     }
     if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
     portalIdentity=portalIdentity||identity;
@@ -2928,7 +2942,11 @@ async function refresh(manual=false){
     displayConnection(identity.guest?'只读访客模式':identity.platform_admin?'已连接平台管理':('已连接 '+identity.tenant_id+' 工作空间'),'complete');
     await route();
   }catch(e){
-    if(!portalToken&&!portalIdentity&&(e.status===401||e.status===403))return;
+    if(!portalToken&&!portalIdentity&&(e.status===401||e.status===403)){
+      displayConnection('尚未连接','');
+      await route();
+      return;
+    }
     if(!portalIdentity||e.status===401){
       resetPortalSession();
       if(e.status===401||e.status===403){
@@ -2939,7 +2957,7 @@ async function refresh(manual=false){
       displayConnection('请检查访问令牌或服务状态。','problem');
     }
     error(e);
-  }finally{refreshing=false}
+  }finally{refreshing=false;syncPortalLogin()}
 }
 $('refresh').onclick=()=>refresh(true).catch(error);
 $('theme').value=localStorage.getItem('sca-portal-theme')||'';
@@ -2958,6 +2976,7 @@ if(archivePortal){
   $('task-run-workbench').hidden=true;
   archivePortal.start().catch(error);
 }else{
+  portalSettings.bindAccess();
   window.addEventListener('hashchange',()=>route().catch(error));
   route().catch(error);
   refresh().catch(error);

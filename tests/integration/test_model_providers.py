@@ -36,7 +36,8 @@ async def provider_api(tmp_path, monkeypatch):
     monkeypatch.setenv('SCA_PORTAL_LOCAL_CONFIG', str(config))
     monkeypatch.setenv('SCA_RUNTIME_MODE', 'source')
     settings = Settings(_env_file=None, model_gateway_url='http://gateway', data_dir=tmp_path,
-                        model_gateway_master_key='fixture-gateway')
+                        model_gateway_master_key='fixture-gateway', portal_require_token=True,
+                        eval_api_token='local-admin')
     for module in ('sca.api.app', 'sca.api.portal', 'sca.config'):
         monkeypatch.setattr(f'{module}.get_settings', lambda: settings)
 
@@ -56,6 +57,7 @@ async def provider_api(tmp_path, monkeypatch):
             url=make_url('postgresql+asyncpg://localhost/sca'))}), tenant_deleted=AsyncMock(return_value=False),
     )
     app = create_app(store=store, orchestrator=SimpleNamespace(), object_store=LocalObjectStore(tmp_path),
+                     local_portal_port=8000,
                      authenticator=StaticTokenAuthenticator({'local-admin': 'eval:admin',
                          'member': 'eval:member', 'viewer': 'eval:viewer', 'other-admin': 'other:admin'}))
     response_body = {'choices': [{'message': {'role': 'assistant', 'content': 'OK'}}]}
@@ -79,9 +81,9 @@ async def provider_api(tmp_path, monkeypatch):
         transport=httpx.MockTransport(gateway), **opts))
     async with (
         async_client(transport=httpx.ASGITransport(app=app, client=('127.0.0.1', 4321)),
-                     base_url='http://test') as local,
+                     base_url='http://127.0.0.1:8000') as local,
         async_client(transport=httpx.ASGITransport(app=app, client=('192.0.2.2', 4321)),
-                     base_url='http://test') as remote,
+                     base_url='http://127.0.0.1:8000') as remote,
     ):
         yield local, remote, fake_restart, upstream_status, tmp_path
 
@@ -188,6 +190,24 @@ async def test_registry_requires_local_eval_admin_and_hides_from_guests(provider
     monkeypatch.delenv('SCA_PORTAL_LOCAL_CONFIG')
     denied = await local.get(PROVIDERS, headers=ADMIN)
     assert denied.status_code == 403 and '缺少本机模型接入配置' in denied.json()['error']['message']
+    assert restart.await_count == 1
+
+
+async def test_local_no_token_session_can_manage_model_providers(provider_api, monkeypatch):
+    local, remote, restart, _, _ = provider_api
+    switch = await local.put('/v1/portal/access', headers=ADMIN, json={'require_token': False})
+    assert switch.json() == {'require_token': False, 'local_no_token_active': True}
+    config = (await local.get('/v1/portal/config')).json()
+    assert config['local_identity']['tenant_id'] == 'eval' and config['can_configure_model'] is True
+    origin = {'Origin': 'http://127.0.0.1:8000'}
+    created = await local.post(PROVIDERS, headers=origin, json=MODEL)
+    endpoint = restart_path(created)
+    await check_restart(local, endpoint)
+    assert (await local.get(PROVIDERS)).json()['providers'][0]['name'] == MODEL['name']
+    assert (await local.post(PROVIDERS, json=MODEL)).status_code == 401
+    assert (await remote.get(PROVIDERS)).status_code == 401
+    monkeypatch.delenv('SCA_PORTAL_LOCAL_CONFIG')
+    assert (await local.get(PROVIDERS)).status_code == 403
     assert restart.await_count == 1
 
 

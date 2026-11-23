@@ -429,6 +429,8 @@ class WindowsSource:
     def set_configuration(self) -> dict[str, str]:
         from dotenv import dotenv_values, set_key
 
+        from sca.config import portal_require_token_env
+
         if not self.dotenv.exists():
             self.dotenv.write_bytes((self.root / ".env.example").read_bytes())
         self.dotenv.chmod(0o600)
@@ -463,6 +465,9 @@ class WindowsSource:
                                  or "deepseek-flash",
             "SCA_API_TOKENS": f"{token}:eval:admin",
             "SCA_EVAL_API_TOKEN": token,
+            "SCA_PORTAL_REQUIRE_TOKEN": portal_require_token_env(
+                previous.get("SCA_PORTAL_REQUIRE_TOKEN"), values.get("SCA_PORTAL_REQUIRE_TOKEN"),
+            ),
             "SCA_PLATFORM_ADMIN_TOKEN": previous.get("SCA_PLATFORM_ADMIN_TOKEN") or secrets.token_hex(32),
         }
         # Use dotenv syntax compatible with both the API and gateway restart launcher.
@@ -677,13 +682,13 @@ class WindowsSource:
         self.wait("temporal", temporal_ready, 60)
         self.start_gateway(env)
         self.start("worker", [self.python, "-m", "sca.orchestration.worker"], env)
-        self.start("api", [self.python, "-m", "uvicorn", "sca.api.app:create_app", "--factory",
+        self.start("api", [self.python, "-m", "sca.api.portal_server",
                            "--no-proxy-headers", "--host", "127.0.0.1", "--port", "8000"], env, 8000)
         self.wait("api", lambda: http_ready(API_URL + "/healthz"), 120)
         if not self.owned("worker"):
             raise ValueError("worker 启动失败，请查看 .data/run/worker.log。")
         print(f"Portal {API_URL}/portal")
-        print("登录令牌保存在 .data/portal.env 的 SCA_EVAL_API_TOKEN。")
+        print("如需令牌，请在本机查看 .data/portal.env 的 SCA_EVAL_API_TOKEN。")
 
     def history(self, command: str, archive: Path) -> int:
         self.start_postgres()

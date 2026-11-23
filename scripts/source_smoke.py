@@ -25,17 +25,23 @@ def seed_repo(path: Path) -> None:
         )
 
 
+def send_without_token(client: httpx.Client, request: httpx.Request) -> httpx.Response:
+    request.headers.pop("Authorization", None)
+    return client.send(request, auth=None)
+
+
 def smoke(client: httpx.Client, repo: Path, wait_s: float) -> UUID:
     config = client.get("/v1/portal/config").raise_for_status().json()
     if config.get("sandbox_driver") != "local":
         raise ValueError("The Portal must be running in authenticated source mode.")
     if not config.get("gateway_reachable") or not config.get("temporal_reachable"):
         raise ValueError("The Portal cannot reach the native gateway or Temporal.")
-    page = client.get("/portal").raise_for_status()
+    page = send_without_token(client, client.build_request("GET", "/portal")).raise_for_status()
     if "text/html" not in page.headers.get("content-type", "") or "<title>SuperCloudAgents" not in page.text:
         raise ValueError("The Portal HTML did not load.")
     seed_repo(repo)
-    response = client.post("/v1/tasks", json={"kind": "coding", "spec": {
+    access = client.get("/v1/portal/access").raise_for_status().json()
+    task_request = client.build_request("POST", "/v1/tasks", json={"kind": "coding", "spec": {
         "repo_url": repo.as_posix(),
         "base_ref": "main",
         "agent_backend": "fake",
@@ -44,6 +50,13 @@ def smoke(client: httpx.Client, repo: Path, wait_s: float) -> UUID:
         "memory_enabled": False,
         "auto_finish": True,
     }})
+    if access["require_token"]:
+        response = client.send(task_request)
+    else:
+        if not access["local_no_token_active"]:
+            raise ValueError("The local no-token Portal session is unavailable.")
+        task_request.headers["Origin"] = f"{task_request.url.scheme}://{task_request.headers['Host']}"
+        response = send_without_token(client, task_request)
     task_id = UUID(response.raise_for_status().json()["id"])
     route = f"/v1/tasks/{task_id}"
     deadline = time.monotonic() + wait_s

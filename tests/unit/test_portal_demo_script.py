@@ -94,7 +94,9 @@ start() {
     echo "$1" >> startup-calls
     if [[ $1 == api || $1 == worker ]]; then
         printf '%s\n' "${SCA_PORTAL_LOCAL_CONFIG-}" > "$1-model-config"
+        printf '%s\n' "${SCA_PORTAL_REQUIRE_TOKEN-}" > "$1-token-setting"
     fi
+    if [[ $1 == api ]]; then shift; printf '%s\n' "$*" > api-command; fi
 }
 owned() { [[ -f startup-calls ]] && grep -qx "$1" startup-calls; }
 request() { :; }
@@ -146,6 +148,7 @@ stop() { :; }
         binary.chmod(0o700)
     monkeypatch.setenv("PATH", str(binaries), prepend=":")
     monkeypatch.delenv("SCA_RUNTIME_MODE", raising=False)
+    monkeypatch.delenv("SCA_PORTAL_REQUIRE_TOKEN", raising=False)
     monkeypatch.delenv("SCA_STRIPE_SIMULATOR", raising=False)
 
     def run(*args, native=False, cwd=None):
@@ -217,11 +220,31 @@ def test_docker_up_derives_local_config_for_older_setup(demo, monkeypatch, saved
     assert "SCA_EVAL_API_TOKEN" in result.stdout
     assert all(value not in result.stdout + result.stderr for value in (key, token))
     assert dotenv.read_text() == f"DEEPSEEK_API_KEY={key}\n"
-    assert portal_env.read_text().splitlines() == [*original.splitlines(), "export SCA_RUNTIME_MODE='docker'"]
+    assert portal_env.read_text().splitlines() == [
+        *original.splitlines(), "export SCA_RUNTIME_MODE='docker'", "export SCA_PORTAL_REQUIRE_TOKEN='0'",
+    ]
     for service in ("api", "worker"):
         assert (root / f"{service}-model-config").read_text().strip() == (
             str(dotenv) if saved is None else saved
         )
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("mode", ["docker", "source"])
+def test_launcher_persists_portal_auth_default(demo, monkeypatch, mode):
+    run, portal_env = demo
+    root = portal_env.parents[1]
+    monkeypatch.setenv("SCA_PORTAL_REQUIRE_TOKEN", "true")
+    result = run("up", "--mode", mode)
+    assert result.returncode == 0, result.stderr
+    monkeypatch.delenv("SCA_PORTAL_REQUIRE_TOKEN")
+    result = run("up", "--mode", mode)
+    assert result.returncode == 0, result.stderr
+    assert "export SCA_PORTAL_REQUIRE_TOKEN='1'" in portal_env.read_text()
+    assert (root / "api-token-setting").read_text().strip() == "1"
+    assert (root / "api-command").read_text().strip().endswith(
+        "-m sca.api.portal_server --no-proxy-headers --host 127.0.0.1 --port 8000"
+    )
 
 
 @pytest.mark.parametrize("mode", ["docker", "source"])

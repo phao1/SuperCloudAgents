@@ -35,6 +35,7 @@ def create_app(
     authenticator: Authenticator | None = None,
     object_store: ObjectStore | None = None,
     platform_store: Store | None = None,
+    local_portal_port: int | None = None,
 ) -> FastAPI:
     settings = get_settings()
     setup_tracing("sca-api", settings)
@@ -254,6 +255,8 @@ def create_app(
     from sca.api.model_providers import router as model_providers_router
 
     app.include_router(model_providers_router)
+    # Local Portal authentication
+    app.state.local_portal_port = local_portal_port
     return app
 
 
