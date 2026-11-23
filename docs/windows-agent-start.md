@@ -17,6 +17,7 @@
    安装或更新后打开新的 PowerShell，再用 py -3.12 --version（没有 py 时用 python --version）、git --version、node --version 和 npm.cmd --version 确认版本。
 
 2. 首次拉取时运行 git clone --branch supercloudagent1122 https://github.com/phao1/SuperCloudAgents.git。
+   已有对应仓库且平台正在运行时，先在仓库根目录运行 .\scripts\portal_source.ps1 down 停止旧版本服务，数据库和历史会保留。
    已有对应仓库时先运行 git status --short 和 git fetch origin supercloudagent1122，再用 git switch supercloudagent1122 切换分支。
    只有远程分支时用 git switch --track origin/supercloudagent1122。切换后运行 git merge --ff-only FETCH_HEAD。
    如果更新有冲突、分支已分叉或切换会覆盖本地改动，保留原工作区，在另一个目录克隆。
@@ -44,20 +45,28 @@
    (Invoke-RestMethod -Uri 'http://127.0.0.1:8000/v1/models' -Headers $headers).data | Select-Object -ExpandProperty id
    用完 API 后执行 Remove-Variable token, headers。
 
-5. 如果我提供了 sca-history.zip，将其放到仓库根目录。运行 .\scripts\portal_source.ps1 import-history .\sca-history.zip，在 Portal 检查导入的任务和「自动演进」中的记录。
+5. 如果我提供了 sca-history.zip，将其放到仓库的 .data 目录（该目录不会被提交）。运行 .\scripts\portal_source.ps1 import-history .\.data\sca-history.zip，在 Portal 检查导入的任务和「自动演进」中的记录。
 
-6. 创建一个一次性本机 Git 仓库，例如空闲的 C:\sca-demo 或临时目录下的新目录。在该目录运行 git init -b main。
-   创建 calc.py，其中 add(a, b) 暂时返回 a - b，再创建 test_calc.py，导入 add 并用 pytest 断言 add(2, 3) == 5。
-   用 git add calc.py test_calc.py 和 git -c user.name=SCA -c user.email=sca-demo@example.invalid commit -m "Add smoke fixture" 保存这个失败基线。
-   在 SCA 仓库根目录用 .\.venv\Scripts\python.exe -m pip install pytest 安装验证依赖。
-   在「首页」或「任务」点击「新建任务」，或使用 POST /v1/tasks。仓库填写绝对路径（如 C:/sca-demo），基线分支填 main，后端选 DeepSeek Harness（dsh），模型选第 4 步验证过的平台模型名。
-   要求修复 add 且保留测试，验证命令填 python -m pytest -q。只提交一次，不推送。
-   等验证节点显示通过，再在任务详情确认「执行图 DAG」和「对话」可打开。也可通过 GET /v1/tasks/{task_id}/events 确认最后一次 verification.completed 的 payload.passed 为 true。
+6. 用「新项目」流程跑一个多 Agent 冒烟任务。先在 SCA 仓库根目录用 .\.venv\Scripts\python.exe -m pip install pytest 安装验证依赖。
+   在「首页」或「任务」点击「新建任务」。新建任务只有「任务指令」必填，仓库地址和分支留空时平台自动新建空仓库。
+   - 任务指令：创建两个互不依赖的 Python 模块，各带 pytest 测试：mathutils（clamp(x, lo, hi)、is_even(n)）和 textutils（slugify(s)、word_count(s)）。
+   - Agent 后端选 DeepSeek Harness（dsh），模型选第 4 步验证过的平台模型名。
+   - 输出目录填一个空闲的绝对路径，例如 C:\sca-demo\utils；留空则写到 %USERPROFILE%\sca-projects\<项目名>。
+   - 验证命令填 python -m pytest -q。任务拆分保持默认「自动规划」。任务预算填 0.15。勾选「完成后无需人工审核，直接写入」。
+   提交一次。在任务详情确认：
+   - 「执行图 DAG」先出现「规划」，再出现按 Agent 分的泳道（如 Agent 1、Agent 2）并行执行，标题行显示 agent 数、子任务数和并发上限。
+   - 「对话」按 Agent 标注每个子任务的输出和进度，最后出现「代码已写入 <目录>（提交 …）」。
+   - 输出目录里有两个模块和测试文件，git log 显示 SCA Agent 的提交。
+   也可通过 GET /v1/tasks/{task_id} 确认 state 为 SUCCEEDED，并读取 result.output_dir 与 result.output_commit。
+   未勾选「完成后无需人工审核」时，任务会出现在左侧「待审批」，在对话顶部的审批卡片点「批准」后才写入目录。
+   运行中可在对话框输入指引：「排队发送」在当前轮结束后送达，「打断并发送」（Ctrl+Enter）会立即停下当前轮并带着指引重新开始。
 
 7. 向我说明如何从「自动演进 → 演进记录」开始一次运行。选择 DeepSeek Harness 或 OpenCode。选择 OpenCode 时填写已安装的基线版本。
    首次选 dsh-smoke，选已验证的模型，设小参数，例如一代、两个候选、每题一次、并发 1。
    使用 deepseek-flash 时可先设评测总预算 0.20 美元、单题预算 0.02 美元，反思和候选生成另计。
-   启动后在「演进记录」打开 DAG，按进展在「对话」里给下一代提议发指引，或使用「暂停」「恢复」「本代结束后停止」「跳过当前候选」「调整剩余预算」。
+   启动后在「演进记录」打开 DAG，按进展在「对话」里发指引：「下一代生效」在下一代提议时使用，「立即生效」会中止本代剩余评测并马上按指引重新提议。
+   展开「运行控制」可使用「暂停」「恢复」「本代结束后停止」「跳过当前候选」「调整剩余预算」。需要人工批准的候选会出现在左侧「待审批」。
+   Windows 只支持源码模式，「设置 → 运行环境」中的 Docker 选项不可用属于正常现象。
    未经我确认，禁止启动付费演进。
 
 8. 排查时在仓库根目录运行 .\scripts\portal_source.ps1 status。
@@ -68,7 +77,7 @@
    DSH 安装失败时查看 .\scripts\portal_source.ps1 logs dsh。up 会安装 DSH 并只运行 @deepseek-ai/dsh-subprocess-local、koffi 和 node-pty 所需的 npm 安装脚本。
    修复依赖后重跑 up。需要停止平台时运行 .\scripts\portal_source.ps1 down。
 
-9. 保持验证成功的服务运行。最后报告 git branch --show-current 和 git rev-parse HEAD 的结果、Portal URL、采用的模型接入方式和模型名、历史导入结果（如有）、冒烟任务 ID 和实际验证结果，以及未完成或失败的项目。请勿附带令牌、密钥或配置文件内容。
+9. 保持验证成功的服务运行。最后报告 git branch --show-current 和 git rev-parse HEAD 的结果、Portal URL、采用的模型接入方式和模型名、历史导入结果（如有）、冒烟任务 ID、实际并发的 Agent 数、输出目录和提交号、验证结果，以及未完成或失败的项目。请勿附带令牌、密钥或配置文件内容。
 ```
 
 - [Windows 源码模式](windows.md)

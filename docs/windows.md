@@ -77,10 +77,10 @@ Remove-Item Env:PORTAL_TOKEN
 bash scripts/portal_demo.sh export-history sca-history.zip
 ```
 
-将 ZIP 复制到 Windows 的 SCA 仓库根目录，在 PowerShell 中运行。
+将 ZIP 复制到 Windows 的 SCA 仓库的 `.data` 目录（该目录不会被提交），在 PowerShell 中运行。
 
 ```powershell
-.\scripts\portal_source.ps1 import-history .\sca-history.zip
+.\scripts\portal_source.ps1 import-history .\.data\sca-history.zip
 ```
 
 脚本会启动或复用本机 PostgreSQL、应用迁移并导入历史。导入后用 `up` 启动 Portal 查看记录。
