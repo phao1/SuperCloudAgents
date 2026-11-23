@@ -24,7 +24,13 @@ from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
     from sca.intents.base import TICKET_TYPES
-    from sca.kernel.interjection import MESSAGES_PENDING, Guidance, TurnInterrupted, with_guidance
+    from sca.kernel.interjection import (
+        MESSAGES_PENDING,
+        Guidance,
+        SettleTurnSpend,
+        TurnInterrupted,
+        with_guidance,
+    )
     from sca.kernel.workflow import ProjectCheckpoints, TaskWorkflow
     from sca.kinds.coding.activities import (
         SCM_ATTEMPTS,
@@ -344,6 +350,7 @@ class CodingTaskWorkflow(TaskWorkflow):
             )
             if interrupted:
                 continue
+            await self._turn_spend.wait()
             if messages and not response.skipped:
                 await self._interjections.apply(task_id, messages)
             await self._wait_for_project(task_id, "RUNNING", turn)
@@ -382,6 +389,12 @@ class CodingTaskWorkflow(TaskWorkflow):
 class CodingBeforeTurn(TaskWorkflow):
     @workflow.run
     async def run(self, task_id: str, spec: dict) -> dict:
+        try:
+            return await self._run_before_turn(task_id, spec)
+        finally:
+            await self._turn_spend.wait()
+
+    async def _run_before_turn(self, task_id: str, spec: dict) -> dict:
         if spec.get("_user_interjection"):
             self._interjections.enable()
         self._admission = spec.get("_admission", False)
@@ -397,13 +410,16 @@ class CodingBeforeTurn(TaskWorkflow):
                 await self._wait_for_project(task_id, "RUNNING")
                 attempt += 1
                 messages = await self._interjections.deliver(task_id, attempt, planning=True)
+                deferred = self._defer_turn_spend(spec)
                 try:
-                    plan = await self._interjections.run_activity(
+                    plan = await self._run_turn_activity(
                         "coding.plan_task",
                         PlanningInput(task_id, attempt, feedback,
                                       [message.text for message in [*guidance, *messages]],
                                       self._interjections.enabled,
-                                      self._interjections.turn_guidance(messages, plan_attempt=attempt)),
+                                      self._interjections.turn_guidance(messages, plan_attempt=attempt),
+                                      defer_spend=deferred),
+                        SettleTurnSpend(task_id, 0, f"plan-{attempt}") if deferred else None,
                         start_to_close_timeout=turn_timeout + timedelta(minutes=15),
                         heartbeat_timeout=timedelta(minutes=5),
                         retry_policy=_NO_RETRY,
@@ -419,6 +435,7 @@ class CodingBeforeTurn(TaskWorkflow):
                         **_QUICK,
                     )
                     plan = None
+                await self._turn_spend.wait()
                 if plan:
                     await self._interjections.apply(task_id, messages)
                     guidance.extend(messages)

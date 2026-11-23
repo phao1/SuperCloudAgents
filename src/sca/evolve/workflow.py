@@ -1,5 +1,6 @@
 """Deterministic evolution search; activities own all external state."""
 
+from dataclasses import dataclass
 from datetime import timedelta
 from typing import Any
 
@@ -7,7 +8,7 @@ from temporalio import workflow
 from temporalio.common import RetryPolicy
 from temporalio.exceptions import ActivityError, ApplicationError, ChildWorkflowError, FailureError
 
-from sca.eval.errors import GUIDANCE_ABORT, eval_failure_reason
+from sca.eval.errors import GUIDANCE_ABORT, GUIDANCE_CANCELLED_SIGNAL, eval_failure_reason
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 with workflow.unsafe.imports_passed_through():
@@ -28,6 +29,14 @@ class EvalRunFailed(Exception):
 
 class RestartProposal(Exception):
     pass
+
+
+@dataclass
+class AbortedEvaluation:
+    child: workflow.ChildWorkflowHandle
+    reserved_micro_usd: int
+    role: str
+    split: str
 
 
 def activity_failure_reason(error: ActivityError | ChildWorkflowError) -> str:
@@ -52,9 +61,13 @@ class EvolutionWorkflow:
         self.active_candidate: workflow.ChildWorkflowHandle | None = None
         self.skip_message: SteeringMessage | None = None
         self.immediate_guidance = False
+        self.defer_guidance_spend = False
         self.proposal_started = False
         self.restart_proposal = False
         self.next_guidance: SteeringMessage | None = None
+        self.aborted_evaluations: dict[str, AbortedEvaluation] = {}
+        self.guidance_run_id: str | None = None
+        self.guidance_reserved_micro_usd: int | None = None
 
     @workflow.signal
     def stop(self) -> None:
@@ -78,7 +91,7 @@ class EvolutionWorkflow:
 
     async def evaluate(self, overlay: dict, split: str, *, candidate_id: str | None = None,
                        role: str = 'candidate') -> dict | None:
-        remaining = round(self.budget_usd - self.spent, 9)
+        remaining = await self.evaluation_budget()
         if self.stopped or (not self.config.get('model_unpriced') and remaining < self.config['case_budget']):
             return None
         run_id = str(workflow.uuid4())
@@ -90,10 +103,14 @@ class EvolutionWorkflow:
         abortable = self.immediate_guidance and self.proposal_started
         if abortable:
             params['guidance_abortable'] = True
+            if self.defer_guidance_spend:
+                params['defer_guidance_spend'] = True
         payload = await self.act('prepare_run', params)
         skip = None
         if abortable:
-            skip = await self.evaluate_with_guidance(payload, run_id, candidate_id is not None)
+            skip = await self.evaluate_with_guidance(
+                payload, run_id, candidate_id, role=role, split=split,
+            )
         elif steered and candidate_id:
             skip = await self.evaluate_candidate(payload, run_id)
         else:
@@ -142,6 +159,7 @@ class EvolutionWorkflow:
         self.enforce_eval_integrity = workflow.patched("evolution-eval-integrity")
         self.journal_enabled = workflow.patched('evolution-conversation')
         self.immediate_guidance = self.journal_enabled and workflow.patched('evolution-guidance-now')
+        self.defer_guidance_spend = self.immediate_guidance and workflow.patched('evolution-deferred-guidance-spend')
         status = 'completed'
         try:
             if self.journal_enabled:
@@ -215,23 +233,19 @@ class EvolutionWorkflow:
                     break
         except Exception as exc:
             if provider := patched_provider_account_error(exc):
-                await self.finish('failed', provider.reason)
-                return 'failed'
+                return await self.finish('failed', provider.reason)
             reason = None
             if isinstance(exc, EvalRunFailed):
                 reason = str(exc)
             elif isinstance(exc, ActivityError):
                 reason = eval_failure_reason(exc)
             if reason is not None and (self.enforce_eval_integrity or workflow.patched("eval-suite-change-nonretryable")):
-                await self.finish('failed', reason)
-                return 'failed'
+                return await self.finish('failed', reason)
             if isinstance(exc, (ActivityError, ChildWorkflowError)) and workflow.patched("evolution-activity-reason"):
-                await self.finish('failed', activity_failure_reason(exc))
-                return 'failed'
+                return await self.finish('failed', activity_failure_reason(exc))
             await self.finish('failed')
             raise
-        await self.finish(status)
-        return status
+        return await self.finish(status)
 
     async def run_proposal(
         self, generation: int, champion: dict, dev_run: dict, holdout_run: dict | None,
@@ -392,9 +406,10 @@ class EvolutionWorkflow:
                    for message in self.steering.pending)
 
     async def evaluate_with_guidance(
-        self, payload: dict, run_id: str, candidate: bool,
+        self, payload: dict, run_id: str, candidate_id: str | None, *, role: str, split: str,
     ) -> SteeringMessage | None:
-        self.evaluating_candidate = candidate
+        self.evaluating_candidate = candidate_id is not None
+        self.guidance_run_id = run_id
         skipped = False
         try:
             child = await workflow.start_child_workflow('EvalRunWorkflow', payload, id='eval-' + run_id)
@@ -411,6 +426,20 @@ class EvolutionWorkflow:
                     # The child may have finished between the condition and the signal.
                     pass
                 if abort:
+                    if self.defer_guidance_spend:
+                        await workflow.wait_condition(
+                            lambda: child.done() or self.guidance_reserved_micro_usd is not None,
+                        )
+                        if not child.done() and self.guidance_reserved_micro_usd is not None:
+                            self.aborted_evaluations[run_id] = AbortedEvaluation(
+                                child, self.guidance_reserved_micro_usd, role, split,
+                            )
+                            if self.skip_message is not None:
+                                await self.conversation(receipt(
+                                    self.skip_message, GUIDANCE_ABORT, f'candidate:{candidate_id}',
+                                    status='superseded',
+                                ))
+                            raise RestartProposal
                     break
                 skipped = True
             await child
@@ -418,6 +447,45 @@ class EvolutionWorkflow:
         finally:
             self.evaluating_candidate = False
             self.active_candidate = self.skip_message = None
+            self.guidance_run_id = self.guidance_reserved_micro_usd = None
+
+    # Interrupted evaluation spend
+    @workflow.signal(name=GUIDANCE_CANCELLED_SIGNAL)
+    def guidance_cases_cancelled(self, run_id: str, reserved_micro_usd: int) -> None:
+        if self.guidance_run_id == run_id and reserved_micro_usd >= 0:
+            self.guidance_reserved_micro_usd = reserved_micro_usd
+
+    async def evaluation_budget(self) -> float:
+        while True:
+            await self.reconcile_aborted_evaluations()
+            held = sum(run.reserved_micro_usd for run in self.aborted_evaluations.values()) / 1_000_000
+            remaining = round(self.budget_usd - self.spent - held, 9)
+            if (not self.aborted_evaluations or self.stopped or self.config.get('model_unpriced')
+                    or remaining >= self.config['case_budget'] or self.budget_exhausted()):
+                return remaining
+            await self.wait_for_aborted_evaluation()
+
+    async def wait_for_aborted_evaluation(self) -> None:
+        await workflow.wait_condition(lambda: any(run.child.done() for run in self.aborted_evaluations.values()))
+
+    async def reconcile_aborted_evaluations(self, *, wait: bool = False) -> None:
+        while self.aborted_evaluations:
+            ready = [(id_, run) for id_, run in self.aborted_evaluations.items() if run.child.done()]
+            if not ready:
+                if not wait:
+                    return
+                await self.wait_for_aborted_evaluation()
+                continue
+            for run_id, pending in ready:
+                await pending.child
+                run = await self.act('read_run', {'run_id': run_id})
+                del self.aborted_evaluations[run_id]
+                self.spent += metrics(run)['cost_usd']
+                await self.conversation(progress(
+                    f'eval:{run_id}', 'evaluation', evaluation_text(
+                        pending.role, pending.split, run['results'], run['status'], run.get('reason'),
+                    ), f'eval:{run_id}',
+                ))
 
     async def propose(self, overlay: dict, run_id: str, generation: int) -> list[dict]:
         guidance = self.steering.guidance
@@ -483,6 +551,7 @@ class EvolutionWorkflow:
                 self.restart_proposal = True
             return
         if mode == 'budget':
+            await self.reconcile_aborted_evaluations(wait=True)
             total = await self.act('conversation_budget', {
                 'message': message, 'spent_usd': self.spent, 'dag_node_id': node,
             })
@@ -520,7 +589,11 @@ class EvolutionWorkflow:
         await self.conversation(progress(f'{kind}:{candidate["id"]}', kind,
             gate_text(candidate['decision'], candidate.get('reason')), f'candidate:{candidate["id"]}'))
 
-    async def finish(self, status: str, reason: str | None = None) -> None:
+    async def finish(self, status: str, reason: str | None = None) -> str:
+        try:
+            await self.reconcile_aborted_evaluations(wait=True)
+        except (ActivityError, ChildWorkflowError) as exc:
+            status, reason = 'failed', activity_failure_reason(exc)
         values: dict = {'status': status, 'spent_usd': self.spent}
         if reason is not None:
             values['reason'] = reason
@@ -539,3 +612,4 @@ class EvolutionWorkflow:
         for message in self.steering.pending:
             await self.conversation(receipt(message, '演进已结束', self.current_node, status='rejected'))
         await self.act('status', values)
+        return status

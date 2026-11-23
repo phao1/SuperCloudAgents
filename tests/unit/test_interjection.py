@@ -1,4 +1,7 @@
 import asyncio
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -12,11 +15,17 @@ from sca.agents.fake import FakeBackend
 from sca.agents.opencode import OpenCodeBackend
 from sca.agents.pi import PiBackend
 from sca.config import Settings
+from sca.core.model_provider import GatewayError
 from sca.core.models import AgentContext, ExecOutput
+from sca.db.repo import Store
 from sca.kernel.activities import KernelActivities, TurnInput
-from sca.kernel.interjection import TurnGuidance, with_guidance
+from sca.kernel.interjection import SettleTurnSpend, TurnGuidance, with_guidance
 from sca.kinds.coding.workflow import CodingTaskWorkflow
-from tests.interjection_harness import GUIDANCE_HEADER, InterjectionScript
+from tests.interjection_harness import (
+    GUIDANCE_HEADER,
+    GatewayInterjectionScript,
+    InterjectionScript,
+)
 
 
 def test_guidance_is_prepended_in_delivery_order():
@@ -32,8 +41,9 @@ def make_workflow(monkeypatch, script):
     async def execute(name, arg=None, *, args=None, **kwargs):
         return await activities[name](*(args if args is not None else [arg]))
 
-    def start(name, arg, *, cancellation_type, **kwargs):
-        assert cancellation_type == workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
+    def start(name, arg, *, cancellation_type=None, **kwargs):
+        if name != "settle_turn_spend":
+            assert cancellation_type == workflow.ActivityCancellationType.WAIT_CANCELLATION_COMPLETED
         return asyncio.create_task(execute(name, arg, **kwargs))
 
     async def wait_condition(predicate, **kwargs):
@@ -103,6 +113,147 @@ async def test_interrupt_waits_for_cleanup_then_checkpoints_and_restarts(monkeyp
     guide = script.turns[-1].guidance
     assert guide.message_ids == [first, update]
     assert guide.interrupted_ids == [update]
+
+
+class SpendStoreFixture(Store):
+    def __init__(self, task_limit, daily_limit=None):
+        self.row = {
+            "id": "task", "tenant_id": "tenant", "kind": "coding", "state": "RUNNING",
+            "spec": {"max_cost_usd": task_limit}, "result": {}, "usage": {}, "created_at": datetime.now(UTC),
+        }
+        self.daily_limit = Decimal(str(daily_limit)) if daily_limit is not None else None
+        self.lock = asyncio.Lock()
+        self.waiting_for_budget = asyncio.Event()
+        self.events = {}
+        self.get_task_champion = AsyncMock(return_value=None)
+        self.get_session_id = AsyncMock(return_value=None)
+
+    @asynccontextmanager
+    async def _transaction(self):
+        async with self.lock:
+            yield self
+
+    async def _task(self, session, task_id, lock=False):
+        assert task_id == self.row["id"]
+        return self.row
+
+    async def scalar(self, stmt):
+        return self.daily_limit
+
+    async def execute(self, stmt):
+        return SimpleNamespace(mappings=lambda: [self.row])
+
+    async def get_task(self, task_id):
+        return SimpleNamespace(**self.row)
+
+    async def _write_turn_spend(self, session, task, reservations, **columns):
+        task["result"][self._TURN_SPEND] = reservations
+        task.update(columns)
+
+    async def _event(self, session, task_id, type, payload, dedup_key=None):
+        if dedup_key not in self.events:
+            self.events[dedup_key] = (type, payload)
+            return self.events[dedup_key]
+        return None
+
+    async def append_event(self, task_id, type, payload, dedup_key):
+        await self._event(self, task_id, type, payload, dedup_key)
+
+    async def start_guided_turn(self, task_id, payload, dedup_key, *_args, **_kwargs):
+        await self.append_event(task_id, "agent.turn_started", payload, dedup_key)
+
+    async def reserve_turn_spend(self, *args):
+        budget, waiting = await super().reserve_turn_spend(*args)
+        if waiting:
+            self.waiting_for_budget.set()
+        return budget, waiting
+
+
+@pytest.mark.parametrize("stall_turn", [True, False], ids=["agent-running", "already-polling"])
+async def test_interrupt_restarts_before_old_spend_settles(monkeypatch, tmp_path, stall_turn):
+    store = SpendStoreFixture(.4, daily_limit=.18)
+    script = GatewayInterjectionScript(tmp_path, store, stall_turn=stall_turn)
+    task = make_workflow(monkeypatch, script)
+    async with asyncio.timeout(5):
+        run = asyncio.create_task(task.run("task"))
+        await script.turn_entered.wait()
+        if not stall_turn:
+            await script.gateway.settlement_started.wait()
+        msg = script.add("Take a different approach")
+        await task.user_message(msg, "interrupt")
+        await asyncio.wait_for(script.second_turn_entered.wait(), 3)
+        await script.gateway.settlement_started.wait()
+        assert store.row["usage"].get("cost_micro_usd", 0) <= 20_000
+        assert not run.done()
+        assert [cap for _, cap in script.gateway.issued] == [.12, .06]
+        assert script.steps[0] == ("checkpoint", 1)
+        script.gateway.release_spend.set()
+        assert await run == "SUCCEEDED"
+    assert store.row["usage"]["cost_micro_usd"] == 50_000
+    assert not store.row["result"][Store._TURN_SPEND]
+    assert not script.gateway.keys
+    settled = [p for event, p in store.events.values() if event == "agent.usage"]
+    assert sorted((p["turn"], p["cost_micro_usd"]) for p in settled) == [(1, 30_000), (2, 20_000)]
+    positions = [(event, p["turn"]) for event, p in store.events.values()]
+    assert positions.index(("agent.turn_interrupted", 1)) < positions.index(("agent.turn_started", 2))
+    assert positions.index(("agent.turn_started", 2)) < positions.index(("agent.usage", 1))
+    assert script.applied == [msg]
+
+
+async def test_interrupt_waits_to_issue_when_the_old_key_holds_the_budget(monkeypatch, tmp_path):
+    store = SpendStoreFixture(.12)
+    script = GatewayInterjectionScript(tmp_path, store)
+    task = make_workflow(monkeypatch, script)
+    async with asyncio.timeout(5):
+        run = asyncio.create_task(task.run("task"))
+        await script.turn_entered.wait()
+        await task.user_message(script.add("Continue with changes"), "interrupt")
+        await store.waiting_for_budget.wait()
+        assert len(script.gateway.issued) == 1
+        assert not script.second_turn_entered.is_set()
+        script.gateway.release_spend.set()
+        assert await run == "SUCCEEDED"
+    assert [cap for _, cap in script.gateway.issued] == [.12, .09]
+    assert store.row["usage"]["cost_micro_usd"] == 50_000
+
+
+async def test_workflow_cancellation_publishes_terminal_state_with_settled_usage(monkeypatch, tmp_path):
+    store = SpendStoreFixture(.12)
+    script = GatewayInterjectionScript(tmp_path, store)
+    task = make_workflow(monkeypatch, script)
+    async with asyncio.timeout(5):
+        run = asyncio.create_task(task.run("task"))
+        await script.turn_entered.wait()
+        run.cancel()
+        await script.gateway.settlement_started.wait()
+        assert script.first_turn_stopped.is_set()
+        assert script.gateway.blocked
+        assert "CANCELLED" not in script.states
+        script.gateway.release_spend.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+    assert script.states[-1] == "CANCELLED"
+    assert store.row["usage"]["cost_micro_usd"] == 30_000
+
+
+async def test_spend_retry_charges_once_after_key_cleanup_fails(tmp_path):
+    store = SpendStoreFixture(.12)
+    script = GatewayInterjectionScript(tmp_path, store)
+    gateway = script.gateway
+    alias = "task-task-turn1-attempt1"
+    await store.reserve_turn_spend("task", alias, .12, {"turn": 1})
+    await gateway.issue_key(alias, max_budget_usd=.12)
+    gateway.release_spend.set()
+    gateway.fail_delete = True
+    inp = SettleTurnSpend("task", 1)
+    with pytest.raises(GatewayError, match="fixture delete failed"):
+        await script.kernel.settle_turn_spend(inp)
+    assert store.row["usage"]["cost_micro_usd"] == 30_000
+    await script.kernel.settle_turn_spend(inp)
+    await script.kernel.settle_turn_spend(inp)
+    assert store.row["usage"]["cost_micro_usd"] == 30_000
+    assert len(store.events) == 1
+    assert not gateway.keys
 
 
 async def test_guidance_during_review_requests_revision(monkeypatch):

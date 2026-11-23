@@ -1,5 +1,6 @@
 import asyncio
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -10,7 +11,7 @@ from temporalio.client import WorkflowHistory
 from temporalio.converter import DataConverter
 from temporalio.worker import Replayer
 
-from sca.eval.errors import GUIDANCE_ABORT
+from sca.eval.errors import GUIDANCE_ABORT, GUIDANCE_CANCELLED_SIGNAL
 from sca.eval.workflow import EvalRunWorkflow
 from sca.evolve import workflow as module
 from sca.evolve.models import EvolutionConfig
@@ -51,6 +52,7 @@ class ControllerHarness:
         self.on_activity = lambda name, request: None
         self.on_wait = lambda: None
         self.on_child = lambda child: child.set_result('completed')
+        self.cancelled_runs = set()
         monkeypatch.setattr(module.workflow, 'patched', lambda _: True)
         monkeypatch.setattr(module.workflow, 'uuid4', uuid4)
         monkeypatch.setattr(module.workflow, 'execute_activity', self.execute)
@@ -74,7 +76,9 @@ class ControllerHarness:
                 self.runs[request['run_id']] = request
                 return {'id': request['run_id']}
             case 'evolve_read_run':
-                return {'id': request['run_id'], 'status': 'completed', 'suite_hash': 'fixture',
+                cancelled = request['run_id'] in self.cancelled_runs
+                return {'id': request['run_id'], 'status': 'cancelled' if cancelled else 'completed',
+                        'reason': GUIDANCE_ABORT if cancelled else None, 'suite_hash': 'fixture',
                         'results': [{'case_id': 'case', 'repeat': 0, 'acceptance_passed': False,
                                      'cost_usd': .05, 'turns': 1}]}
             case 'evolve_propose':
@@ -205,9 +209,54 @@ async def test_now_replaces_the_same_generation_and_counts_interrupted_spend(mon
         assert receipts[0]['status'] == 'rejected'
 
 
-async def test_guidance_abort_cancels_active_eval_cases_and_collects_spent_budget(monkeypatch):
+@pytest.mark.parametrize('budget,remaining', [(.25, .10), (.21, .11)])
+async def test_now_proposes_before_cancelled_evaluation_settles(monkeypatch, budget, remaining):
+    harness = ControllerHarness(monkeypatch, generations=1, candidates=1, budget_usd=budget, case_budget=.1)
+    harness.proposals[0]['static_check']['valid'] = True
+    proposals = []
+
+    def observe(name, request):
+        if name == 'evolve_propose':
+            proposals.append(request)
+            if len(proposals) == 2:
+                assert not harness.children[0].done()
+                assert request['operator_guidance'] == 'Change the hypothesis'
+        if name == 'evolve_prepare_run' and len(harness.runs) == 2:
+            assert harness.children[0].done() == (budget == .21)
+            assert request['remaining'] == remaining
+
+    def start(child):
+        if len(harness.children) > 1:
+            child.set_result('completed')
+            return
+
+        async def signal(name):
+            assert name == 'abort_for_guidance'
+            child.signals.append(name)
+            harness.controller.guidance_cases_cancelled(child.run_id, 100_000)
+
+        child.signal = signal
+
+    def wait():
+        aborted = harness.children[0]
+        if not aborted.signals:
+            harness.send('new-guidance', 'now', text='Change the hypothesis', seq=1)
+        else:
+            assert len(proposals) == 2
+            harness.cancelled_runs.add(aborted.run_id)
+            aborted.set_result('cancelled')
+
+    harness.on_activity, harness.on_wait, harness.on_child = observe, wait, start
+    assert await harness.run() == ('budget_exhausted' if budget == .21 else 'completed')
+    assert len(proposals) == len(harness.children) == 2
+    assert harness.controller.spent == pytest.approx(.15)
+    assert not harness.controller.aborted_evaluations
+
+
+@pytest.mark.parametrize('deferred', [False, True])
+async def test_guidance_abort_cancels_active_eval_cases_and_collects_spent_budget(monkeypatch, deferred):
     evaluation = EvalRunWorkflow()
-    cancelled, submitted, collected = [], [], []
+    cancelled, submitted, collected, reported = [], [], [], []
 
     async def execute(name, request, **options):
         if name == 'eval_prepare':
@@ -233,17 +282,29 @@ async def test_guidance_abort_cancels_active_eval_cases_and_collects_spent_budge
         evaluation.abort_for_guidance()
         assert predicate()
 
+    async def signal(name, *, args):
+        assert name == GUIDANCE_CANCELLED_SIGNAL
+        assert cancelled == ['a', 'b'] and not collected
+        reported.append(args)
+
     monkeypatch.setattr(module.workflow, 'execute_activity', execute)
     monkeypatch.setattr(module.workflow, 'start_activity', start)
     monkeypatch.setattr(module.workflow, 'execute_local_activity', cancel)
     monkeypatch.setattr(module.workflow, 'wait_condition', wait)
     monkeypatch.setattr(module.workflow, 'patched', lambda _: True)
+    monkeypatch.setattr(module.workflow, 'info', lambda: SimpleNamespace(
+        parent=SimpleNamespace(workflow_id='evolution', run_id='attempt'),
+    ))
+    monkeypatch.setattr(module.workflow, 'get_external_workflow_handle',
+                        lambda *_args, **_kwargs: SimpleNamespace(signal=signal))
     status, reason = await evaluation.evaluate({
-        'repeat': 1, 'concurrency': 2, 'case_budget': .1, 'budget': 2,
+        'id': 'eval', 'repeat': 1, 'concurrency': 2, 'case_budget': .1, 'budget': 2,
         'guidance_abortable': True, 'evolution_step': {'role': 'comparison'},
+        'defer_guidance_spend': deferred,
     }, {})
     assert (status, reason) == ('cancelled', GUIDANCE_ABORT)
     assert cancelled == submitted == collected == ['a', 'b']
+    assert reported == ([['eval', 200_000]] if deferred else [])
 
 
 @pytest.mark.parametrize('candidate_run', [True, False])

@@ -29,5 +29,7 @@ general_settings:
   # Spend is written to the database in batches; the platform reads a key's spend when the
   # turn ends, so flush often (seconds).
   proxy_batch_write_at: 1
+  # Turn reservations rely on LiteLLM rejecting requests whose full estimate exceeds the key cap.
+  fail_closed_budget_enforcement: true
 litellm_settings:
   drop_params: true

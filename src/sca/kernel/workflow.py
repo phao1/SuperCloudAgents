@@ -40,7 +40,9 @@ with workflow.unsafe.imports_passed_through():
         USER_MESSAGE_SIGNAL,
         Guidance,
         Interjections,
+        SettleTurnSpend,
         TurnInterrupted,
+        TurnSpendSettlements,
         with_guidance,
     )
 REVIEW_SIGNAL = "submit_review"
@@ -103,6 +105,7 @@ class TaskWorkflow:
         self._task_spec: dict | None = None
         self._extension_signals: dict[tuple[str, str], tuple[str, list[Any]]] = {}
         self._interjections = Interjections()
+        self._turn_spend = TurnSpendSettlements()
         self._extension_name: str | None = None
 
     async def _extension_signal(self, name: str, key: str, args: list[Any]) -> None:
@@ -140,8 +143,10 @@ class TaskWorkflow:
             return await self._run(task_id)
         except BaseException as e:
             if is_cancelled_exception(e):
+                await self._turn_spend.wait()
                 await self._finish(task_id, "CANCELLED", "cancelled by user")
             elif isinstance(e, (ActivityError, ChildWorkflowError)):
+                await self._turn_spend.wait()
                 if provider := patched_provider_account_error(e):
                     await self._finish(task_id, "FAILED", provider.reason,
                                        model_provider_error=provider.payload())
@@ -233,6 +238,7 @@ class TaskWorkflow:
     async def _check_budget(self, task_id: str, turn: int) -> None:
         reason = await workflow.execute_activity("check_budget", StepInput(task_id, turn), **_QUICK)
         if reason:
+            await self._turn_spend.wait()
             await self._set_state(task_id, "FAILED", f"budget exceeded: {reason}")
             raise ApplicationError(reason, type="BudgetExceeded", non_retryable=True)
 
@@ -336,6 +342,7 @@ class TaskWorkflow:
                 except TurnInterrupted:
                     interrupted = True
                 except ActivityError as exc:
+                    await self._turn_spend.wait()
                     if _model_budget_reason(exc.cause) is None and not patched_provider_account_error(exc):
                         await self._check_budget(task_id, turn)
                     raise
@@ -351,6 +358,7 @@ class TaskWorkflow:
                 if messages and not turn_result.skipped:
                     await self._interjections.apply(task_id, messages)
             skip_turn = False
+            await self._turn_spend.wait()
             await self._wait_for_project(task_id, "RUNNING", turn)
 
             over_budget: str | None = await workflow.execute_activity(
@@ -526,15 +534,32 @@ class TaskWorkflow:
         messages: list[Guidance],
     ) -> TurnResult:
         prompt = with_guidance(prompt, [message.text for message in messages])
-        return await self._interjections.run_activity(
+        deferred = self._defer_turn_spend(spec)
+        return await self._run_turn_activity(
             "run_agent_turn",
             TurnInput(task_id, turn, prompt, session, self._interjections.enabled,
-                      self._interjections.turn_guidance(messages)),
+                      self._interjections.turn_guidance(messages), defer_spend=deferred),
+            SettleTurnSpend(task_id, turn) if deferred else None,
             result_type=TurnResult,
             start_to_close_timeout=timedelta(seconds=spec["turn_timeout_s"] + 60),
             heartbeat_timeout=timedelta(seconds=spec.get("turn_heartbeat_timeout_s", 120)),
             retry_policy=_retry(2),
         )
+
+    # Interrupted turn spend
+    async def _run_turn_activity(
+        self, name: str, inp: Any, settlement: SettleTurnSpend | None, **options: Any,
+    ) -> Any:
+        try:
+            return await self._interjections.run_activity(name, inp, **options)
+        except (TurnInterrupted, ActivityError, asyncio.CancelledError):
+            if settlement is not None:
+                self._turn_spend.start(settlement)
+            raise
+
+    def _defer_turn_spend(self, spec: dict) -> bool:
+        return (self._interjections.enabled and bool(spec.get("_deferred_turn_spend"))
+                and workflow.patched("interrupted-turn-spend"))
 
     def _review_ready(self) -> bool:
         return bool(self._reviews) or self._interjections.pending

@@ -121,6 +121,8 @@ class EvolutionActivities:
             payload['evolution_step'] = step
         if request.get('guidance_abortable'):
             payload['guidance_abortable'] = True
+        if request.get('defer_guidance_spend'):
+            payload['defer_guidance_spend'] = True
         if cfg.get('model_unpriced'):
             payload['model_unpriced'] = True
         if request.get('schedule_id') is not None:

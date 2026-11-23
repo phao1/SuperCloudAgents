@@ -308,7 +308,7 @@ class _TaskTrace:
             if tokens is not None:
                 turn.tokens = (turn.tokens or 0) + tokens
             if cost is not None:
-                turn.cost_usd = (turn.cost_usd or 0) + cost
+                turn.cost_usd = cost if p.get("source") == "model_gateway" else (turn.cost_usd or 0) + cost
         elif type_ == "agent.turn_completed":
             cost = _number(p.get("cost_usd"))
             if cost is not None:

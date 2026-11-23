@@ -146,3 +146,30 @@ class Interjections:
             raise
         finally:
             self._active = None
+
+
+# Interrupted turn spend
+@dataclass
+class SettleTurnSpend:
+    task_id: str
+    turn: int
+    scope: str | None = None
+
+
+class TurnSpendSettlements:
+    def __init__(self) -> None:
+        self._pending: list[workflow.ActivityHandle] = []
+
+    def start(self, inp: SettleTurnSpend) -> None:
+        self._pending.append(workflow.start_activity(
+            "settle_turn_spend", inp, start_to_close_timeout=timedelta(minutes=1),
+        ))
+
+    async def wait(self) -> None:
+        while self._pending:
+            handle = self._pending[0]
+            try:
+                await asyncio.shield(handle)
+            finally:
+                if handle.done():
+                    self._pending.pop(0)

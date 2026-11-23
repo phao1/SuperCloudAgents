@@ -75,3 +75,28 @@ async def test_cost_budgets(store):
     assert await store.check_budget(other.id) is None
     await store.set_tenant_budget("cost", daily_cost_budget_usd=None)
     assert await store.check_budget(other.id) is None
+
+
+async def test_turn_reservations_hold_budget_until_spend_is_recorded(store):
+    import asyncio
+
+    await store.set_tenant_budget("settlement", daily_cost_budget_usd=.20)
+    task, _ = await store.create_task(
+        tenant_id="settlement", kind="coding", spec={"max_cost_usd": .16}, idempotency_key=None,
+    )
+    other, _ = await store.create_task(
+        tenant_id="settlement", kind="coding", spec={}, idempotency_key=None,
+    )
+    task_id, other_id = str(task.id), str(other.id)
+    event = {"turn": 1, "model": "fixture"}
+    assert await store.reserve_turn_spend(task_id, "old", .12, event) == (.12, False)
+    assert await store.reserve_turn_spend(task_id, "new", .12, {"turn": 2}) == (.04, False)
+    assert await store.reserve_turn_spend(other_id, "other", .12, event) == (.04, False)
+    assert await store.reserve_turn_spend(task_id, "blocked", .12, {"turn": 3}) == (0, True)
+    assert (await store.get_task(task_id)).usage == {}
+    charges = await asyncio.gather(*[store.apply_turn_spend(task_id, "old", .03) for _ in range(2)])
+    assert sorted(charges) == [False, True]
+    assert await store.reserve_turn_spend(task_id, "next", .12, {"turn": 3}) == (.09, False)
+    assert (await store.get_task(task_id)).usage["cost_micro_usd"] == 30_000
+    assert [event.payload["cost_micro_usd"] for event in await store.list_events(task_id)
+            if event.type == "agent.usage"] == [30_000]

@@ -222,11 +222,43 @@ class LiteLLMGateway:
         try:
             return await self._spend(alias)
         finally:
-            await self._post("/key/delete", {"key_aliases": [alias]})
+            await self.delete_key(alias)
 
     async def revoke_key(self, alias: str) -> float | None:
         spend, _ = await self.finalize_key(alias)
         return spend
+
+    # Interrupted turn spend
+    async def block_key(self, alias: str, *, issued_key: str | None = None) -> bool:
+        token = issued_key if issued_key is not None else await self._key_token(alias)
+        if token is None:
+            return False
+        if token.startswith("sk-"):
+            token = hashlib.sha256(token.encode()).hexdigest()
+        await self._post("/key/block", {"key": token})
+        return True
+
+    async def _key_token(self, alias: str) -> str | None:
+        response = await self._request(
+            "GET", "/key/list", params={"key_alias": alias, "return_full_object": "true"},
+        )
+        try:
+            response.raise_for_status()
+            row = next((key for key in response.json()["keys"] if key.get("key_alias") == alias), None)
+            if row is None:
+                return None
+            token = row.get("token") or row.get("key")
+            if not isinstance(token, str) or not token:
+                raise ValueError
+        except (httpx.HTTPError, ValueError, KeyError, AttributeError, TypeError):
+            raise GatewayError("could not find virtual model key to block") from None
+        return token
+
+    async def read_key_spend(self, alias: str) -> tuple[float | None, bool]:
+        return await self._spend(alias)
+
+    async def delete_key(self, alias: str) -> None:
+        await self._post("/key/delete", {"key_aliases": [alias]})
 
     async def list_aliases(self, prefix: str) -> list[str]:
         aliases: set[str] = set()
