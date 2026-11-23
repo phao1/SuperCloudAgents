@@ -62,8 +62,14 @@
 }
 .conversation-meta, .conversation-empty { font-size: .8rem; color: var(--muted); }
 .conversation-tag { border-radius: 999px; padding-inline: .42em; background: var(--panel); }
+.conversation-receipt { display: block; margin-block-start: .12rem; font-size: .82rem; text-align: end; }
+.conversation-receipt[data-status="delivered"] a { color: var(--good); font-weight: 700; }
 .conversation-receipt[data-status="applied"] a { color: var(--good); }
 .conversation-receipt[data-status="rejected"] a, .conversation-error { color: var(--bad); }
+.conversation-guidance-chip {
+  align-self: start; margin: 0; padding: .15rem .55rem; border-radius: 999px;
+  background: var(--accent-bg); color: var(--accent); font-size: .82rem;
+}
 .conversation-row.conversation-system { justify-content: center; }
 .conversation-chip {
   display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
@@ -110,8 +116,10 @@
   resize: none;
   field-sizing: content;
 }
-.conversation-compose-row select { inline-size: auto; padding-inline: .4rem; }
-.conversation-compose-row button { flex: none; white-space: nowrap; padding-inline: .7rem; }
+.conversation-compose-actions { display: flex; flex-wrap: wrap; justify-content: end; align-items: center; gap: .3rem .4rem; }
+.conversation-compose-actions button { white-space: nowrap; padding-inline: .7rem; }
+.conversation-compose-actions button:disabled { pointer-events: none; }
+.conversation-shortcuts { margin-inline-end: auto; }
 .conversation-steering { font-size: .86rem; }
 .conversation-steering summary, .conversation-approval details summary { cursor: pointer; color: var(--accent); }
 .conversation-steering[open] .portal-actions { align-items: end; margin-block: .25rem; }
@@ -149,7 +157,7 @@
   }
 }
 @media (max-width: 550px) {
-  .conversation-compose-row :is(.conversation-input, select, button) { min-block-size: 44px; }
-  .conversation-compose-row :is(.conversation-input, select) { font-size: max(16px, 1rem); }
+  .conversation-compose-row .conversation-input { min-block-size: 44px; font-size: max(16px, 1rem); }
+  .conversation-compose-actions button { min-block-size: 44px; }
   .approval-inbox li { grid-template-columns: minmax(0, 1fr); }
 }

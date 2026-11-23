@@ -72,17 +72,21 @@ def test_demo_submits_queues_guidance_and_waits_for_second_review():
 class DemoStore(FakeStore):
     pending = None
 
-    async def deliver_task_messages(self, task_id, turn, *, planning):
-        if self.pending is None:
-            return []
-        assert not planning
-        text, self.pending = self.pending, None
-        self.delivered_turn = turn
-        await self.append_event(task_id, "user.message.delivered", {"message_id": "m1", "turn": turn})
-        return [SimpleNamespace(id="m1", text=text)]
+    async def pending_task_messages(self, task_id):
+        return [] if self.pending is None else [SimpleNamespace(id="m1", text=self.pending)]
+
+    async def start_guided_turn(self, task_id, start, key, message_ids, interrupted_ids, *, plan_attempt=None):
+        await super().start_guided_turn(task_id, start, key, message_ids, interrupted_ids, plan_attempt=plan_attempt)
+        if message_ids:
+            assert plan_attempt is None and message_ids == ["m1"]
+            self.delivered_turn = start["turn"]
+            await self.append_event(task_id, "user.message.delivered", {
+                "message_id": "m1", "turn": self.delivered_turn,
+            })
 
     async def apply_task_messages(self, task_id, message_ids):
         assert message_ids == ["m1"]
+        self.pending = None
         await self.append_event(task_id, "user.message.applied", {
             "message_id": "m1", "turn": self.delivered_turn,
         })

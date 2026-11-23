@@ -398,15 +398,24 @@ curl -fsS "$SCA_API_URL/v1/models" -H "Authorization: Bearer $SCA_API_TOKEN"
 curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/dag" \
   -H "Authorization: Bearer $SCA_API_TOKEN"
 curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
-  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"guidance","text":"优先验证边界条件"}'
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"next","text":"优先验证边界条件"}'
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
+  -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"now","text":"本代改为优先检查空输入"}'
 ```
 
 ### 对话与审批
 
 演进详情的「对话」显示候选假设、提议依据、覆盖变更概况与开发集及留出集的评测结果。
 桌面端的对话面板与 DAG 并排，消息可单独滚动。屏幕宽度为 900 像素或更窄时，DAG 排在对话上方。
-在任务对话底部选择「排队」或「打断」后发送插话。输入框随内容增高，最多显示六行。运行结束后，
-底部显示「任务已结束」或「演进已结束」。
+任务对话提供「排队发送」和「打断并发送」。输入框随内容增高，最多显示六行。运行结束后，
+底部显示「任务已结束」或「演进已结束」。[任务插话使用说明](operations.md#运行中插话)
+
+演进对话可选择「下一代生效」（`next`，旧 API 的 `guidance` 仍可用）或「立即生效」（`now`）。
+立即生效会中止本代剩余的评测，结算已启动用例的费用，随后沿用同一代编号重新提议。
+未完成决策的旧候选显示「已因指引中止」，已完成的基线和已晋升的冠军可继续复用。
+达到剩余预算下限时结束演进。暂停期间发送的指引会在恢复后使用。新版 Worker 启动的演进支持立即生效。
+首次基线会先完成。已发出的反思与提议请求会返回，替换时跳过这些提议对应的评测。
+提议活动开始使用指引时，消息即可显示「已应用于第 N 代提议」。
 
 待审卡片固定在消息区顶部，也可通过侧栏「待审批」打开。展开「变更与审核详情」可查看文件和补丁，
 点击「要求修改」可填写并提交修改意见。提交决定后在消息列表查看带时间的简短记录。

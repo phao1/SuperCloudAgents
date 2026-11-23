@@ -4,9 +4,9 @@ import asyncio
 from datetime import timedelta
 
 from temporalio import workflow
-from temporalio.exceptions import ActivityError
+from temporalio.exceptions import ActivityError, is_cancelled_exception
 
-from sca.eval.errors import eval_failure_reason
+from sca.eval.errors import GUIDANCE_ABORT, eval_failure_reason
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 
@@ -14,11 +14,17 @@ from sca.orchestration.provider_errors import patched_provider_account_error
 class EvalRunWorkflow:
     def __init__(self) -> None:
         self.skip_requested = False
+        self.guidance_abort = False
 
     @workflow.signal
     def skip_evolution_candidate(self) -> None:
         if workflow.patched('eval-skip-evolution-candidate'):
             self.skip_requested = True
+
+    @workflow.signal
+    def abort_for_guidance(self) -> None:
+        if workflow.patched('eval-abort-for-guidance'):
+            self.guidance_abort = True
 
     @workflow.run
     async def run(self, request: dict) -> str:
@@ -54,7 +60,8 @@ class EvalRunWorkflow:
         case_budget = round(request["case_budget"] * 1e6)
         budget = round(request["budget"] * 1e6)
         candidate_run = bool(request.get('evolution_step', {}).get('candidate_id'))
-        while pending and not (candidate_run and self.skip_requested):
+        abortable = bool(request.get('guidance_abortable')) and workflow.patched('eval-guidance-case-cancellation')
+        while pending and not (candidate_run and self.skip_requested) and not (abortable and self.guidance_abort):
             batch = []
             deferred = []
             reserved = 0
@@ -74,10 +81,18 @@ class EvalRunWorkflow:
             tasks = await asyncio.gather(*[
                 workflow.execute_activity("eval_submit", item, **options) for item in batch])
             active = dict(zip(tasks, batch, strict=True))
+            cancelled = False
             while active:
+                if abortable and self.guidance_abort and not cancelled:
+                    # All regular activity slots may be occupied by the cases being cancelled.
+                    await workflow.execute_local_activity('eval_cancel_cases', list(active), **options)
+                    cancelled = True
                 for task_id, item in list(active.items()):
-                    result = await workflow.execute_activity(
-                        "eval_collect", {**item, "task_id": task_id, **collect_options}, **options)
+                    if abortable and self.guidance_abort and not cancelled:
+                        break  # Wake at once to cancel the rest of the batch.
+                    collect = {**item, "task_id": task_id, **collect_options,
+                               **({'guidance_abort': True} if cancelled else {})}
+                    result = await self.collect_case(collect, options, interruptible=abortable and not cancelled)
                     if result is not None:
                         if isinstance(result, dict):
                             errored += result["errored"]
@@ -86,9 +101,32 @@ class EvalRunWorkflow:
                         collected += 1
                         del active[task_id]
                 if active:
-                    await workflow.sleep(2)
+                    if abortable and not cancelled:
+                        try:
+                            await workflow.wait_condition(lambda: self.guidance_abort, timeout=2)
+                        except TimeoutError:
+                            pass
+                    else:
+                        await workflow.sleep(1 if cancelled else 2)
+        if abortable and self.guidance_abort:
+            return 'cancelled', GUIDANCE_ABORT
         if candidate_run and self.skip_requested:
             return 'cancelled', '操作者已跳过候选'
         if errored * 2 > collected:
             return "failed", f"评测执行错误（{errored}/{collected} 个已执行用例），请查看任务日志"
         return ("budget_exhausted" if pending else "completed"), None
+
+    async def collect_case(self, collect: dict, options: dict, *, interruptible: bool) -> dict | float | None:
+        if not interruptible:
+            return await workflow.execute_activity("eval_collect", collect, **options)
+        result = workflow.start_activity("eval_collect", collect, **options)
+        await workflow.wait_condition(lambda: self.guidance_abort or result.done())
+        if not result.done():
+            # Collection is idempotent. Cancel the request now and collect again after the cases stop.
+            result.cancel()
+        try:
+            return await result
+        except (ActivityError, asyncio.CancelledError) as exc:
+            if not self.guidance_abort or not is_cancelled_exception(exc):
+                raise
+            return None

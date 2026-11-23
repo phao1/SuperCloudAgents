@@ -17,6 +17,7 @@ with workflow.unsafe.imports_passed_through():
 
 from sca.config import Settings, get_settings
 from sca.eval.activities import EvalActivities
+from sca.eval.errors import GUIDANCE_ABORT
 from sca.eval.suites import load_suite
 from sca.eval.workflow import EvalRunWorkflow
 from sca.evolve.activities import EvolutionActivities
@@ -40,6 +41,10 @@ class SteerableFakeEval:
 
     @workflow.signal
     def skip_evolution_candidate(self) -> None:
+        self.skipped = True
+
+    @workflow.signal
+    def abort_for_guidance(self) -> None:
         self.skipped = True
 
     @workflow.run
@@ -148,7 +153,8 @@ async def test_evolution_paths(temporal_env, scenario, expected, promotions):
     assert all(c['decision'] != 'pending' for c in records.values())
 
 
-async def test_live_steering_and_replay(temporal_env):
+@pytest.mark.parametrize('control', ['skip', 'now'])
+async def test_live_steering_and_replay(temporal_env, control):
     started, release, paused, evaluating = (asyncio.Event() for _ in range(4))
     runs, records, transcript, proposals = {}, {}, [], []
 
@@ -168,12 +174,15 @@ async def test_live_steering_and_replay(temporal_env):
     async def read(request: dict) -> dict:
         run = runs[request['run_id']]
         return {'id': run['id'], 'status': 'cancelled' if run['block'] else 'completed', 'suite_hash': 'same',
+                'reason': GUIDANCE_ABORT if run['block'] and control == 'now' else None,
                 'results': [{'case_id': 'a', 'repeat': 0, 'acceptance_passed': True,
                              'cost_usd': .002, 'turns': 1}]}
 
     @activity.defn(name='evolve_propose')
     async def propose(request: dict) -> list[dict]:
         proposals.append(request['operator_guidance'])
+        if item := request.get('guidance_receipt'):
+            transcript.append(item)
         return [{'hypothesis': 'Check boundaries', 'overlay': {'tool_guidance': 'Be precise'},
                  'static_check': {'valid': True}}]
 
@@ -213,12 +222,14 @@ async def test_live_steering_and_replay(temporal_env):
             await handle.signal(EvolutionWorkflow.user_message, {'id': 'resume', 'mode': 'resume'})
             await evaluating.wait()
             await handle.signal(EvolutionWorkflow.user_message, {'id': 'stop', 'mode': 'stop'})
-            await handle.signal(EvolutionWorkflow.user_message, {'id': 'skip', 'mode': 'skip'})
+            await handle.signal(EvolutionWorkflow.user_message,
+                                {'id': control, 'mode': control, 'text': 'Use fresh evidence', 'seq': 2})
             assert await handle.result() == 'stopped'
-    assert proposals == ['Check bounds']
-    assert [row['reason'] for row in records.values()] == ['操作者已跳过候选']
+    assert proposals == (['Check bounds', 'Use fresh evidence'] if control == 'now' else ['Check bounds'])
+    assert next(iter(records.values()))['reason'] == (GUIDANCE_ABORT if control == 'now' else '操作者已跳过候选')
+    assert {row['generation'] for row in records.values()} == {1}
     assert {item['message_id'] for item in transcript if item['kind'] == 'receipt'} == {
-        'guidance', 'pause', 'resume', 'stop', 'skip',
+        'guidance', 'pause', 'resume', 'stop', control,
     }
     await Replayer(workflows=workflows).replay_workflow(await handle.fetch_history())
 

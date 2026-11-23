@@ -21,6 +21,7 @@ from sca.core.models import (
 class FakeBackend:
     name = "fake"
     state_transport = "mount"
+    uses_model_gateway = False
 
     def sandbox_additions(self, ctx: AgentContext) -> SandboxAdditions:
         home = Path(ctx.agent_home_host)

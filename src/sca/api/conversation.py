@@ -21,7 +21,12 @@ from sca.db.repo import Store
 from sca.eval.trajectory import is_errored, overall_passed
 from sca.evolve.dag import EvolutionHistory, build_evolution_dag
 from sca.evolve.progress import evaluation_text, finish_text, gate_text, one_line
-from sca.evolve.steering import ACTION_LABELS, ACTIVE_EVOLUTION_STATES, MESSAGE_EVENT
+from sca.evolve.steering import (
+    ACTION_LABELS,
+    ACTIVE_EVOLUTION_STATES,
+    GUIDANCE_MODES,
+    MESSAGE_EVENT,
+)
 from sca.history.privacy import clean_text
 
 
@@ -115,7 +120,7 @@ def evolution_item(row: dict, user: Principal) -> ConversationItem:
                                 dag_node_id=item['dag_node_id'], message_id=item.get('message_id'),
                                 status=item.get('status'))
     mode, text = item['mode'], item.get('text')
-    if mode != 'guidance':
+    if mode not in GUIDANCE_MODES:
         label = ACTION_LABELS[mode]
         if mode == 'budget':
             label += f' · ${item["remaining_budget_usd"]:.6g}'
@@ -403,7 +408,11 @@ def _task_control_receipt(event: Event) -> str:
     p = event.payload
     place = (f'第 {p["plan_attempt"]} 次规划' if p.get('plan_attempt') is not None
              else f'第 {p["turn"]} 轮' if p.get('turn') is not None else '执行步骤')
-    return ('插话已应用于' if event.type == 'user.message.applied' else '插话已送达') + place
+    if event.type == 'user.message.applied':
+        return f'{place}已完成'
+    if p.get('interrupted') is True:
+        return f'已打断 · {place}已按此重新开始'
+    return f'已送达 · {place}按此执行'
 
 
 def _turn_text(event: Event, node: DAGNode | None) -> str:

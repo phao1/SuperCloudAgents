@@ -69,6 +69,17 @@ class FakeStore:
     async def deliver_task_messages(self, task_id: str, turn: int, *, planning: bool) -> list:
         return []
 
+    async def pending_task_messages(self, task_id: str) -> list:
+        return []
+
+    async def start_guided_turn(
+        self, task_id: str, start: dict, key: str, message_ids: list[str], interrupted_ids: list[str],
+        *, plan_attempt: int | None = None,
+    ) -> None:
+        await self.append_event(task_id, "agent.turn_started", {
+            **start, "interjectible": True, "following_guidance": bool(message_ids),
+        }, dedup_key=key)
+
     async def set_state(self, task_id, state, reason=None, *, wait_for_messages=False) -> Task:
         previous = self.task.state
         if previous != state:

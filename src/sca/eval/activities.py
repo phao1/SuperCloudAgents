@@ -62,7 +62,7 @@ class EvalActivities:
         self.store = store
 
     def all(self) -> list:
-        return [self.prepare, self.submit, self.collect, self.finish]
+        return [self.prepare, self.submit, self.collect, self.finish, self.cancel_cases]
 
     def http(self) -> httpx.AsyncClient:
         token = EvalSettings().eval_api_token
@@ -201,6 +201,7 @@ class EvalActivities:
             task = response.json()
         if task["state"] not in TERMINAL_STATES:
             return None
+        guidance_abort = bool(request.get('guidance_abort'))
         result, usage = task["result"], task["usage"]
         provider = ModelProviderError.from_payload(result.get("model_provider_error"))
         account_error = task["state"] == "FAILED" and provider is not None and provider.is_account_error
@@ -221,7 +222,7 @@ class EvalActivities:
         budget_reason = task.get("state_reason") if task["state"] == "FAILED" else None
         budget_exhausted = budget_reason == MODEL_BUDGET_EXHAUSTED
         budget_misconfigured = budget_reason == MODEL_BUDGET_MISCONFIGURED
-        errored = account_error or budget_misconfigured or (
+        errored = (guidance_abort and task["state"] == "CANCELLED") or account_error or budget_misconfigured or (
             task["state"] != "SUCCEEDED"
             and not budget_exhausted
             and not any(event["type"] == EventType.AGENT_TURN_COMPLETED for event in events)
@@ -246,9 +247,9 @@ class EvalActivities:
             "duration_s": (datetime.fromisoformat(task["updated_at"]) -
                            datetime.fromisoformat(task["created_at"])).total_seconds(),
         })
-        if account_error and provider is not None:
+        if account_error and provider is not None and not guidance_abort:
             raise account_failure(provider)
-        if budget_misconfigured:
+        if budget_misconfigured and not guidance_abort:
             raise invalid_eval_input(MODEL_BUDGET_MISCONFIGURED)
         if request.get("report_outcome"):
             return {"cost_usd": cost, "errored": errored}
@@ -257,3 +258,18 @@ class EvalActivities:
     @activity.defn(name="eval_finish")
     async def finish(self, request: dict) -> None:
         await self.store.finish_eval_run(request["id"], request["status"], reason=request.get("reason"))
+
+    @activity.defn(name='eval_cancel_cases')
+    async def cancel_cases(self, task_ids: list[str]) -> None:
+        async with self.http() as http:
+            async def cancel(task_id: str) -> None:
+                path = f'/v1/tasks/{task_id}'
+                response = await http.post(f'{path}/cancel')
+                if response.status_code == 409:
+                    task = await http.get(path)
+                    check_response(task)
+                    if task.json()['state'] in TERMINAL_STATES:
+                        return
+                check_response(response)
+
+            await asyncio.gather(*(cancel(task_id) for task_id in task_ids))

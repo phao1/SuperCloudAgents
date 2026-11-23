@@ -8,8 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ACTIVE_EVOLUTION_STATES = frozenset({'queued', 'running', 'paused', 'awaiting_approval'})
 MESSAGE_EVENT = 'conversation.message'
 PROGRESS_EVENT = 'conversation.progress'
+GUIDANCE_MODES = frozenset({'guidance', 'next', 'now'})
 
-EvolutionMessageMode = Literal['guidance', 'pause', 'resume', 'stop', 'skip', 'budget']
+EvolutionMessageMode = Literal['guidance', 'next', 'now', 'pause', 'resume', 'stop', 'skip', 'budget']
 ReceiptStatus = Literal['applied', 'rejected', 'superseded']
 ACTION_LABELS = {
     'pause': '暂停演进', 'resume': '恢复演进', 'stop': '本代结束后停止',
@@ -28,7 +29,7 @@ class EvolutionMessageInput(BaseModel):
     def validate_message(self) -> 'EvolutionMessageInput':
         if self.text is not None and (not self.text.strip() or '\x00' in self.text):
             raise ValueError('请输入有效的演进消息')
-        if self.mode == 'guidance' and self.text is None:
+        if self.mode in GUIDANCE_MODES and self.text is None:
             raise ValueError('请输入演进指引')
         if (self.mode == 'budget') != (self.remaining_budget_usd is not None):
             raise ValueError('请仅在调整预算时提供有效的剩余预算')

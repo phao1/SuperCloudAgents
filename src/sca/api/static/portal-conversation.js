@@ -4,9 +4,11 @@ const portalConversation = (() => {
   const ui = portalUI;
   const clock = new Intl.DateTimeFormat('zh-CN', {hour: '2-digit', minute: '2-digit', second: '2-digit'});
   const minuteClock = new Intl.DateTimeFormat('zh-CN', {hour: '2-digit', minute: '2-digit'});
-  const modes = {queue: '排队', interrupt: '打断', guidance: '指引', pause: '暂停', resume: '恢复',
+  const modes = {queue: '排队', interrupt: '打断', guidance: '指引', next: '下一代生效', now: '立即生效',
+    pause: '暂停', resume: '恢复',
     stop: '停止', skip: '跳过', budget: '预算'};
-  const receipts = {pending: '等待送达', delivered: '已送达', applied: '已应用', rejected: '未应用'};
+  const pendingLabels = {queue: '排队中 · 当前轮结束后送达', interrupt: '正在打断…',
+    next: '排队中 · 等待下一代提议', guidance: '排队中 · 等待下一代提议', now: '正在准备重新提议…'};
 
   function timeLabel(item, format = clock) {
     const time = new Date(item.created_at);
@@ -130,32 +132,30 @@ const portalConversation = (() => {
     scrollArea.append(approvals, feed, jump);
 
     const isTask = type === 'task';
-    const message = isTask ? '插话' : '给下一代提议的指引';
+    const message = isTask ? '插话' : '给提议的指引';
+    const shortcuts = isTask ? 'Enter 排队发送 · Ctrl/Cmd+Enter 打断并发送'
+      : 'Enter 下一代生效 · Ctrl/Cmd+Enter 立即生效';
     const input = el('textarea', undefined, 'conversation-input');
     Object.assign(input, {name: 'text', required: true, rows: 1, maxLength: 4000, enterKeyHint: 'send',
-      placeholder: message, title: '回车发送，Shift + 回车换行',
+      placeholder: message, title: shortcuts + ' · Shift+Enter 换行',
     });
     input.setAttribute('aria-label', message);
     const form = el('form', undefined, 'conversation-composer');
     const controls = el('fieldset');
     const row = el('div', undefined, 'conversation-compose-row');
     row.append(input);
-    const mode = isTask ? el('select') : null;
-    if (mode) {
-      mode.name = 'mode';
-      mode.setAttribute('aria-label', '送达方式');
-      for (const key of ['queue', 'interrupt']) {
-        const option = el('option', modes[key]);
-        option.value = key;
-        mode.append(option);
-      }
-      mode.value = 'queue';
-      row.append(mode);
-    }
-    const send = el('button', '发送', 'primary');
-    send.type = 'submit';
-    row.append(send);
+    const sendLater = el('button', isTask ? '排队发送' : '下一代生效');
+    const sendNow = el('button', isTask ? '打断并发送' : '立即生效', 'primary');
+    Object.assign(sendLater, {type: 'submit', value: isTask ? 'queue' : 'next'});
+    Object.assign(sendNow, {type: 'submit', value: isTask ? 'interrupt' : 'now'});
+    sendLater.setAttribute('aria-keyshortcuts', 'Enter');
+    sendNow.setAttribute('aria-keyshortcuts', 'Control+Enter Meta+Enter');
+    const nowAction = el('span');
+    nowAction.append(sendNow);
+    const actions = el('div', undefined, 'conversation-compose-actions');
+    actions.append(el('small', shortcuts, 'conversation-shortcuts'), sendLater, nowAction);
     controls.append(row);
+    controls.append(actions);
     const feedback = el('p', undefined, 'status-text conversation-status');
     feedback.setAttribute('role', 'status');
     form.append(controls, feedback);
@@ -166,9 +166,13 @@ const portalConversation = (() => {
     mount.classList.add('panel', 'portal-conversation');
     const title = el('h2', '对话');
     title.tabIndex = -1;
-    mount.replaceChildren(title, scrollArea, form, footer);
+    const guidanceChip = el('p', 'agent 正在按你的指引执行', 'conversation-guidance-chip');
+    guidanceChip.setAttribute('role', 'status');
+    mount.replaceChildren(title, scrollArea, guidanceChip, form, footer);
 
     let cursor, loading, posting, ended = '', paused = false, finishedLoaded = false;
+    let turnRunning = false, following = false;
+    let lastUpdate;
     const seen = new Set();
     const userMessages = new Map(), pendingReceipts = new Map();
     let lastActivity = null;
@@ -203,11 +207,29 @@ const portalConversation = (() => {
       return node;
     }
 
-    function setState(reason = '', isPaused = false) {
+    function setState(reason = '', isPaused = false, running = false, guided = false) {
       if (reason !== ended) finishedLoaded = false;
       ended = reason;
       paused = isPaused;
+      turnRunning = running;
+      following = guided;
       syncForm();
+    }
+
+    function updateTask(task, events) {
+      const turnEvent = events.findLast(({type, payload}) => {
+        if (!['agent.turn_started', 'agent.turn_completed', 'agent.turn_interrupted', 'agent.error'].includes(type)) return false;
+        if (type === 'agent.error' && !payload.attempt) return false;
+        return payload.interjectible || (!payload.best_of_attempt && !payload.best_of_candidate
+          && (!payload.subtask || (payload.turn === 0 && /^plan-\d+$/.test(payload.subtask))));
+      });
+      const running = task.state === 'RUNNING' && turnEvent?.type === 'agent.turn_started';
+      setState(finishedTask(task.state) ? '任务已结束' : '', false, running, turnEvent?.payload.following_guidance);
+      const update = events.findLast(({type}) => type.startsWith('user.message') || type.startsWith('agent.turn_'));
+      if (update && update.seq !== lastUpdate) {
+        lastUpdate = update.seq;
+        void refresh(true);
+      }
     }
 
     function syncForm() {
@@ -217,6 +239,18 @@ const portalConversation = (() => {
       endMessage.textContent = ended;
       pause.hidden = paused;
       resume.hidden = !paused;
+      guidanceChip.hidden = !isTask || !turnRunning || !following || Boolean(ended);
+      if (isTask) {
+        sendNow.disabled = !turnRunning;
+        nowAction.title = turnRunning ? '' : '当前没有正在执行的轮次，仍可排队发送';
+        nowAction.tabIndex = turnRunning ? -1 : 0;
+        nowAction.setAttribute('aria-label', nowAction.title);
+        if (ended) {
+          for (const receipt of userMessages.values()) {
+            if (receipt.dataset.status === 'pending') receipt.textContent = '任务已结束 · 未送达';
+          }
+        }
+      }
     }
 
     function locate(id, label = '定位节点') {
@@ -234,16 +268,17 @@ const portalConversation = (() => {
       body.append(el('p', item.text));
       if (modes[item.mode]) meta.prepend(el('span', modes[item.mode], 'conversation-tag'));
       if (item.actor) meta.prepend(el('span', item.actor));
-      const receipt = el('span', receipts[item.status] || receipts.pending, 'conversation-receipt');
+      const label = isTask && ended ? '任务已结束 · 未送达' : pendingLabels[item.mode] || '等待处理';
+      const receipt = el('span', label, 'conversation-receipt');
       receipt.dataset.status = item.status || 'pending';
-      meta.append(receipt);
+      receipt.setAttribute('role', 'status');
       const id = item.message_id || item.id;
       userMessages.set(id, receipt);
       if (pendingReceipts.has(id)) {
         applyReceipt(pendingReceipts.get(id));
         pendingReceipts.delete(id);
       }
-      content.append(body, meta);
+      content.append(body, meta, receipt);
       row.append(content);
     }
 
@@ -255,7 +290,7 @@ const portalConversation = (() => {
         pendingReceipts.set(id, item);
         return false;
       }
-      const label = item.text || receipts[item.status] || '';
+      const label = item.text;
       receipt.dataset.status = item.status || '';
       receipt.replaceChildren(item.dag_node_id ? locate(item.dag_node_id, label) : el('span', label));
       return true;
@@ -382,7 +417,7 @@ const portalConversation = (() => {
       try {
         await data(path + '/messages', body);
         if (!active()) return false;
-        await refresh();
+        await refresh(true);
         return active();
       } catch (error) {
         if (active()) ui.setMessage(feedback, error.message, true);
@@ -396,7 +431,9 @@ const portalConversation = (() => {
     form.onsubmit = async event => {
       event.preventDefault();
       if (!allowed() || !input.value.trim()) return;
-      if (await post({text: input.value, mode: mode?.value || 'guidance'})) {
+      const button = event.submitter || sendLater;
+      if (button.disabled) return;
+      if (await post({text: input.value, mode: button.value})) {
         input.value = '';
         input.oninput?.();
       }
@@ -413,10 +450,11 @@ const portalConversation = (() => {
     input.onkeydown = event => {
       if (event.key !== 'Enter' || event.shiftKey || event.isComposing || event.keyCode === 229) return;
       event.preventDefault();
-      if (allowed()) form.requestSubmit();
+      const button = event.ctrlKey || event.metaKey ? sendNow : sendLater;
+      if (allowed() && !button.disabled) form.requestSubmit(button);
     };
     syncForm();
-    return {approvals, title, refresh, setState, recordDecision, destroy() { mount.replaceChildren(); }};
+    return {approvals, title, refresh, setState, updateTask, recordDecision, destroy() { mount.replaceChildren(); }};
   }
 
   return {create};

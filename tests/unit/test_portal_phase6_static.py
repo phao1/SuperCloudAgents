@@ -416,10 +416,13 @@ global.fetch=async (path,request={})=>{
         created_at:at},
       {id:'reply',kind:'reply',backend:'dsh',text:'**Done**',created_at:at},
       {id:'message',kind:'message',mode:'queue',message_id:'message',text:'看看边界',created_at:at},
-      {id:'receipt',kind:'receipt',message_id:'message',status:'delivered',text:'已送达',created_at:at}
+      {id:'interrupt',kind:'message',mode:'interrupt',message_id:'interrupt',text:'先查空值',created_at:at},
     ],cursor:'6',has_more:false},
     [taskPath+'/conversation?limit=100&cursor=6']:{items:moreMessages?[
       {id:'verification',kind:'verification.completed',text:'验证通过',created_at:at},
+      {id:'receipt',kind:'receipt',message_id:'message',status:'delivered',text:'已送达 · 第 2 轮按此执行',created_at:at},
+      {id:'restart',kind:'receipt',message_id:'interrupt',status:'delivered',
+       text:'已打断 · 第 2 轮已按此重新开始',created_at:at},
     ]:[],cursor:moreMessages?'7':'6',has_more:false},
     [taskPath+'/conversation?limit=100&cursor=7']:{items:reviewItem?[reviewItem]:[],
       cursor:reviewItem?'8':'7',has_more:false},
@@ -645,17 +648,48 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert(scrollArea.children[0].children.includes(card));
     assert(!walk(card).find(node=>node.tagName==='DETAILS').open);
     const composer=chat.find(node=>node.className==='conversation-composer');
-    const [input,mode,send]=chat.find(node=>node.className==='conversation-compose-row').children;
+    const [input]=chat.find(node=>node.className==='conversation-compose-row').children;
+    const later=chat.find(node=>node.textContent==='排队发送');
+    const now=chat.find(node=>node.textContent==='打断并发送');
     assert.equal(input.rows,1);
     assert.equal(input.getAttribute('aria-label'),'插话');
-    assert.equal(mode.value,'queue');
-    assert.deepEqual(mode.children.map(node=>node.textContent),['排队','打断']);
-    assert.equal(send.textContent,'发送');
+    assert.equal(later.value,'queue');
+    assert.equal(now.value,'interrupt');
+    assert(now.disabled);
+    assert(chat.some(node=>node.title?.includes('当前没有正在执行的轮次')));
+    assert(chat.some(node=>node.textContent.includes('Ctrl/Cmd+Enter 打断并发送')));
     input.value='查看结果';
-    mode.value='interrupt';
-    await composer.onsubmit({preventDefault(){}});
-    assert.deepEqual(postedMessages,[{text:'查看结果',mode:'interrupt'}]);
+    const finishSubmit=()=>({key:'Enter',preventDefault(){}});
+    let submitting;
+    composer.requestSubmit=submitter=>{submitting=composer.onsubmit({submitter,preventDefault(){}})};
+    input.onkeydown({...finishSubmit(),ctrlKey:true});
+    assert(!submitting);
+    input.onkeydown(finishSubmit());
+    await submitting;
+    assert.deepEqual(postedMessages,[{text:'查看结果',mode:'queue'}]);
     assert.equal(input.value,'');
+    const demoMount=el('div');
+    const demo=portalConversation.create(demoMount,{
+      path:'/tasks/'+task.id,type:'task',canWrite:()=>true,active:()=>true,focus(){},
+    });
+    const demoNodes=walk(demoMount);
+    const guidanceChip=demoNodes.find(node=>node.textContent==='agent 正在按你的指引执行');
+    const demoForm=demoNodes.find(node=>node.tagName==='FORM');
+    const demoInput=demoNodes.find(node=>node.tagName==='TEXTAREA');
+    const demoInterrupt=demoNodes.find(node=>node.textContent==='打断并发送');
+    const started={seq:1,type:'agent.turn_started',payload:{turn:1,interjectible:true,following_guidance:true}};
+    demo.updateTask({state:'RUNNING'},[started]);
+    assert(!demoInterrupt.disabled && !guidanceChip.hidden);
+    demoForm.requestSubmit=submitter=>{submitting=demoForm.onsubmit({submitter,preventDefault(){}})};
+    demoInput.value='改为检查空输入';
+    demoInput.onkeydown({...finishSubmit(),metaKey:true,isComposing:true});
+    assert.equal(postedMessages.length,1);
+    demoInput.onkeydown({...finishSubmit(),metaKey:true});
+    await submitting;
+    assert.deepEqual(postedMessages.at(-1),{text:'改为检查空输入',mode:'interrupt'});
+    demo.updateTask({state:'VERIFYING'},[started,{seq:2,type:'agent.turn_completed',payload:{turn:1}}]);
+    assert(demoInterrupt.disabled && guidanceChip.hidden);
+    demo.destroy();
     if(resultApproval){
       assert(walk(card).some(node=>node.textContent==='验证结果 · 通过'));
       assert(walk(card).some(node=>node.textContent==='app.py'));
@@ -671,8 +705,8 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     }
     assert(chat.some(node=>node.textContent==='执行了 1 个命令，修改了 1 个文件'));
     assert(chat.some(node=>node.textContent==='Done'));
-    assert.equal(chat.filter(node=>node.className==='conversation-receipt').length,1);
-    assert.equal(chat.find(node=>node.className==='conversation-receipt').children[0].textContent,'已送达');
+    const receipts=chat.filter(node=>node.className==='conversation-receipt');
+    assert.deepEqual(receipts.map(node=>node.textContent),['排队中 · 当前轮结束后送达','正在打断…']);
     assert.equal($('task-review-chat').href,approvalHref);
     $('task-review-chat').onclick({preventDefault(){}});
     assert(card.focused);
@@ -682,6 +716,9 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     moreMessages=true;
     await refresh();
     await nextTick();
+    assert.deepEqual(receipts.map(node=>node.children[0].textContent),[
+      '已送达 · 第 2 轮按此执行','已打断 · 第 2 轮已按此重新开始',
+    ]);
     assert.equal(feed.scrollTop,100);
     assert.equal(jump.hidden,false);
     jump.onclick();
@@ -1056,13 +1093,13 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
                 row['status'] = 'paused'
             elif mode == 'resume':
                 row['status'] = 'running'
-            if mode == 'guidance':
+            if mode in ('next', 'now'):
                 journal.extend([
-                    {'id': 'hint', 'kind': 'message', 'text': body['text'], 'actor': 'operator', 'mode': 'guidance',
-                     'message_id': 'hint',
+                    {'id': mode, 'kind': 'message', 'text': body['text'], 'actor': 'operator', 'mode': mode,
+                     'message_id': mode,
                      'created_at': at, 'dag_node_id': root},
-                    {'id': 'applied', 'kind': 'receipt', 'text': '已应用于第 1 代提议',
-                     'created_at': at, 'dag_node_id': generation, 'message_id': 'hint', 'status': 'applied'},
+                    {'id': mode + ':applied', 'kind': 'receipt', 'text': '已应用于第 1 代提议',
+                     'created_at': at, 'dag_node_id': generation, 'message_id': mode, 'status': 'applied'},
                 ])
             route.fulfill(status=202, json={})
         elif url.path == path + '/conversation':
@@ -1133,20 +1170,24 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         chat.get_by_role('link', name='定位节点').click()
         assert panel.locator(f'[data-node="{run}"]').get_attribute('aria-pressed') == 'true'
         assert panel.locator(f'[data-node="{run}"]').get_attribute('aria-expanded') == 'false'
-        prompt = chat.get_by_role('textbox', name='给下一代提议的指引')
+        prompt = chat.get_by_role('textbox', name='给提议的指引')
         prompt.fill('留意边界条件')
         prompt.press('Enter')
         chat.get_by_text('已应用于第 1 代提议', exact=True).wait_for()
         assert chat.locator('.conversation-user').get_by_text('留意边界条件').is_visible()
-        assert messages[-1] == {'text': '留意边界条件', 'mode': 'guidance'}
+        assert messages[-1] == {'text': '留意边界条件', 'mode': 'next'}
         assert 1 in cursors
         chat.locator('.conversation-user').get_by_role('link', name='已应用于第 1 代提议', exact=True).click()
         assert panel.locator(f'[data-node="{generation}"]').get_attribute('aria-pressed') == 'true'
+        prompt.fill('立刻检查空输入')
+        chat.get_by_role('button', name='立即生效').click()
+        chat.locator('.conversation-user').get_by_text('立刻检查空输入').wait_for()
+        assert messages[-1] == {'text': '立刻检查空输入', 'mode': 'now'}
         chat.get_by_text('运行控制', exact=True).click()
         chat.get_by_role('button', name='暂停', exact=True).click()
         chat.get_by_role('button', name='恢复', exact=True).wait_for(timeout=6000)
         chat.get_by_role('button', name='恢复', exact=True).click()
-        assert [msg['mode'] for msg in messages] == ['guidance', 'pause', 'resume']
+        assert [msg['mode'] for msg in messages] == ['next', 'now', 'pause', 'resume']
         page.set_viewport_size({'width': 820, 'height': 850})
         assert chat.bounding_box()['y'] >= panel.bounding_box()['y'] + panel.bounding_box()['height']
         row['status'] = 'stopped'
@@ -1202,16 +1243,17 @@ def test_portal_browser_task_chat_layout():
         approvals, feed = chat.locator(".conversation-approvals"), chat.locator(".conversation-feed")
         composer = chat.locator(".conversation-composer")
         card = chat.locator("#task-approval")
-        mode = composer.get_by_role("combobox", name="送达方式")
         text = composer.get_by_role("textbox", name="插话")
-        send = composer.get_by_role("button", name="发送")
+        queue = composer.get_by_role("button", name="排队发送")
+        interrupt = composer.get_by_role("button", name="打断并发送")
         feed.get_by_text("检查第 29 个边界条件").wait_for(state="attached")
         page.get_by_text("(1)", exact=True).wait_for()
         assert chat.bounding_box()["x"] > dag.bounding_box()["x"]
         assert chat.evaluate("(node) => getComputedStyle(node).position") == "sticky"
         assert chat.bounding_box()["height"] >= 800
         assert feed.bounding_box()["height"] > 550
-        assert composer.bounding_box()["height"] <= 50
+        assert composer.bounding_box()["height"] <= 100
+        assert queue.is_enabled() and interrupt.is_disabled()
         assert feed.evaluate("(node) => node.scrollHeight > node.clientHeight")
 
         pinned_at = approvals.bounding_box()["y"]
@@ -1231,11 +1273,11 @@ def test_portal_browser_task_chat_layout():
 
         page.set_viewport_size({"width": 390, "height": 844})
         assert chat.bounding_box()["y"] >= dag.bounding_box()["y"] + dag.bounding_box()["height"]
-        row = chat.locator(".conversation-compose-row").bounding_box()
-        boxes = [control.bounding_box() for control in (text, mode, send)]
+        row = chat.locator(".conversation-compose-actions").bounding_box()
+        boxes = [control.bounding_box() for control in (queue, interrupt)]
         assert all(row["x"] <= box["x"] and box["x"] + box["width"] <= 390 for box in boxes)
         assert max(box["y"] + box["height"] for box in boxes) - min(box["y"] + box["height"] for box in boxes) < 1
-        single_row = boxes[0]["height"]
+        single_row = text.bounding_box()["height"]
         text.fill("一行\n二行\n三行")
         three_rows = text.bounding_box()["height"]
         text.fill("\n".join(["一行"] * 6))

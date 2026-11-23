@@ -10,6 +10,7 @@ from temporalio.client import WorkflowHistory
 from temporalio.converter import DataConverter
 from temporalio.worker import Replayer
 
+from sca.eval.errors import GUIDANCE_ABORT
 from sca.eval.workflow import EvalRunWorkflow
 from sca.evolve import workflow as module
 from sca.evolve.models import EvolutionConfig
@@ -19,6 +20,7 @@ from sca.evolve.workflow import EvolutionWorkflow
 
 @pytest.mark.parametrize('values', [
     {'text': '  '}, {'text': 'test\x00'}, {'mode': 'pause', 'remaining_budget_usd': 2},
+    {'mode': 'next'}, {'mode': 'now'},
     {'mode': 'budget'}, {'mode': 'budget', 'remaining_budget_usd': -1},
     {'mode': 'budget', 'remaining_budget_usd': float('inf')},
 ])
@@ -76,6 +78,8 @@ class ControllerHarness:
                         'results': [{'case_id': 'case', 'repeat': 0, 'acceptance_passed': False,
                                      'cost_usd': .05, 'turns': 1}]}
             case 'evolve_propose':
+                if item := request.get('guidance_receipt'):
+                    self.journal.append(item)
                 return self.proposals
             case 'evolve_record' | 'evolve_status':
                 return None
@@ -160,6 +164,86 @@ async def test_pause_resume_skip_and_stop_at_generation_boundary(monkeypatch):
     }
     assert [request['evolution_status']['status'] for name, request in harness.requests
             if name == 'evolve_conversation' and 'evolution_status' in request] == ['paused', 'running']
+
+
+@pytest.mark.parametrize('budget,expected', [(.16, 'budget_exhausted'), (2., 'completed')])
+async def test_now_replaces_the_same_generation_and_counts_interrupted_spend(monkeypatch, budget, expected):
+    harness = ControllerHarness(monkeypatch, generations=1, candidates=2, budget_usd=budget)
+    first = [{'hypothesis': f'Old candidate {i}', 'overlay': {'tool_guidance': str(i)},
+              'static_check': {'valid': True}} for i in range(2)]
+    proposals = []
+
+    def steer(name, request):
+        if name == 'evolve_propose':
+            proposals.append(request)
+            harness.proposals = first if len(proposals) == 1 else [
+                {'hypothesis': 'Replacement', 'overlay': {'tool_guidance': 'guided'},
+                 'static_check': {'valid': budget == 2.}}]
+
+    harness.on_activity = steer
+    harness.on_child = lambda child: child.set_result('completed') if len(harness.children) > 1 else None
+    harness.on_wait = lambda: harness.send('immediate', 'now', text='Use short inputs', seq=1)
+    # The baseline and the interrupted child each used .05. Leave less than the next case budget.
+    if expected == 'budget_exhausted':
+        harness.config['case_budget'] = .07
+    assert await harness.run() == expected
+    assert harness.children[0].signals == ['abort_for_guidance']
+    assert len(harness.children) == (1 if expected == 'budget_exhausted' else 2)
+    decisions = {row['candidate']['hypothesis']: row['candidate'] for name, row in harness.requests
+                 if name == 'evolve_record'}
+    assert all(decisions[candidate['hypothesis']]['reason'] == GUIDANCE_ABORT for candidate in first)
+    assert {candidate['generation'] for candidate in decisions.values()} == {1}
+    receipts = [item for item in harness.journal if item['kind'] == 'receipt']
+    assert [item['message_id'] for item in receipts] == ['immediate']
+    if expected == 'completed':
+        assert proposals[1]['operator_guidance'] == 'Use short inputs'
+        assert proposals[1]['guidance_receipt']['text'] == '已应用于第 1 代提议'
+        assert list(harness.runs.values())[2]['remaining'] == 1.9
+        assert receipts[0]['status'] == 'applied'
+    else:
+        assert len(proposals) == 1
+        assert receipts[0]['status'] == 'rejected'
+
+
+async def test_guidance_abort_cancels_active_eval_cases_and_collects_spent_budget(monkeypatch):
+    evaluation = EvalRunWorkflow()
+    cancelled, submitted, collected = [], [], []
+
+    async def execute(name, request, **options):
+        if name == 'eval_prepare':
+            return {'cases': [{'id': case} for case in ('a', 'b', 'not_started')]}
+        if name == 'eval_submit':
+            submitted.append(request['case']['id'])
+            return request['case']['id']
+        assert name == 'eval_collect'
+        if not request.get('guidance_abort'):
+            return None
+        assert request['task_id'] in cancelled
+        collected.append(request['task_id'])
+        return {'cost_usd': .025, 'errored': True}
+
+    async def cancel(name, task_ids, **options):
+        assert name == 'eval_cancel_cases'
+        cancelled.extend(task_ids)
+
+    def start(name, request, **options):
+        return asyncio.create_task(execute(name, request, **options))
+
+    async def wait(predicate, **kwargs):
+        evaluation.abort_for_guidance()
+        assert predicate()
+
+    monkeypatch.setattr(module.workflow, 'execute_activity', execute)
+    monkeypatch.setattr(module.workflow, 'start_activity', start)
+    monkeypatch.setattr(module.workflow, 'execute_local_activity', cancel)
+    monkeypatch.setattr(module.workflow, 'wait_condition', wait)
+    monkeypatch.setattr(module.workflow, 'patched', lambda _: True)
+    status, reason = await evaluation.evaluate({
+        'repeat': 1, 'concurrency': 2, 'case_budget': .1, 'budget': 2,
+        'guidance_abortable': True, 'evolution_step': {'role': 'comparison'},
+    }, {})
+    assert (status, reason) == ('cancelled', GUIDANCE_ABORT)
+    assert cancelled == submitted == collected == ['a', 'b']
 
 
 @pytest.mark.parametrize('candidate_run', [True, False])

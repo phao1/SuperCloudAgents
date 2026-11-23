@@ -198,13 +198,43 @@ async def test_task_conversation_projects_agent_output_and_links_to_the_graph(ap
     assert operations['files'] == [{'path': 'a.py'}]
     rest = (await client.get(path, params={'cursor': first['cursor']})).json()
     texts = [item['text'] for item in rest['items']]
-    assert '验证失败' in texts and '进入人工审核' in texts and '插话已应用于第 2 轮' in texts
+    assert '验证失败' in texts and '进入人工审核' in texts and '第 2 轮已完成' in texts
+    assert '已送达 · 第 2 轮按此执行' in texts
     assert 'Ask [redacted]' in texts
     assert all('raw' not in text for text in texts)
     ids = {node.id for node in build_task_dag(task, events, []).nodes}
     assert {item['dag_node_id'] for item in [*first['items'], *rest['items']]} <= ids
     assert (await client.get(path, headers=auth('restricted'))).status_code == 403
     assert (await client.get(f'/v1/tasks/{uuid4()}/conversation')).status_code == 404
+
+
+async def test_interrupt_receipt_is_bound_to_the_replacement_turn(api):
+    client, _, _, _, task, events = api
+    events.extend(Event(task_id=task.id, seq=seq, type=kind, payload=payload, created_at=NOW)
+                  for seq, (kind, payload) in enumerate([
+        ('user.message', {'message_id': 'first', 'text': 'Fix the bounds', 'mode': 'interrupt'}),
+        ('agent.turn_interrupted', {'turn': 1}),
+        ('agent.turn_started', {'turn': 2}),
+        ('user.message.delivered', {'message_id': 'first', 'turn': 2, 'interrupted': True}),
+    ], start=1))
+    path = f'/v1/tasks/{task.id}/conversation'
+    page = (await client.get(path, params={'cursor': 2})).json()
+    assert [(item['kind'], item['text']) for item in page['items']] == [
+        ('agent.turn_started', '第 2 轮开始'), ('receipt', '已打断 · 第 2 轮已按此重新开始'),
+    ]
+    assert page['items'][-1]['status'] == 'delivered'
+
+
+@pytest.mark.parametrize('mode', ['next', 'now'])
+async def test_evolution_guidance_mode_roundtrips_in_api(api, mode):
+    client, row, _, handle, _, _ = api
+    body = {'text': '检查空输入', 'mode': mode}
+    path = f'/v1/evolutions/{row["id"]}'
+    sent = await client.post(path + '/messages', json=body, headers=auth('member'))
+    assert sent.status_code == 202 and sent.json()['mode'] == mode
+    assert handle.signal.call_args.args[1]['mode'] == mode
+    page = (await client.get(path + '/conversation', headers=auth('member'))).json()
+    assert [item['mode'] for item in page['items'] if item['kind'] == 'message'] == [mode]
 
 
 async def test_evolution_conversation_projects_proposal_and_eval_from_stored_evidence(api):
