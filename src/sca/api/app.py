@@ -254,6 +254,11 @@ def create_app(
     from sca.api.model_providers import router as model_providers_router
 
     app.include_router(model_providers_router)
+
+    # Portal approvals inbox
+    from sca.api.approvals import router as approvals_router
+
+    app.include_router(approvals_router)
     return app
 
 

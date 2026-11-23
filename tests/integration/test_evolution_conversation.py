@@ -89,12 +89,66 @@ async def test_task_conversation_cursor_has_the_same_node_ids_after_archive(post
     if archived:
         await archive_task(owner, objects, task.id)
     user = Principal(tenant_id=tenant, subject='reader', role='viewer')
-    first = await task_page(owner, task.id, user, 0, 3)
+    first = await task_page(owner, task.id, user, 0, 5)
     second = await task_page(owner, task.id, user, int(first.cursor), 3)
     assert first.has_more and not second.has_more
     items = [*first.items, *second.items]
     assert [item.kind for item in items] == [
-        'task.created', 'agent.turn_started', 'agent.turn_completed', 'task.state_changed',
+        'task.created', 'task.state_changed', 'task.state_changed', 'agent.turn_started', 'operations',
+        'agent.turn_completed', 'task.state_changed',
     ]
-    assert items[1].dag_node_id == items[2].dag_node_id and '工具调用 1 次' in items[2].text
-    assert 'fixture log' not in second.model_dump_json()
+    assert items[3].dag_node_id == items[4].dag_node_id == items[5].dag_node_id
+    assert items[4].activity.operations[0].name == 'read'
+    assert 'fixture log' not in first.model_dump_json()
+
+
+async def test_approvals_inbox_reads_only_pending_rows_for_the_token_tenant(postgres, store, api_store, monkeypatch,
+                                                                    tmp_path):
+    settings = Settings(_env_file=None, data_dir=tmp_path)
+    monkeypatch.setattr('sca.api.app.get_settings', lambda: settings)
+
+    async def fixtures(tenant):
+        scoped = store.for_tenant(tenant)
+        plan, _ = await scoped.create_task(
+            tenant_id=tenant, kind='coding', spec={'instruction': f'Plan for {tenant}'}, idempotency_key=None,
+        )
+        await scoped.set_state(plan.id, TaskState.PROVISIONING)
+        await scoped.set_state(plan.id, TaskState.RUNNING)
+        await scoped.set_state(plan.id, TaskState.VERIFYING)
+        await scoped.append_event(plan.id, 'review.requested', {'plan': {'subtasks': []}})
+        await scoped.set_state(plan.id, TaskState.AWAITING_REVIEW)
+        await scoped.create_task(tenant_id=tenant, kind='coding', spec={}, idempotency_key=None)
+        run, candidate, harvest = uuid4(), uuid4(), uuid4()
+        await scoped.create_evolution({'id': run, 'status': 'awaiting_approval', 'config': {}, 'created_by': 'fixture'})
+        proposal = {'id': candidate, 'evolution_id': run, 'generation': 1, 'overlay': {}, 'overlay_sha256': 'fixture',
+                    'hypothesis': f'Candidate for {tenant}', 'diagnosis': {}, 'static_check': {}, 'decision': 'pending',
+                    'reason': 'awaiting approval'}
+        await scoped.save_evolution_candidate(proposal)
+        await scoped.save_evolution_candidate({**proposal, 'id': uuid4(), 'reason': None})
+        await scoped.create_harvest_candidate({
+            'id': harvest, 'task_id': plan.id, 'suite': 'fixture', 'split': 'dev', 'case_id': 'regression',
+            'base_sha': 'fixture', 'notes': '', 'created_by': 'fixture',
+        })
+        await scoped.create_harvest_candidate({
+            'id': uuid4(), 'task_id': plan.id, 'suite': 'fixture', 'split': 'dev', 'case_id': 'already-published',
+            'base_sha': 'fixture', 'notes': '', 'created_by': 'fixture', 'status': 'approved',
+        })
+        return plan.id, candidate, harvest
+
+    plan, candidate, harvest = await fixtures('eval')
+    other_plan, other_candidate, other_harvest = await fixtures('other')
+    app = create_app(store=api_store, authenticator=StaticTokenAuthenticator({'eval': 'eval', 'other': 'other'}),
+                     orchestrator=SimpleNamespace())
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+        for tenant, expected in [
+            ('eval', {'task_plan': plan, 'evolution_candidate': candidate, 'harvest': harvest}),
+            ('other', {'task_plan': other_plan, 'harvest': other_harvest}),
+        ]:
+            response = await client.get('/v1/approvals?tenant_id=other',
+                                        headers={'Authorization': f'Bearer {tenant}'})
+            assert response.status_code == 200
+            assert response.json()['count'] == len(expected)
+            assert {row['kind']: row['id'] for row in response.json()['items']} == {
+                kind: str(id_) for kind, id_ in expected.items()
+            }
+            assert str(other_candidate) not in response.text

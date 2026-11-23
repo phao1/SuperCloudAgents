@@ -41,15 +41,17 @@ def test_memory_endpoints_and_api_statuses():
 
 def test_review_accepts_only_selected_proposals_on_approval():
     source = PORTAL.read_text()
+    tasks = PORTAL.with_name('portal-tasks.js').read_text()
     assert "task?.state==='AWAITING_REVIEW'?(task.result?.memory_proposals||[]):[]" in source
     assert "rows.filter(row=>ids.includes(row.id))" in source
     assert "check.type='checkbox'" in source
     assert 'choices.add(memory.id)' in source and 'choices.delete(memory.id)' in source
     assert 'target.hidden=!ids.length' in source
-    assert "if(decision==='approve')body.accept_memories=checkedMemories(task.id)" in source
+    assert "if (decision === 'approve') body.accept_memories = checkedMemories(task.id)" in tasks
     assert "accept_memories:checkedMemories(flow.fixTask)" in source
     assert "await renderMemoryProposals(task,'loop-memory-proposals')" in source
-    assert "await api('/tasks/'+enc(task.id)+'/review',body)" in source
+    assert "portalTasks.submitReview(task,decision" in source
+    assert "await api(taskPath(task) + '/review', body)" in tasks
 
 
 def test_memory_and_report_content_uses_text_nodes():

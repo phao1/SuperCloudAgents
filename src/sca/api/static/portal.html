@@ -467,6 +467,8 @@ body[data-trace-expanded] { overflow: hidden; }
       <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
       <a href="#/submit" data-access="member" hidden>提交任务</a>
       <a href="#/tasks" data-access="history" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>所有线程</a>
+      <!-- Approvals inbox -->
+      <a href="#/approvals" data-access="tenant" hidden><span>待审批<span id="approvals-count"></span></span></a>
       <a href="#/analysis" data-access="history" hidden>数据分析</a>
       <a href="#/evals" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
       <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
@@ -787,7 +789,9 @@ body[data-trace-expanded] { overflow: hidden; }
           <h2>任务证据</h2>
           <div class="stack"><h3>过程检查</h3><div id="task-trajectory"></div></div>
           <div class="stack"><h3>证据规则</h3><div id="task-diagnostics"></div></div>
-          <div id="task-review" class="stack" hidden><h3>任务审核</h3><div id="task-memory-proposals" hidden></div>
+          <div id="task-review" class="stack" tabindex="-1" hidden><h3>任务审核</h3>
+            <a id="task-review-chat" href="#/tasks">在对话中查看审核</a>
+            <div id="task-memory-proposals" hidden></div>
             <label>修改意见<textarea id="task-review-feedback"></textarea></label>
             <div id="task-review-actions"></div>
           </div>
@@ -801,7 +805,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <div id="task-missing-artifacts-panel" class="stack" hidden>
             <h3>缺失的文件</h3><ul id="task-missing-artifacts"></ul>
           </div>
-          <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff"></div></div>
+          <div class="stack"><h3>最终补丁</h3><div id="patch" class="diff" tabindex="-1"></div></div>
         </div>
       </div>
     </section>
@@ -833,6 +837,13 @@ body[data-trace-expanded] { overflow: hidden; }
         <article id="analysis-rendered-detail" class="markdown"></article>
       </div>
       <div class="panel"><h2>最近的分析任务</h2><div id="analysis-recent" class="scroll" tabindex="0" aria-label="最近的分析任务"></div></div>
+    </section>
+    <!-- Approvals inbox -->
+    <section id="approvals-page" class="page" hidden>
+      <div class="panel">
+        <p id="approvals-status" class="status-text conversation-status" role="status"></p>
+        <div id="approvals-list"></div>
+      </div>
     </section>
     <section id="evolutions-page" class="page" hidden>
       <nav id="evolution-nav" class="portal-tabs" aria-label="自动演进功能"></nav>
@@ -1824,10 +1835,10 @@ async function updateTask(){
     $('task-summary').textContent=json({
       规格:t.spec,结果:t.result,用量:t.usage,原因:t.state_reason
     });
+    portalTasks.render(currentTask,taskEvents);
     await renderTaskReview(t);
     if(selectedTask!==id||portalIdentity!==identity)return;
     renderTaskObservability(currentTask);
-    portalTasks.render(currentTask,taskEvents);
     if(renderedEventCursor!==eventCursor){
       renderTimeline();
       renderedEventCursor=eventCursor;
@@ -1858,9 +1869,13 @@ async function updateTask(){
     const patchArtifact=artifacts.find(a=>a.name==='changes.patch');
     if(patchArtifact?.missing_reason){
       $('patch').textContent=patchArtifact.missing_reason;
+      portalTasks.reviewPatch(t,'',patchArtifact.missing_reason);
     }else if(patchArtifact){
       const patch=await(await api(path+'/artifacts/changes.patch')).text();
-      if(selectedTask===id&&portalIdentity===identity){diff($('patch'),patch);renderTaskDiagnostics(patch)}
+      if(selectedTask===id&&portalIdentity===identity){
+        diff($('patch'),patch);renderTaskDiagnostics(patch);
+        portalTasks.reviewPatch(t,patch);
+      }
     }
   } finally{
     taskLoading=false;
@@ -2349,41 +2364,59 @@ function renderSwimlane(task){
   if(timing)note.textContent='Agent 活跃时间 · 模型 '+timing.model.toFixed(1)+'% · 工具 '
     +timing.tools.toFixed(1)+'% · 其它 '+timing.other.toFixed(1)+'%';
 }
+// Task review in the conversation and evidence panel
 const memoryChoices=new Map();
 function memoryCategoryLabel(category){return ({convention:'约定',pitfall:'陷阱',command:'命令',preference:'偏好'})[category]||category}
 function checkedMemories(taskId){return [...(memoryChoices.get(taskId)||new Set())]}
 async function renderMemoryProposals(task,targetId){
   const identity=portalIdentity;
-  const target=$(targetId),ids=task?.state==='AWAITING_REVIEW'?(task.result?.memory_proposals||[]):[];
-  target.hidden=!ids.length;
-  if(!ids.length){target.replaceChildren();return}
+  const inline=targetId==='task-memory-proposals'?portalTasks.reviewMemoryTarget(task.id):null;
+  const targets=[$(targetId),inline].filter(Boolean);
+  const ids=task?.state==='AWAITING_REVIEW'?(task.result?.memory_proposals||[]):[];
+  for(const target of targets)target.hidden=!ids.length;
+  if(!ids.length){
+    for(const target of targets){target.replaceChildren();delete target.dataset.proposalsKey}
+    return;
+  }
   const rows=await data('/memories?status=proposed');
   if(identity!==portalIdentity)return;
-  if(targetId==='task-memory-proposals'&&selectedTask!==task.id)return;
+  if(targetId==='task-memory-proposals'&&(selectedTask!==task.id
+    ||inline!==portalTasks.reviewMemoryTarget(task.id)))return;
   const choices=memoryChoices.get(task.id)||new Set();
   memoryChoices.set(task.id,choices);
   for(const id of choices)if(!ids.includes(id))choices.delete(id);
-  target.replaceChildren(el('h3','选择随审核启用的共享记忆'));
-  for(const memory of rows.filter(row=>ids.includes(row.id))){
-    const label=el('label',undefined,'memory-proposal'),check=el('input');check.type='checkbox';check.checked=choices.has(memory.id);
-    check.onchange=()=>{if(check.checked)choices.add(memory.id);else choices.delete(memory.id)};
-    label.append(check,el('span',memory.text),el('small',memoryCategoryLabel(memory.category)+' · '+memory.scope));target.append(label);
+  const proposals=rows.filter(row=>ids.includes(row.id));
+  const key=JSON.stringify([task.id,proposals.map(row=>[row.id,row.text,row.category,row.scope])]);
+  for(const target of targets){
+    target.hidden=!proposals.length;
+    if(target.dataset.proposalsKey===key)continue;
+    target.dataset.proposalsKey=key;
+    target.replaceChildren(el('h4','选择随审核启用的共享记忆'));
+    for(const memory of proposals){
+      const label=el('label',undefined,'memory-proposal'),check=el('input');
+      check.type='checkbox';check.value=memory.id;check.checked=choices.has(memory.id);
+      check.onchange=()=>{
+        if(check.checked)choices.add(memory.id);else choices.delete(memory.id);
+        for(const node of targets)for(const peer of node.querySelectorAll('input')){
+          if(peer.value===memory.id)peer.checked=check.checked;
+        }
+      };
+      label.append(check,el('span',memory.text),el('small',memoryCategoryLabel(memory.category)+' · '+memory.scope));
+      target.append(label);
+    }
   }
 }
 async function renderTaskReview(task){
   const awaitingChoice=task.spec.best_of?.select==='human'&&task.result.best_of_chosen==null;
   $('task-review').hidden=task.state!=='AWAITING_REVIEW'||awaitingChoice||!portalUI.can('member');
   if($('task-review').hidden)return;
+  const link=$('task-review-chat');
+  link.href='#/tasks/'+enc(task.id)+'/approval';
+  link.onclick=event=>{event.preventDefault();portalTasks.focusApproval()};
   await renderMemoryProposals(task,'task-memory-proposals');
   if(selectedTask!==task.id)return;
-  $('task-review-actions').replaceChildren(...[['approve','批准'],['request_changes','要求修改'],['reject','拒绝']].map(([decision,label])=>button(label,async()=>{
-    const feedback=$('task-review-feedback').value.trim();
-    if(decision==='request_changes'&&!feedback)throw Error('请填写修改意见。');
-    const body={decision,feedback:feedback||null};
-    if(decision==='approve')body.accept_memories=checkedMemories(task.id);
-    await api('/tasks/'+enc(task.id)+'/review',body);
-    await updateTask();
-  })));
+  $('task-review-actions').replaceChildren(...[['approve','批准'],['request_changes','要求修改'],['reject','拒绝']]
+    .map(([decision,label])=>button(label,()=>portalTasks.submitReview(task,decision,$('task-review-feedback').value.trim()))));
 }
 async function loadMemories(){
   const identity=portalIdentity;
@@ -2452,6 +2485,7 @@ const pages={
   runs:['run-detail','运行详情','从结果矩阵打开任务证据。'],
   compare:['compare-page','版本对比','查看通过率、耗时和费用的变化。'],
   tasks:['trace','任务进度','沿架构图查看任务经过的模块和事件。'],
+  approvals:['approvals-page','待审批','查看当前工作空间等待人工处理的事项。'],
   loop:['loop','自演进闭环','追踪从基线、候选到回归的进度。'],
   evolutions:['evolutions-page','自动演进','查看演进执行图、开发集与留出集证据。'],
   versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
@@ -2462,7 +2496,7 @@ const pages={
 };
 const pageAccess={
   projects:'tenant',
-  overview:'public',submit:'member',tasks:'history',analysis:'history',versions:'tenant',memories:'tenant',
+  overview:'public',submit:'member',tasks:'history',approvals:'tenant',analysis:'history',versions:'tenant',memories:'tenant',
   evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'evolution-history',integrations:'admin',
   tools:'tenant',team:'admin',platform:'platform',
 };
@@ -2537,6 +2571,9 @@ async function loadTaskRoute(parts){
     &&!$('task-details').hidden&&$('evidence').hidden){
     if(parts[1]==='events')openEvent(Number(parts[2]));
     if(parts[1]==='quality')openTaskQuality();
+    if(parts[1]==='approval')portalTasks.focusApproval();
+    if(parts[1]==='review')portalTasks.focusReview();
+    if(parts[1]==='patch')portalApprovals.focus($('patch'));
   }
 }
 async function loadEvalPage(page,parts,polling){
@@ -2576,6 +2613,8 @@ async function loadEvalPage(page,parts,polling){
 async function loadPage(page,parts,polling=false){
   const hash=location.hash,identity=portalIdentity;
   const current=()=>hash===location.hash&&identity===portalIdentity;
+  if(page==='approvals')return portalApprovals.refresh(!polling);
+  void portalApprovals.refresh();
   if(page==='projects')return polling?portalProjects.poll(parts):portalProjects.load(parts);
   if(page==='tasks'){
     return Promise.all([
@@ -2862,6 +2901,7 @@ function resetPortalSession(){
   portalSettings.reset();
   portalProjects.reset();
   portalModels.reset();
+  portalApprovals.reset();
   portalIdentity=portalConfig=null;
   guestChecked=false;
   canRescore=false;

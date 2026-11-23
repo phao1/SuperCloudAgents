@@ -3193,7 +3193,8 @@ class Store:
             page = [Event.model_validate(dict(event)) for event in rows]
             if not page:
                 return task, [], []
-            compact = c.payload.op('-')(array(['raw', 'text', 'output_tail', 'final_message', 'prompt']))
+            # Chat output uses message text to suppress duplicate replies across cursor pages.
+            compact = c.payload.op('-')(array(['raw', 'output_tail', 'final_message', 'prompt']))
             snapshot = query.with_only_columns(c.task_id, c.seq, c.type, compact.label('payload'), c.created_at)
             rows = (await session.execute(snapshot.where(c.seq <= page[-1].seq, c.type.in_(context)))).mappings()
             return task, page, [Event.model_validate(dict(event)) for event in rows]
@@ -3237,3 +3238,44 @@ class Store:
                     payload={"evolution_id": str(evolution_id), "completion_id": str(completion_id),
                              "cost_usd": cost_usd},
                 ))
+
+    # Portal approvals inbox
+
+    async def pending_approvals(self, *, include_evolutions: bool, include_harvest: bool) -> list[dict]:
+        from sca.db.schema import evolution_candidates, evolutions, harvest_candidates
+
+        tenant = self._feature_tenant()
+        t, e = tasks.c, events.c
+        plan_review = select(e.payload.has_key('plan')).where(
+            e.task_id == t.id, e.tenant_id == tenant, e.type == 'review.requested',
+            e.payload['subtask'].astext.is_(None), e.payload['best_of_candidate'].astext.is_(None),
+        ).order_by(e.seq.desc()).limit(1).scalar_subquery()
+        task_query = select(
+            t.id, t.updated_at.label('created_at'), plan_review.label('plan_review'),
+            t.spec['instruction'].astext.label('title'),
+            t.spec['labels']['kind'].astext.label('fix_kind'),
+            t.spec['best_of']['select'].astext.label('selection'),
+            t.result['best_of_chosen'].astext.label('chosen'),
+        ).where(t.tenant_id == tenant, t.state == TaskState.AWAITING_REVIEW)
+        run, candidate = evolutions.c, evolution_candidates.c
+        evolution_query = select(
+            candidate.id, run.id.label('evolution_id'), run.updated_at.label('created_at'),
+            candidate.hypothesis.label('title'),
+        ).select_from(evolution_candidates.join(evolutions, run.id == candidate.evolution_id)).where(
+            run.tenant_id == tenant, candidate.tenant_id == tenant, run.status == 'awaiting_approval',
+            candidate.decision == 'pending', candidate.reason == 'awaiting approval',
+        )
+        harvest = harvest_candidates.c
+        harvest_query = select(
+            harvest.id, harvest.created_at, harvest.case_id.label('title'),
+        ).where(harvest.tenant_id == tenant, harvest.status == 'pending')
+
+        async with self._transaction() as session:
+            rows = [{'source': 'task', **row} for row in (await session.execute(task_query)).mappings()]
+            if include_evolutions:
+                rows.extend({'source': 'evolution', **row}
+                            for row in (await session.execute(evolution_query)).mappings())
+            if include_harvest:
+                rows.extend({'source': 'harvest', **row}
+                            for row in (await session.execute(harvest_query)).mappings())
+        return rows
