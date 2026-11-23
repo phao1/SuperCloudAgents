@@ -3,6 +3,7 @@ import io
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
 import tarfile
@@ -26,6 +27,38 @@ from sca.gateway.model_providers import ProviderInput, ProviderRegistry
 from sca.orchestration.worker import make_agent_backend, make_gateway, make_sandbox_provider
 from sca.sandbox.local import LocalSandboxProvider
 from scripts import portal_source, source_smoke
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows uses exclusive address binding")
+def test_source_port_probe_allows_restart_after_connection_closes():
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        port = listener.getsockname()[1]
+        with socket.create_connection(("127.0.0.1", port), timeout=2) as client:
+            connection, _ = listener.accept()
+            with connection:
+                connection.settimeout(2)
+                # Close from the server side first to leave TIME_WAIT on the listener's port.
+                connection.shutdown(socket.SHUT_WR)
+                assert client.recv(1) == b""
+                client.shutdown(socket.SHUT_WR)
+                assert connection.recv(1) == b""
+
+    assert portal_source.select_port(port, strict=True) == port
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows uses exclusive address binding")
+@pytest.mark.parametrize("address", ["127.0.0.1", "0.0.0.0"])
+def test_source_port_probe_rejects_active_listener(address):
+    with socket.socket() as listener:
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind((address, 0))
+        listener.listen()
+
+        with pytest.raises(ValueError, match="已被占用"):
+            portal_source.select_port(listener.getsockname()[1], strict=True)
 
 
 def test_native_gateway_uses_generated_routes_and_loads_keys_only_in_gateway(tmp_path, monkeypatch):
