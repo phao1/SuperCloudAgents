@@ -96,8 +96,9 @@ async def test_portal_serves_only_registered_assets(portal_client):
     client, _, _ = portal_client
     page = await client.get("/portal")
     assert page.status_code == 200
-    for file in ("portal-ui.js", "portal-markdown.js", "portal-tasks.js", "portal-evolution.js",
-                 "portal-settings.js", "portal-projects.js", "portal-operations.css"):
+    for file in ("portal-ui.js", "portal-nav.js", "portal-home.js", "portal-navigation.css", "portal-markdown.js",
+                 "portal-tasks.js", "portal-evolution.js", "portal-settings.js", "portal-projects.js",
+                 "portal-operations.css"):
         path = f"/portal/assets/{file}"
         assert path in page.text
         response = await client.get(path)

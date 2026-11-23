@@ -28,10 +28,13 @@ ARCHIVE_MARKER = b"<!-- archive bootstrap -->"
 HISTORY_DATA = b'<script id="history-data" type="application/json">'
 PORTAL_ASSETS = (
     "portal-operations.css",
+    "portal-navigation.css",
     "portal-conversation.css",
     "task-dag.css",
     "task-dag.js",
     "portal-ui.js",
+    "portal-nav.js",
+    "portal-home.js",
     "portal-conversation.js",
     "portal-models.js",
     "portal-markdown.js",

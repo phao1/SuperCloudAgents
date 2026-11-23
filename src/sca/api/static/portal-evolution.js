@@ -798,23 +798,27 @@ const portalEvolution = (() => {
     return state.pending;
   }
 
-  function load(parts) {
+  function tabs() {
+    if (!ui.can('evolution-history')) return [];
     const evalAdmin = ui.can('eval-admin');
     const visible = evalAdmin ? ['runs', 'schedules', 'champions', 'rollouts', 'harvest']
       : portalIdentity.guest ? ['runs', 'champions'] : ui.can('eval') ? ['runs'] : ['rollouts', 'harvest'];
-    const tab = visible.includes(parts[0]) ? parts[0] : visible[0];
+    const titles = {runs: '演进记录', schedules: '定期计划', champions: '冠军谱系与固化', rollouts: '租户灰度', harvest: '采集候选'};
+    return visible.map(key => [key, titles[key]]);
+  }
+
+  function currentTab(parts) {
+    const visible = tabs().map(([key]) => key);
+    return visible.includes(parts[0]) ? parts[0] : visible[0];
+  }
+
+  function load(parts) {
+    const tab = currentTab(parts);
     const harvestApproval = parts[0] === 'harvest' && parts[1] === 'approval';
     const id = parts[0] === tab && parts[1] && !harvestApproval ? decodeURIComponent(parts[1]) : '';
     const approval = tab === 'harvest' && harvestApproval ? parts[2]
       : tab === 'runs' && parts[2] === 'approval' ? parts[3] : '';
     const root = $('evolution-content');
-    const titles = {runs: '演进记录', schedules: '定期计划', champions: '冠军谱系与固化', rollouts: '租户灰度', harvest: '采集候选'};
-    $('evolution-nav').replaceChildren(...visible.map(key => {
-      const link = evidenceLink(titles[key], pageHref(key));
-      link.className = 'button';
-      if (key === tab) link.setAttribute('aria-current', 'page');
-      return link;
-    }));
     if (view?.tab !== tab || view?.id !== id || view?.identity !== portalIdentity) {
       view?.dag?.destroy();
       view?.conversation?.destroy();
@@ -847,5 +851,6 @@ const portalEvolution = (() => {
     view = null;
   }
 
-  return {load, poll, reset, lineChanges, generations, equivalence};
+  return {load, poll, reset, lineChanges, generations, equivalence, tab: currentTab, tabs, suiteLabel,
+    isActive: state => activeStates.includes(state)};
 })();

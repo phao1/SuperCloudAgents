@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SuperCloudAgents · 工作台</title>
 <link rel="stylesheet" href="/portal/assets/portal-operations.css">
+<link rel="stylesheet" href="/portal/assets/portal-navigation.css">
 <link rel="stylesheet" href="/portal/assets/task-dag.css">
 <link rel="stylesheet" href="/portal/assets/portal-conversation.css">
 <style>
@@ -68,45 +69,21 @@ h4 { font-size: 13px; }
 p, small { color: var(--muted); }
 small { display: block; font-size: 12px; }
 code, pre, .module-id { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
-.app-shell { display: grid; grid-template-columns: 214px minmax(0, 1fr); min-height: 100vh; }
-.sidebar {
-  position: sticky; top: 0; height: 100dvh; overflow: auto;
-  display: flex; flex-direction: column; gap: 30px; align-self: start;
-  padding: 26px 15px 18px; background: var(--panel); border-right: 1px solid var(--line);
-}
-.brand { display: flex; align-items: center; gap: 10px; color: var(--ink); font-weight: 750; }
-.brand:hover { text-decoration: none; }
-.brand-mark {
-  width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center;
-  border-radius: 9px; background: var(--primary); color: var(--primary-ink); font-size: 19px;
-}
-.brand small { margin-top: 1px; font-weight: 500; }
-.sidebar nav { display: grid; gap: 4px; }
-.sidebar nav a {
-  display: flex; align-items: center; gap: 9px; padding: 10px 12px; min-height: 42px;
-  border-radius: 8px; color: var(--muted); font-weight: 550; white-space: nowrap;
-}
-.nav-symbol { width: 19px; flex: 0 0 19px; text-align: center; font-size: 16px; line-height: 1; }
-.sidebar nav a:hover { background: var(--subtle); text-decoration: none; }
-.sidebar nav a[aria-current="page"] { color: var(--accent); background: var(--accent-bg); }
-.sidebar footer { display: grid; gap: 10px; margin-top: auto; }
-.sidebar footer label { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.sidebar footer select { width: auto; }
 main { width: 100%; max-width: 1550px; margin: 0 auto; padding: 28px clamp(16px, 3vw, 42px) 48px; }
-.page-header { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 24px; }
+.page-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px 16px; margin-bottom: 24px; }
 .page-header p { margin-top: 6px; }
-.header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
-.page { display: grid; gap: 18px; min-width: 0; }
+.header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.page { display: grid; gap: 16px; min-width: 0; }
 .panel {
   display: grid; gap: 16px; min-width: 0; padding: clamp(15px, 2.4vw, 24px);
   background: var(--panel); border: 1px solid var(--line); border-radius: 13px; box-shadow: var(--shadow);
 }
-.panel-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 9px 16px; }
+.panel-head { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 8px 16px; }
 .panel-head p { margin-top: 4px; }
 .panel > details + details { margin-top: -6px; }
 .stack { display: grid; gap: 12px; min-width: 0; }
-.cards, .settings, .fields { display: grid; gap: 14px; min-width: 0; }
-.cards, .settings { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.cards, .fields { display: grid; gap: 16px; min-width: 0; }
+.cards { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .feature {
   display: grid; grid-template-rows: auto 1fr auto; justify-items: start; gap: 12px; padding: 22px;
   border: 1px solid var(--line); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow);
@@ -114,8 +91,6 @@ main { width: 100%; max-width: 1550px; margin: 0 auto; padding: 28px clamp(16px,
 .feature:first-child { background: var(--accent-bg); border-color: color-mix(in srgb, var(--accent), var(--line) 77%); }
 .feature p { max-width: 40ch; }
 .feature .button { margin-top: 2px; }
-.settings > div, .settings > form { display: grid; align-content: start; gap: 9px; }
-.settings > :nth-child(2) { border-left: 1px solid var(--line); padding-left: 14px; }
 .fields { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: end; }
 .fields.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 label { display: grid; gap: 5px; min-width: 0; font-size: 13px; font-weight: 550; }
@@ -123,7 +98,7 @@ label > small { font-weight: 400; }
 .field-wide, .wide { grid-column: 1 / -1; }
 .input-row { display: flex; align-items: stretch; gap: 8px; }
 .input-row > :first-child { flex: 1; min-width: 0; }
-.form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.form-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
 input, select, textarea, button, .button {
   min-height: 40px; border: 1px solid var(--line); border-radius: 8px;
   background: var(--panel); color: var(--ink);
@@ -153,7 +128,7 @@ button:disabled { color: var(--muted); background: var(--subtle); opacity: .7; c
 #connect-prompt { margin-bottom: 16px; }
 #guest-view-banner { display: block; padding: 10px 14px; margin-bottom: 16px; }
 #error, .provider-error-banner { color: var(--bad); background: var(--bad-bg); border-radius: 8px; padding: 10px 14px; margin-bottom: 16px; }
-#error:empty, #recent-loop:empty, .status-text:empty { display: none; }
+#error:empty, .status-text:empty { display: none; }
 .status-text { min-height: 1.5em; overflow-wrap: anywhere; }
 .empty-state { padding: 14px; }
 .suites, .metrics { display: grid; gap: 10px; min-width: 0; }
@@ -428,26 +403,15 @@ body[data-trace-expanded] { overflow: hidden; }
 #comparison { display: grid; gap: 14px; border: 0; border-radius: 0; overflow: visible; }
 #comparison > .scroll { border: 1px solid var(--line); }
 @media (max-width: 1100px) {
-  .app-shell { grid-template-columns: 176px minmax(0, 1fr); }
   .fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
-@media (max-width: 790px) {
-  .app-shell { grid-template-columns: minmax(0, 1fr); }
-  .sidebar {
-    position: static; height: auto; gap: 10px; padding: 12px 16px;
-    border-right: 0; border-bottom: 1px solid var(--line);
-  }
-  .sidebar nav { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .sidebar nav a { padding: 8px; min-height: 40px; font-size: 13px; }
-  .sidebar footer { display: none; }
+@media (max-width: 900px) {
   main { padding-top: 18px; }
   #stepper { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
 @media (max-width: 550px) {
   .page-header { align-items: flex-start; }
-  .page-header p, #workspace-indicator { display: none; }
-  .cards, .settings { grid-template-columns: minmax(0, 1fr); }
-  .settings > :nth-child(2) { border: 0; border-top: 1px solid var(--line); padding: 14px 0 0; }
+  .cards { grid-template-columns: minmax(0, 1fr); }
   .metrics, #stepper { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trace-controls { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .trace-controls > button { justify-self: start; }
@@ -459,94 +423,115 @@ body[data-trace-expanded] { overflow: hidden; }
 </style>
 </head>
 <body>
+<svg aria-hidden="true" class="portal-icon-sprite">
+  <symbol id="icon-home" viewBox="0 0 24 24"><path d="m3 10 9-7 9 7v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2zM9 21v-7h6v7"/></symbol>
+  <symbol id="icon-projects" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+  <symbol id="icon-tasks" viewBox="0 0 24 24"><path d="M10 6h10M10 12h10M10 18h10M4 6h1M4 12h1M4 18h1"/></symbol>
+  <symbol id="icon-approvals" viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4V3h6v1m-6 9 2 2 4-4"/></symbol>
+  <symbol id="icon-evals" viewBox="0 0 24 24"><path d="M8 3h8m-6 0v6l-5 8a2.5 2.5 0 0 0 2 4h10a2.5 2.5 0 0 0 2-4l-5-8V3M8 14h8"/></symbol>
+  <symbol id="icon-evolution" viewBox="0 0 24 24"><path d="M19 4v5h-5M5 20v-5h5M19 9a8 8 0 0 0-13-3M5 15a8 8 0 0 0 13 3"/></symbol>
+  <symbol id="icon-versions" viewBox="0 0 24 24"><circle cx="6" cy="5" r="2"/><circle cx="6" cy="19" r="2"/><circle cx="18" cy="5" r="2"/><path d="M6 7v10m12-10a8 8 0 0 1-8 8H6"/></symbol>
+  <symbol id="icon-memory" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14a8 3 0 0 0 16 0V5M4 12a8 3 0 0 0 16 0"/></symbol>
+  <symbol id="icon-tools" viewBox="0 0 24 24"><rect x="3" y="7" width="18" height="13" rx="2"/><path d="M8 7V5a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M3 13h18m-9-2v4"/></symbol>
+  <symbol id="icon-analysis" viewBox="0 0 24 24"><path d="M4 4v16h16M8 15v-3m5 3V7m5 8V9"/></symbol>
+  <symbol id="icon-history" viewBox="0 0 24 24"><path d="M3 10a9 9 0 1 1 2 8M3 4v6h6m3-3v5l3 2"/></symbol>
+  <symbol id="icon-settings" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16M8 4v4m8 2v4m-7 2v4"/></symbol>
+  <symbol id="icon-menu" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+  <symbol id="icon-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+</svg>
 <div class="app-shell">
   <aside class="sidebar">
-    <a class="brand" href="#/projects"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>工作台</small></span></a>
-    <nav aria-label="主导航">
-      <a href="#/projects" data-access="tenant" hidden>项目</a>
-      <a href="#/overview"><span class="nav-symbol" aria-hidden="true">◫</span>概览</a>
-      <a href="#/submit" data-access="member" hidden>提交任务</a>
-      <a href="#/tasks" data-access="history" hidden><span class="nav-symbol" aria-hidden="true">⌘</span>所有线程</a>
-      <!-- Approvals inbox -->
-      <a href="#/approvals" data-access="tenant" hidden><span>待审批<span id="approvals-count"></span></span></a>
-      <a href="#/analysis" data-access="history" hidden>数据分析</a>
-      <a href="#/evals" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">▦</span>评测中心</a>
-      <a href="#/loop" data-access="eval" hidden><span class="nav-symbol" aria-hidden="true">↻</span>自演进闭环</a>
-      <a href="#/evolutions" data-access="evolution-history" hidden>自动演进</a>
-      <a href="#/compare" data-access="eval-history" hidden><span class="nav-symbol" aria-hidden="true">⇄</span>版本对比</a>
-      <a href="#/versions" data-access="tenant" hidden><span class="nav-symbol" aria-hidden="true">◈</span>版本谱系</a>
-      <a href="#/memories" data-access="tenant" hidden>共享记忆</a>
-      <a href="#/tools" data-access="tenant" hidden>工具与知识库</a>
-      <a href="#/integrations" data-access="admin" hidden>集成</a>
-      <a href="#/team" data-access="admin" hidden>团队与用量</a>
-      <a href="#/platform" data-access="platform" hidden>平台管理</a>
-    </nav>
-    <footer>
-      <small id="sidebar-workspace">尚未连接</small>
-      <label>外观<select id="theme"><option value="">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
-    </footer>
+    <div class="sidebar-head">
+      <a class="brand" id="portal-brand" href="#/home"><span class="brand-mark" aria-hidden="true">S</span><span>SuperCloud<small>工作台</small></span></a>
+      <button id="nav-toggle" type="button" aria-expanded="false" aria-controls="nav-drawer" aria-label="打开主导航">
+        <svg class="portal-icon" aria-hidden="true"><use id="nav-toggle-icon" href="#icon-menu"/></svg>
+      </button>
+    </div>
+    <div id="nav-drawer" class="nav-drawer">
+      <nav id="primary-nav" aria-label="主导航">
+        <div class="nav-group" role="group" aria-labelledby="nav-workbench">
+          <p class="nav-label" id="nav-workbench">工作台</p>
+          <a href="#/home" data-nav="home"><svg class="portal-icon" aria-hidden="true"><use href="#icon-home"/></svg>首页</a>
+          <a href="#/projects" data-nav="projects" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-projects"/></svg>项目</a>
+          <a href="#/tasks" data-nav="tasks" data-access="history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-tasks"/></svg>任务</a>
+          <a href="#/approvals" data-nav="approvals" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-approvals"/></svg>待审批<span id="approvals-count" class="nav-count"></span></a>
+          <a href="#/history" data-nav="history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-history"/></svg>任务历史</a>
+        </div>
+        <div class="nav-group" role="group" aria-labelledby="nav-evolution">
+          <p class="nav-label" id="nav-evolution">自进化</p>
+          <a href="#/evals" data-nav="evals" data-access="eval-history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-evals"/></svg>评测</a>
+          <a href="#/evolutions" data-nav="evolutions" data-access="evolution-history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-evolution"/></svg>自动演进</a>
+          <a href="#/versions" data-nav="versions" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-versions"/></svg>版本</a>
+        </div>
+        <div class="nav-group" role="group" aria-labelledby="nav-knowledge">
+          <p class="nav-label" id="nav-knowledge">知识</p>
+          <a href="#/memories" data-nav="memories" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-memory"/></svg>共享记忆</a>
+          <a href="#/tools" data-nav="tools" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-tools"/></svg>工具与知识库</a>
+        </div>
+        <div class="nav-group" role="group" aria-labelledby="nav-analysis">
+          <p class="nav-label" id="nav-analysis">分析</p>
+          <a href="#/analysis" data-nav="analysis" data-access="history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-analysis"/></svg>数据分析</a>
+        </div>
+        <div class="nav-group nav-bottom">
+          <a href="#/settings" data-nav="settings"><svg class="portal-icon" aria-hidden="true"><use href="#icon-settings"/></svg>设置</a>
+        </div>
+      </nav>
+      <footer>
+        <small id="sidebar-workspace">尚未连接</small>
+        <label>外观<select id="theme"><option value="">跟随系统</option><option value="light">浅色</option><option value="dark">深色</option></select></label>
+      </footer>
+    </div>
   </aside>
   <main id="main-content">
     <header class="page-header">
-      <div><h1 id="page-title">概览</h1><p id="page-description"></p></div>
+      <div><h1 id="page-title" tabindex="-1">首页</h1><p id="page-description"></p></div>
       <div class="header-actions">
         <span id="workspace-indicator" class="badge">待连接</span>
         <span id="local-access-badge" class="badge complete" hidden>本机免令牌</span>
-        <button id="refresh" type="button">刷新数据</button>
+        <button id="refresh" type="button">刷新</button>
       </div>
     </header>
-    <p id="guest-view-banner" class="panel" hidden>只读访客模式 · <a href="#/overview">登录</a></p>
+    <p id="guest-view-banner" class="panel" hidden>只读访客模式 · <a href="#/settings/access">登录</a></p>
     <p id="model-not-configured" class="provider-error-banner" role="status" hidden>尚未接入模型，可浏览历史记录</p>
     <!-- source mode warning -->
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
-      <p>请先在概览连接 Portal 工作空间。</p>
-      <a href="#/overview" id="connect-link">前往连接 →</a>
+      <p>请先在「设置 → 访问与安全」连接工作空间。</p>
+      <a href="#/settings/access" id="connect-link">前往连接</a>
     </div>
+    <nav id="page-tabs" class="page-tabs portal-tabs" hidden></nav>
 
-    <section id="overview" class="page">
+    <section id="home-page" class="page">
       <p id="overview-provider-error" class="provider-error-banner" role="alert" hidden></p>
-      <div class="panel" id="workspace-settings">
-        <div class="panel-head"><div><h2>工作空间连接</h2><p id="connection-status" role="status">尚未连接</p></div><span id="health" class="badge" hidden></span></div>
-        <div class="settings">
-          <form id="connect-form" hidden>
-            <label for="token">Portal 访问令牌</label>
-            <div class="input-row">
-              <input id="token" type="password" autocomplete="off" required aria-describedby="token-note">
-              <button id="connect" class="primary" type="submit">连接</button>
-            </div>
-            <small id="token-note">使用租户、OIDC 或平台管理员令牌连接。</small>
-          </form>
-          <form id="provider-key-form" data-access="eval-admin" hidden>
-            <label for="provider-key">DeepSeek API Key</label>
-            <div class="input-row">
-              <input id="provider-key" type="password" autocomplete="off" required disabled aria-describedby="provider-key-note">
-              <button type="submit" disabled>保存密钥</button>
-            </div>
-            <small id="provider-key-note">连接本机 eval 管理员工作空间后即可保存。</small>
-            <p id="provider-key-status" class="status-text" role="status"></p>
-          </form>
-        </div>
-        <div id="portal-access-control" hidden>
-          <label class="portal-check"><input id="portal-require-token" type="checkbox" role="switch">需要访问令牌</label>
-        </div>
-        <details data-access="tenant" hidden><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
+      <div id="home-connect" class="panel">
+        <h2>连接工作空间</h2>
+        <p>连接后即可查看工作空间的任务和运行记录。</p>
+        <div class="form-actions"><a class="button primary" href="#/settings/access">连接工作空间</a></div>
       </div>
-      <div id="model-providers" class="panel" hidden></div>
-      <div class="cards" data-access="eval" hidden>
-        <article class="feature">
-          <h2>系统提示词自演进</h2>
-          <p>用 OpenCode 跑基线，让 OpenCode 根据用例证据起草系统提示词修改。审阅、构建，再用同一套件比较。</p>
-          <a class="button primary" href="#/evals/prompt">运行提示词基线 →</a>
-        </article>
-        <article class="feature">
-          <h2>文件工具修复演示</h2>
-          <p>用中文文件编辑用例复现已知缺陷，查看实际轨迹，再验证修复版本。</p>
-          <a class="button" href="#/evals/repair">运行缺陷基线 →</a>
-        </article>
+      <div id="home-platform" class="panel" data-access="platform" hidden>
+        <h2>平台管理</h2>
+        <div class="form-actions"><a class="button" href="#/settings/platform">查看租户和平台用量</a></div>
       </div>
-      <div id="overview-metrics" class="metrics" data-access="eval" hidden></div>
-      <div id="recent-loop" class="panel result-card" data-access="eval" hidden></div>
+      <div class="form-actions">
+        <a class="button primary" href="#/submit" data-access="member" hidden>新建任务</a>
+        <a class="button" href="#/evolutions/runs" data-access="eval-admin" hidden>开始演进</a>
+      </div>
+      <div class="metrics home-metrics" data-access="tenant" hidden>
+        <a class="metric" href="#/tasks"><small>运行中的任务</small><strong id="home-running">—</strong><span>最近最多 100 项任务</span></a>
+        <a class="metric" href="#/approvals"><small>待审批</small><strong id="home-approvals">—</strong><span>查看审批事项</span></a>
+        <div class="metric" data-access="admin" hidden><small>今日模型费用</small><strong id="home-spend">—</strong><span>UTC 当日</span></div>
+        <a class="metric" href="#/settings/models"><small>模型状态</small><strong id="home-model-status">—</strong><span>设置 → 模型</span></a>
+      </div>
+      <div class="home-grid">
+        <div class="panel" data-access="history" hidden>
+          <div class="panel-head"><h2>最近任务</h2><a href="#/tasks">查看任务</a></div>
+          <div id="home-tasks"></div>
+        </div>
+        <div class="panel" id="home-evolution-panel" hidden>
+          <div class="panel-head"><h2>演进运行</h2><a href="#/evolutions/runs">查看演进</a></div>
+          <div id="home-evolutions"></div>
+        </div>
+      </div>
     </section>
 
     <section id="projects-page" class="page" hidden>
@@ -567,6 +552,7 @@ body[data-trace-expanded] { overflow: hidden; }
             </div>
             <div class="form-actions">
               <span id="project-status" class="badge"></span>
+              <button id="project-new-task" class="primary" type="button" hidden>新建任务</button>
               <details id="project-menu" class="project-menu" data-access="member" hidden>
                 <summary aria-label="项目操作">⋯</summary>
                 <div id="project-actions" class="stack"></div>
@@ -645,6 +631,9 @@ body[data-trace-expanded] { overflow: hidden; }
     <section id="trace" class="page" hidden>
       <p id="task-provider-error" class="provider-error-banner" role="alert" hidden></p>
       <div class="panel">
+        <div class="panel-head">
+          <h2>查找任务</h2><a class="button primary" href="#/submit" data-access="member" hidden>新建任务</a>
+        </div>
         <div class="task-picker">
           <label>最近任务<select id="task-picker"><option value="">选择任务</option></select></label>
           <form id="task-form" class="stack">
@@ -850,7 +839,6 @@ body[data-trace-expanded] { overflow: hidden; }
       </div>
     </section>
     <section id="evolutions-page" class="page" hidden>
-      <nav id="evolution-nav" class="portal-tabs" aria-label="自动演进功能"></nav>
       <div id="evolution-content" class="page"></div>
       <template id="evolution-dag-template">
         <section id="evolution-dag" class="panel task-dag" aria-labelledby="evolution-dag-title">
@@ -873,9 +861,47 @@ body[data-trace-expanded] { overflow: hidden; }
       </template>
     </section>
     <section id="tools-page" class="page" hidden><div id="tools-content" class="page"></div></section>
-    <section id="integrations-page" class="page" hidden><div id="integrations-content" class="page"></div></section>
-    <section id="team-page" class="page" hidden><div id="team-content" class="page"></div></section>
-    <section id="platform-page" class="page" hidden><div id="platform-content" class="page"></div></section>
+    <section id="settings-page" class="page" hidden>
+      <div id="models-page" class="page" data-settings hidden><div id="model-providers" class="page"></div></div>
+      <div id="runtime-page" class="page" data-settings hidden>
+        <div id="settings-runtime"></div>
+        <details class="panel"><summary>服务配置</summary><pre id="config">尚未连接</pre></details>
+      </div>
+      <div id="access-page" class="page" data-settings hidden>
+        <div class="panel" id="workspace-settings">
+          <div class="panel-head"><div><h2>工作空间连接</h2><p id="connection-status" role="status">尚未连接</p></div><span id="health" class="badge" hidden></span></div>
+          <p id="workspace-identity" hidden></p>
+          <form id="connect-form" class="stack">
+            <label for="token">Portal 访问令牌</label>
+            <div class="input-row">
+              <input id="token" type="password" autocomplete="off" required aria-describedby="token-note">
+              <button id="connect" class="primary" type="submit">连接</button>
+            </div>
+            <small id="token-note">使用租户、OIDC 或平台管理员令牌连接。</small>
+          </form>
+          <div id="portal-access-control" hidden>
+            <label class="portal-check"><input id="portal-require-token" type="checkbox" role="switch">需要访问令牌</label>
+          </div>
+        </div>
+      </div>
+      <div id="integrations-page" class="page" data-settings hidden><div id="integrations-content" class="page"></div></div>
+      <div id="team-page" class="page" data-settings hidden><div id="team-content" class="page"></div></div>
+      <div id="platform-page" class="page" data-settings hidden><div id="platform-content" class="page"></div></div>
+    </section>
+    <section id="evolution-examples" class="page" hidden>
+      <div class="cards" data-access="eval" hidden>
+        <article class="feature">
+          <h2>系统提示词自演进</h2>
+          <p>用 OpenCode 跑基线，让 OpenCode 根据用例证据起草系统提示词修改。审阅、构建，再用同一套件比较。</p>
+          <a class="button primary" href="#/evals/prompt">运行提示词基线</a>
+        </article>
+        <article class="feature">
+          <h2>文件工具修复演示</h2>
+          <p>用中文文件编辑用例复现已知缺陷，查看实际轨迹，再验证修复版本。</p>
+          <a class="button" href="#/evals/repair">运行缺陷基线</a>
+        </article>
+      </div>
+    </section>
     <section id="loop" class="page" hidden>
       <div class="panel">
         <div class="panel-head">
@@ -949,6 +975,8 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/task-timeline.js"></script>
 <script src="/portal/assets/task-dag.js"></script>
 <script src="/portal/assets/portal-ui.js"></script>
+<script src="/portal/assets/portal-nav.js"></script>
+<script src="/portal/assets/portal-home.js"></script>
 <script src="/portal/assets/portal-conversation.js"></script>
 <script src="/portal/assets/portal-models.js"></script>
 <script src="/portal/assets/portal-markdown.js"></script>
@@ -956,6 +984,7 @@ body[data-trace-expanded] { overflow: hidden; }
 <script src="/portal/assets/portal-evolution.js"></script>
 <script src="/portal/assets/portal-settings.js"></script>
 <script src="/portal/assets/portal-projects.js"></script>
+<!-- runtime bootstrap -->
 <script>
 'use strict';
 const $=id=>document.getElementById(id), enc=encodeURIComponent;
@@ -964,7 +993,7 @@ let fixes=[], flow={}, fixSelection=null, taskEvents=[], taskLoading=false, suit
 const archivePortal=typeof SCAPortalArchive==='undefined'?null:SCAPortalArchive;
 let portalToken=archivePortal?'':localStorage.getItem('sca-portal-token')||'';
 let guestChecked=false;
-let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false, savingKey=false;
+let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false;
 let routeLoad=null;
 let selectedIteration=null, currentLoopTask=null, pendingReview=null, promptPreviewKey=null;
 const pendingActions=new Set();
@@ -1113,6 +1142,7 @@ async function loadConfig(c){
   const previousDefault=portalConfig?.default_model;
   portalConfig=c;
   $('model-not-configured').hidden=c.model_configured!==false;
+  portalHome.setModel(c);
   portalSettings.configureAccess(c.portal_require_token);
   if(c.guest_view)return c;
   $('config').textContent=json(c);
@@ -1123,11 +1153,6 @@ async function loadConfig(c){
   $('health').className='badge '+(ready?'complete':'waiting');
   $('health').textContent=ready?'网关与工作流在线':!c.temporal_reachable?'工作流暂不可用':'模型网关暂不可用';
   renderProviderError(c.gateway_provider_account_error);
-  $('provider-key-form').querySelector('button').disabled=!c.can_configure_model||savingKey;
-  $('provider-key').disabled=!c.can_configure_model||savingKey;
-  $('provider-key-note').textContent=c.can_configure_model
-    ?'保存在本机，保存后会重启模型网关。'
-    :'本机演示模式下，使用 eval 管理员令牌可修改密钥。';
   portalModels.configure(c,previousDefault);
   options('backend',c.agent_backends,x=>x,portalUI.backendLabel);
   if(currentTask&&pageRoute().current==='tasks'){
@@ -1259,7 +1284,7 @@ async function loadRuns(){
   runs=summaries;
   options('compare-a',runs,r=>r.id,r=>r.id.slice(0,8)+' · '+r.suite);
   options('compare-b',runs,r=>r.id,r=>r.id.slice(0,8)+' · '+r.suite);
-  const [page,a,b]=hash.slice(2).split('/');
+  const {page,parts:[a,b]}=portalNav.resolve(hash);
   if(page==='compare'&&a&&b){
     $('compare-a').value=decodeURIComponent(a);
     $('compare-b').value=decodeURIComponent(b);
@@ -1285,13 +1310,6 @@ async function loadRuns(){
       return [title,status(r.status),rate,m.duration,m.stability,m.cost+' / '+m.tokens];
     })):el('p','尚无评测运行。','empty-state'));
   }
-  const count=runs.reduce((n,r)=>n+r.result_count,0);
-  $('overview-metrics').replaceChildren(...[
-    ['评测运行',runs.length,suites.length+' 个可用套件'],
-    ['用例结果',count,'含每次重复执行'],
-    ['进行中',runs.filter(r=>['queued','running'].includes(r.status)).length,'排队中或执行中'],
-    ['可用版本',versions.length,'已注册的 OpenCode 版本'],
-  ].map(x=>metric(...x)));
   if(activeRun)await matrix();
 }
 async function matrix(){
@@ -2076,6 +2094,7 @@ async function loadPromptPreview(){
 function statusText(value){
   return ({
     running:'运行中',completed:'已完成',succeeded:'已成功',failed:'失败',queued:'排队中',stopped:'已停止',
+    awaiting_approval:'待审批',paused:'已暂停',patience_exhausted:'达到停滞上限',
     budget_exhausted:'预算已用尽',QUEUED:'排队中',PROVISIONING:'环境准备',RUNNING:'执行中',
     VERIFYING:'验证中',AWAITING_REVIEW:'待审核',PAUSED:'已暂停',SUCCEEDED:'已成功',
     FAILED:'失败',CANCELLED:'已取消',
@@ -2083,7 +2102,7 @@ function statusText(value){
 }
 function statusClass(value){
   if(['running','RUNNING','VERIFYING','PROVISIONING'].includes(value))return 'running';
-  if(['queued','QUEUED','PAUSED','AWAITING_REVIEW','budget_exhausted'].includes(value))return 'waiting';
+  if(['queued','QUEUED','PAUSED','AWAITING_REVIEW','awaiting_approval','paused','budget_exhausted'].includes(value))return 'waiting';
   if(['completed','succeeded','SUCCEEDED'].includes(value))return 'complete';
   if(['failed','FAILED','CANCELLED'].includes(value))return 'problem';
   return '';
@@ -2313,8 +2332,7 @@ function evidenceLink(label,href){
   return link;
 }
 function renderLoopResult(task,build,baseline,retest){
-  const recent=$('recent-loop'),card=$('loop-result');
-  recent.replaceChildren();
+  const card=$('loop-result');
   card.replaceChildren();
   card.hidden=true;
   if(!task)return;
@@ -2322,14 +2340,13 @@ function renderLoopResult(task,build,baseline,retest){
   const complete=build?.status==='succeeded'&&task.state==='SUCCEEDED'
     &&baseline?.status==='completed'&&retest?.status==='completed';
   const target=flow.target==='system_prompt'?'系统提示词':'源码';
-  const base=variant(baseline||{}).agent_version||task.spec?.labels?.source_version||'基线版本';
-  const version=build?.status==='succeeded'?' → '+build.version:'';
   const links=el('div',undefined,'result-links');
   if(baseline)links.append(evidenceLink('基线评测 ↗','#/runs/'+enc(baseline.id)));
   if(flow.failedTask)links.append(evidenceLink('来源证据 ↗','#/tasks/'+enc(flow.failedTask)));
   links.append(evidenceLink('修改任务 ↗','#/tasks/'+enc(task.id)));
   if(build)links.append(evidenceLink('构建日志 ↗','#/loop/build'));
   if(retest)links.append(evidenceLink('回归评测 ↗','#/runs/'+enc(retest.id)));
+  if(flow.previousFix)links.append(evidenceLink('查看上一轮迭代 ↗','#/loop/round/'+enc(flow.previousFix)));
   if(complete){
     const verdict=verdictFor(baseline,retest);
     const before=dimensions(baseline.results).rate, after=dimensions(retest.results).rate;
@@ -2339,11 +2356,9 @@ function renderLoopResult(task,build,baseline,retest){
     if(flow.target==='system_prompt'&&canOptimize(retest)){
       card.append(button('用本轮回归继续第 '+(flow.round+1)+' 轮',()=>continuePrompt(retest,baseline)));
     }
-    card.hidden=false;
   }
-  if(flow.previousFix)links.append(evidenceLink('查看上一轮迭代 ↗','#/loop/round/'+enc(flow.previousFix)));
-  recent.append(el('h2',target+'迭代'),el('p',base+version),links,
-    evidenceLink('打开自演进闭环 →','#/loop/round/'+enc(task.id)));
+  card.append(links);
+  card.hidden=false;
 }
 async function runDetail(id){
   if(runDetails.has(id))return runDetails.get(id);
@@ -2477,46 +2492,20 @@ $('analysis-form').onsubmit=async event=>{
     await openTask(task.id);
   }catch(e){error(e)}finally{control.disabled=false}
 };
-const pages={
-  projects:['projects-page','项目',''],
-  memories:['memories-page','共享记忆','管理跨任务复用的约定。'],
-  analysis:['analysis-page','数据分析','上传数据并追踪分析报告。'],
-  overview:['overview','概览','连接工作空间，提交或查看任务。'],
-  submit:['submit-page','提交任务','配置仓库、验证命令和任务所需的上下文。'],
-  evals:['evaluation','评测中心','配置评测条件，查看每个用例的结果。'],
-  runs:['run-detail','运行详情','从结果矩阵打开任务证据。'],
-  compare:['compare-page','版本对比','查看通过率、耗时和费用的变化。'],
-  tasks:['trace','任务进度','沿架构图查看任务经过的模块和事件。'],
-  approvals:['approvals-page','待审批','查看当前工作空间等待人工处理的事项。'],
-  loop:['loop','自演进闭环','追踪从基线、候选到回归的进度。'],
-  evolutions:['evolutions-page','自动演进','查看演进执行图、开发集与留出集证据。'],
-  versions:['versions','版本谱系','按源码提交和构建记录追溯 OpenCode 版本。'],
-  tools:['tools-page','工具与知识库','查看 MCP 工具和知识库文档。'],
-  integrations:['integrations-page','集成','管理代码托管集成并查看设计与工单的凭证配置。'],
-  team:['team-page','团队与用量','管理成员邀请、API 令牌与租户用量。'],
-  platform:['platform-page','平台管理','管理租户和套餐，查看平台用量。'],
-};
-const pageAccess={
-  projects:'tenant',
-  overview:'public',submit:'member',tasks:'history',approvals:'tenant',analysis:'history',versions:'tenant',memories:'tenant',
-  evals:'eval-history',runs:'eval-history',compare:'eval-history',loop:'eval',evolutions:'evolution-history',integrations:'admin',
-  tools:'tenant',team:'admin',platform:'platform',
-};
 function pageRoute(){
-  const [requested,...parts]=location.hash.slice(2).split('/');
-  if(requested==='projects'&&portalIdentity?.guest){
-    return {page:'tasks',parts:[],current:'tasks',redirect:'#/tasks'};
-  }
-  const home=portalUI.can('tenant')?'projects':'overview';
-  const page=Object.hasOwn(pages,requested)?requested:home;
-  return {page,parts,current:portalUI.can(pageAccess[page])?page:'overview'};
+  return portalNav.liveRoute(location.hash);
 }
 function syncAccess(){
   for(const node of document.querySelectorAll('[data-access]'))node.hidden=!portalUI.can(node.dataset.access);
+  portalNav.sync();
+  portalHome.sync();
   $('guest-view-banner').hidden=portalIdentity?.guest!==true;
   const labels={viewer:'只读',member:'成员',admin:'租户管理员'};
-  $('sidebar-workspace').textContent=portalIdentity?.platform_admin?'平台管理员'
+  const identity=portalIdentity?.platform_admin?'平台管理员'
     :portalIdentity?portalIdentity.tenant_id+' · '+labels[portalIdentity.role]:'尚未连接';
+  $('sidebar-workspace').textContent=identity;
+  $('workspace-identity').hidden=!portalIdentity;
+  $('workspace-identity').textContent='当前身份 · '+identity;
 }
 async function route(){
   const destination=pageRoute();
@@ -2545,20 +2534,14 @@ async function showRoute({page,current,parts}){
   }
   if(hash!==location.hash||identity!==portalIdentity)return;
   if(current!=='team')portalSettings.clearSensitive();
+  if(current!=='models')portalModels.clearSensitive();
   if(current!=='projects')portalProjects.leave();
   if(current!=='evolutions')portalEvolution.reset();
   syncAccess();
-  const [target,title,description]=pages[current];
-  for(const node of document.querySelectorAll('main > section'))node.hidden=node.id!==target;
+  portalNav.display(current,parts);
   $('connect-prompt').hidden=current===page;
   $('connect-prompt').querySelector('p').textContent=portalIdentity&&!portalIdentity.guest
-    ?'当前令牌无法访问此页面，请切换到具有相应权限的令牌。':'请先在概览连接 Portal 工作空间。';
-  $('page-title').textContent=title;
-  $('page-description').textContent=description;
-  document.querySelectorAll('.sidebar nav a').forEach(link=>{
-    if(link.hash==='#/'+(current==='runs'?'evals':current))link.setAttribute('aria-current','page');
-    else link.removeAttribute('aria-current');
-  });
+    ?'当前令牌无法访问此页面，请切换到具有相应权限的令牌。':'请先在「设置 → 访问与安全」连接工作空间。';
   $('evidence').hidden=true;
   evidenceView=null;
   if(current!=='evals'||!parts[0])appliedPreset=null;
@@ -2581,13 +2564,12 @@ async function loadTaskRoute(parts){
 async function loadEvalPage(page,parts,polling){
   const hash=location.hash,identity=portalIdentity;
   const current=()=>hash===location.hash&&identity===portalIdentity;
-  const config=(page==='overview'&&(polling||!identity.guest))
-    ||(!polling&&!portalConfig&&portalUI.can('tenant'));
+  const config=!polling&&!portalConfig&&portalUI.can('tenant');
   const prepare=!polling&&portalUI.can('eval');
   const results=await Promise.allSettled([
     config?loadConfig():null,
-    prepare&&['overview','evals','runs'].includes(page)?loadSuites():null,
-    prepare&&['overview','evals','loop'].includes(page)?loadVersions():null,
+    prepare?loadSuites():null,
+    prepare&&['evals','loop'].includes(page)?loadVersions():null,
     page==='runs'?loadRecentTasks():null,
   ]);
   if(!current())return;
@@ -2608,7 +2590,7 @@ async function loadEvalPage(page,parts,polling){
   const comparison=!polling&&page==='compare'&&parts[0]&&parts[1]
     ?showComparison(decodeURIComponent(parts[0]),decodeURIComponent(parts[1])):null;
   await Promise.all([loadRuns(),comparison]);
-  if(!current()||!portalUI.can('eval')||!['overview','loop'].includes(page))return;
+  if(!current()||page!=='loop')return;
   await updateFlow();
   if(current()&&!polling&&page==='loop'&&parts[0]==='build')$('build-evidence').scrollIntoView({block:'center'});
 }
@@ -2617,6 +2599,7 @@ async function loadPage(page,parts,polling=false){
   const current=()=>hash===location.hash&&identity===portalIdentity;
   const inbox=portalApprovals.refresh(!polling);
   if(page==='approvals')return inbox;
+  if(page==='home')return portalHome.load(polling);
   if(page==='projects')return polling?portalProjects.poll(parts):portalProjects.load(parts);
   if(page==='tasks'){
     return Promise.all([
@@ -2631,10 +2614,17 @@ async function loadPage(page,parts,polling=false){
     const report=!polling||(id&&!$('analysis-page-report').dataset.report)?portalTasks.showAnalysis(id):null;
     return Promise.all([choices,report]);
   }
-  if(portalUI.can('eval-history')&&['overview','evals','runs','compare','loop'].includes(page)){
+  if(['evals','runs','compare','loop'].includes(page)){
     return loadEvalPage(page,parts,polling);
   }
-  if(page==='overview'&&portalUI.can('history')&&(polling||!identity.guest))return loadConfig();
+  if(['access','models','runtime'].includes(page)){
+    if(page==='models'&&polling)return;
+    if(portalUI.can('tenant'))await loadConfig();
+    if(!current())return;
+    if(page==='models')return portalModels.load();
+    if(page==='runtime')return portalSettings.runtime(portalConfig);
+    return;
+  }
   if(page==='versions')return loadVersions();
   if(page==='evolutions'){
     if(polling)return portalEvolution.poll();
@@ -2729,31 +2719,6 @@ $('connect-form').onsubmit=async event=>{
   }
   else{portalToken='';localStorage.removeItem('sca-portal-token')}
   $('connect').disabled=false;
-};
-$('provider-key-form').onsubmit=async event=>{
-  event.preventDefault();
-  if(!portalConfig?.can_configure_model||savingKey)return;
-  const input=$('provider-key'),label=$('provider-key-status'),control=event.currentTarget.querySelector('button');
-  savingKey=true;
-  control.disabled=true;
-  input.disabled=true;
-  label.textContent='正在保存并重启模型网关…';
-  try{
-    const response=await fetch('/v1/portal/provider-key',{
-      method:'POST',
-      headers:{...authHeaders(),'Content-Type':'application/json'},
-      body:JSON.stringify({key:input.value.trim()}),
-      signal:AbortSignal.timeout(130000),
-    });
-    if(response.status===403||response.status===409)throw await apiFailure(response,true);
-    if(!response.ok)throw Error('保存失败，请检查密钥和服务状态。');
-    const result=await response.json();
-    input.value='';
-    label.textContent=result.gateway_restarted?'密钥已保存，模型网关已重启。':'密钥已保存，网关重启失败。请查看服务状态。';
-    await loadConfig();
-    await portalModels.refresh();
-  }catch(e){label.textContent=e.message}
-  finally{savingKey=false;control.disabled=false;input.disabled=false}
 };
 $('suite').onchange=syncEvalForm;
 $('backend').onchange=syncEvalForm;
@@ -2899,6 +2864,7 @@ function displayConnection(text,style){
 function syncPortalLogin(){
   const local=portalIdentity?.local_no_token===true;
   $('local-access-badge').hidden=!local;
+  $('workspace-indicator').hidden=local;
   $('connect-form').hidden=local;
 }
 function resetPortalSession(){
@@ -2911,6 +2877,7 @@ function resetPortalSession(){
   portalProjects.reset();
   portalModels.reset();
   portalApprovals.reset();
+  portalHome.reset();
   portalIdentity=portalConfig=null;
   guestChecked=false;
   canRescore=false;
@@ -2936,9 +2903,6 @@ function resetPortalSession(){
   $('health').hidden=true;
   $('model-not-configured').hidden=true;
   renderProviderError(null);
-  $('provider-key').value='';
-  $('provider-key').disabled=true;
-  $('provider-key-form').querySelector('button').disabled=true;
   $('config').textContent='尚未连接';
   renderTaskChoices();
   syncAccess();
@@ -2949,6 +2913,7 @@ async function loadRecentTasks(){
   if(identity!==portalIdentity||hash!==location.hash)return;
   serverTasks=tasks;
   renderTaskChoices();
+  return tasks;
 }
 async function refresh(manual=false){
   let connect=manual||!portalIdentity;
@@ -2975,7 +2940,6 @@ async function refresh(manual=false){
         identity={...config.local_identity,local_no_token:true};
       }else if(config.guest_view){
         identity={tenant_id:config.guest_tenant,role:'viewer',guest:true};
-        if(!location.hash)history.replaceState(null,'','#/tasks');
       }else return;
     }
     if(portalIdentity&&json(identity)!==json(portalIdentity))resetPortalSession();
@@ -3009,6 +2973,7 @@ $('theme').onchange=()=>{
   localStorage.setItem('sca-portal-theme',$('theme').value);
 };
 $('evidence-close').onclick=closeEvidence;
+portalNav.bindMenu();
 document.addEventListener('keydown',event=>{
   if(event.key!=='Escape')return;
   if(!$('evidence').hidden)closeEvidence();

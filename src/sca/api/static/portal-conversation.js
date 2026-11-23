@@ -463,6 +463,7 @@ const portalApprovals = (() => {
     rows = [];
     submitted.clear();
     $('approvals-count').textContent = '';
+    portalHome.setApprovals();
     $('approvals-list').replaceChildren();
     $('approvals-status').textContent = '';
   }
@@ -488,7 +489,8 @@ const portalApprovals = (() => {
       entry.append(details, el('small', portalUI.date(row.created_at)));
       list.append(entry);
     }
-    $('approvals-count').textContent = ' (' + visible.length + ')';
+    $('approvals-count').textContent = String(visible.length);
+    portalHome.setApprovals(visible.length);
     $('approvals-list').replaceChildren(visible.length ? list : el('p', '当前没有待审批事项。', 'empty-state'));
   }
 

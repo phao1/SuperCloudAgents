@@ -26,15 +26,15 @@
 3. 在仓库根目录运行 .\scripts\portal_source.ps1 up，等待退出并确认成功。
    首次运行会准备 Python 环境和原生依赖，并启动 PostgreSQL、Temporal、LiteLLM、Worker 和 API。
    用 Invoke-RestMethod -Uri 'http://127.0.0.1:8000/healthz' 确认 status 为 ok，报告脚本打印的 Portal 地址 http://127.0.0.1:8000/portal。
-   本机浏览器默认免令牌，可以直接使用 Portal。在「概览 → 工作空间连接」可开启「需要访问令牌」。若已开启，请我在本机 PowerShell 私下用 Select-String SCA_EVAL_API_TOKEN .\.data\portal.env 查看并登录。
+   本机浏览器默认免令牌，可以直接使用 Portal。在「设置 → 访问与安全」可开启「需要访问令牌」。若已开启，请我在本机 PowerShell 私下用 Select-String SCA_EVAL_API_TOKEN .\.data\portal.env 查看并登录。
    令牌、模型密钥和包含它们的请求体不得出现在聊天、命令行参数、日志或最终报告中。
 
 4. 先问我选哪种模型接入，等我选择后再配置。
-   a. DeepSeek API。请我在「概览」的 DeepSeek API Key 表单私下输入并保存。内置模型名为 deepseek-flash 和 deepseek-v4-pro。
+   a. DeepSeek API。请我在「设置 → 模型」的 DeepSeek 卡片私下输入并保存 API Key。内置模型名为 deepseek-flash 和 deepseek-v4-pro。
       通过 API 保存时使用 POST /v1/portal/provider-key，使用隐藏输入提供 key 字段，等保存结果报告网关已重启。
    b. 第三方或本机服务。向我确认接口类型（OpenAI 兼容或 Anthropic 兼容）、基础 URL、API Key（本机免密时可留空）以及上游模型 ID 和对应的平台模型名。
       可按需填写上下文窗口和输入、输出价格（美元 / 百万 Token）。同机 OpenAI 兼容服务的地址形如 http://127.0.0.1:<port>/v1。
-      Anthropic 兼容服务填写基址，由网关请求 /v1/messages。在「概览 → 模型接入」填写供应商及模型并保存，等 Portal 显示网关已重启。
+      Anthropic 兼容服务填写基址，由网关请求 /v1/messages。在「设置 → 模型」选择供应商预设并填写模型，等 Portal 显示网关已重启。
       使用 API 时通过 POST /v1/portal/providers 保存，收到 202 后用 GET /v1/portal/providers/restarts/{restart.id} 等到 succeeded。状态为 failed 时先检查服务日志。
    用「测试连接」或 POST /v1/portal/providers/test（请求体为 {"model":"平台模型名"}）测试所选模型。随后用 GET /v1/models 核对可用模型。
    本机免令牌时，PowerShell 的 GET 可以省略认证头，例如 (Invoke-RestMethod 'http://127.0.0.1:8000/v1/models').data | Select-Object -ExpandProperty id。
@@ -50,11 +50,11 @@
    创建 calc.py，其中 add(a, b) 暂时返回 a - b，再创建 test_calc.py，导入 add 并用 pytest 断言 add(2, 3) == 5。
    用 git add calc.py test_calc.py 和 git -c user.name=SCA -c user.email=sca-demo@example.invalid commit -m "Add smoke fixture" 保存这个失败基线。
    在 SCA 仓库根目录用 .\.venv\Scripts\python.exe -m pip install pytest 安装验证依赖。
-   进入「提交任务」，或使用 POST /v1/tasks，仓库填写绝对路径（如 C:/sca-demo），基线分支填 main，后端选 DeepSeek Harness（dsh），模型选第 4 步验证过的平台模型名。
+   在「首页」或「任务」点击「新建任务」，或使用 POST /v1/tasks。仓库填写绝对路径（如 C:/sca-demo），基线分支填 main，后端选 DeepSeek Harness（dsh），模型选第 4 步验证过的平台模型名。
    要求修复 add 且保留测试，验证命令填 python -m pytest -q。只提交一次，不推送。
    等验证节点显示通过，再在任务详情确认「执行图 DAG」和「对话」可打开。也可通过 GET /v1/tasks/{task_id}/events 确认最后一次 verification.completed 的 payload.passed 为 true。
 
-7. 向我说明如何从「自动演进」开始一次运行。选择 DeepSeek Harness 或 OpenCode。选择 OpenCode 时填写已安装的基线版本。
+7. 向我说明如何从「自动演进 → 演进记录」开始一次运行。选择 DeepSeek Harness 或 OpenCode。选择 OpenCode 时填写已安装的基线版本。
    首次选 dsh-smoke，选已验证的模型，设小参数，例如一代、两个候选、每题一次、并发 1。
    使用 deepseek-flash 时可先设评测总预算 0.20 美元、单题预算 0.02 美元，反思和候选生成另计。
    启动后在「演进记录」打开 DAG，按进展在「对话」里给下一代提议发指引，或使用「暂停」「恢复」「本代结束后停止」「跳过当前候选」「调整剩余预算」。

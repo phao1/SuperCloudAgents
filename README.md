@@ -71,7 +71,7 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 ### Portal 快速启动
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
-默认以 `eval` 管理员身份进入，顶部显示「本机免令牌」。可在「概览 → 工作空间连接」开启
+默认以 `eval` 管理员身份进入首页，顶部显示「本机免令牌」。可在「设置 → 访问与安全」开启
 「需要访问令牌」。需要登录时，从 `.data/portal.env` 私下查找 `SCA_EVAL_API_TOKEN`。
 [访问开关与 API](docs/operations.md#本机-portal-访问令牌)
 
@@ -93,8 +93,12 @@ bash scripts/portal_demo.sh down
 Windows 用户可直接运行 `.\scripts\portal_source.ps1 up`，默认使用 DeepSeek Harness。
 [Windows 源码模式指南](docs/windows.md) · [交给 Windows Agent 的启动提示词](docs/windows-agent-start.md)
 
-在「概览 → 模型接入」配置 vLLM、Ollama、LM Studio 或其他兼容服务的地址、可选密钥和模型。
+在「设置 → 模型」配置 DeepSeek、vLLM、Ollama、LM Studio 或其他兼容服务的地址、密钥和模型。
 [模型接入与预算](docs/models.md)
+
+首页显示最近任务、待审批与演进状态。在「首页」「任务」或项目详情选择「新建任务」。
+「评测」包含「评测运行」和「版本对比」，「自动演进」包含演进记录、原有的「自演进闭环」和「示例」。
+「设置」还包含运行环境、集成、团队与用量，以及平台管理员可用的「平台管理」。
 
 | 能力 | Docker 模式 | 源码模式 |
 | --- | --- | --- |
@@ -116,8 +120,8 @@ curl -fsS http://127.0.0.1:8000/v1/portal/config
 curl -fsS http://127.0.0.1:8000/v1/tasks
 ```
 
-在浏览器打开 `http://127.0.0.1:8000/portal`，从「所有线程」查看演示租户 `eval` 的历史。
-尚未接入模型时也能查看轨迹和补丁，可在概览添加模型以恢复提交。开启「需要访问令牌」后，
+在浏览器打开 `http://127.0.0.1:8000/portal`，从「任务」查看演示租户 `eval` 的历史。
+尚未接入模型时也能查看轨迹和补丁，可在「设置 → 模型」添加模型以恢复提交。开启「需要访问令牌」后，
 可在只读访客模式查看已脱敏的历史，具体范围由 `SCA_GUEST_VIEW` 控制。
 [访客模式配置与风险](docs/operations.md#只读访客模式)
 
@@ -150,7 +154,7 @@ make portal-setup
 ```
 
 首次运行自动创建 `.env` 和随机网关密钥，并准备数据库、镜像、OpenCode 2.3.0
-缺陷基线后启动 Portal。打开本机 Portal 后，可在概览页填写 DeepSeek API Key。
+缺陷基线后启动 Portal。打开本机 Portal 后，可在「设置 → 模型」的 DeepSeek 卡片填写 API Key。
 密钥保存在本机 `.env`，保存时会重启模型网关。也可在启动前手动填写 `.env`。
 脚本打印 `http://127.0.0.1:8000/portal` 和登录令牌的保存位置。可在首次运行时通过
 `PORTAL_TOKEN` 指定令牌（仅字母、数字、下划线和连字符）。重跑会保留已有令牌。
@@ -242,7 +246,7 @@ make image
 docker build -f deploy/dsh/sandbox.Dockerfile -t sca-sandbox-dsh:latest deploy/dsh
 ```
 
-在 Worker 启用 LiteLLM 网关后，在 Portal「提交任务」选 DeepSeek Harness，模型填 `deepseek-flash`
+在 Worker 启用 LiteLLM 网关后，在 Portal「任务 → 新建任务」选 DeepSeek Harness，模型填 `deepseek-flash`
 或 `deepseek-v4-pro`。省略模型时使用 `SCA_DEFAULT_MODEL`。如需设为全局默认后端，配置
 `SCA_AGENT_BACKEND=dsh` 和 `SCA_DEFAULT_MODEL=deepseek-flash` 后重启 API 与 Worker。
 Docker 模式下，在「沙箱镜像（可选）」填写 `sca-sandbox:latest` 即可挂载 DSH 运行时。
