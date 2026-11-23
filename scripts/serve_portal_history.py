@@ -37,6 +37,7 @@ PORTAL_ASSETS = (
     "portal-home.js",
     "portal-conversation.js",
     "portal-models.js",
+    "portal-runtime.js",
     "portal-markdown.js",
     "portal-tasks.js",
     "portal-evolution.js",

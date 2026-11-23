@@ -20,7 +20,7 @@ from sqlalchemy import Column, MetaData, Table, Text, cast, func, select, text, 
 from sqlalchemy.dialects.postgresql import UUID, insert
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from sca.archive import archive_key
+from sca.archive import HISTORY_EVENT_ARCHIVE, archive_key
 from sca.core.errors import NotFoundError
 from sca.core.models import HISTORY_MISSING_ARTIFACT_URI, TERMINAL_STATES, TaskState
 from sca.db import schema as db
@@ -116,9 +116,9 @@ async def _write_tables(
     return counts
 
 
-def _copy_archive(store: Storage, task_id: str, output: BinaryIO) -> None:
+def _copy_archive(store: Storage, key: str, task_id: str, output: BinaryIO) -> None:
     with (
-        read_object(store, archive_key(task_id)) as (source, _),
+        read_object(store, key) as (source, _),
         gzip.GzipFile(fileobj=source) as original,
         gzip.GzipFile(fileobj=output, mode="wb", mtime=0) as target,
     ):
@@ -134,7 +134,7 @@ def _export_object(entry: HistoryTable, row: Row, bundle: BundleWriter, store: S
     assert member is not None
     if entry is TASKS:
         with bundle.open(member) as output:
-            _copy_archive(store, str(row["id"]), output)
+            _copy_archive(store, archive_key(row["id"], result=row["result"]), str(row["id"]), output)
         return
     if row["uri"] == HISTORY_MISSING_ARTIFACT_URI:
         raise NotFoundError("History artifact was missing at the source")
@@ -219,6 +219,10 @@ def _prepare(entry: HistoryTable, row: Row, snapshot_at: datetime, quota: int) -
         row["active"] = False
     elif entry is TASKS:
         row.update(result={**row["result"], IMPORTED: True}, slot_held=False, slot_requested_at=None)
+        if row["events_archived_at"] is not None:
+            row["result"][HISTORY_EVENT_ARCHIVE] = True
+        else:
+            row["result"].pop(HISTORY_EVENT_ARCHIVE, None)
         if row["state"] not in TERMINAL_STATES:
             if row["events_archived_at"] is not None:
                 raise HistoryError("An unfinished task has archived events")
@@ -354,7 +358,7 @@ class Importer:
                 key = history_artifact_key(row["task_id"], row["name"])
                 media_type = row["content_type"]
             else:
-                key = archive_key(row["id"])
+                key = archive_key(row["id"], result=row["result"])
                 media_type = "application/gzip"
             created = await asyncio.to_thread(
                 write_object, self.store, key, self.bundle.zip, member,
