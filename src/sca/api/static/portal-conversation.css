@@ -105,9 +105,11 @@
 .conversation-composer fieldset {
   display: grid; gap: .4rem; min-inline-size: 0; margin: 0; padding: 0; border: 0;
 }
-.conversation-compose-row { display: flex; align-items: end; gap: .4rem; }
+.conversation-compose-row {
+  display: flex; flex-wrap: wrap; align-items: end; justify-content: end; gap: .4rem;
+}
 .conversation-compose-row .conversation-input {
-  flex: 1 1 0;
+  flex: 1 1 8rem;
   min-inline-size: 0;
   min-block-size: 40px;
   max-block-size: calc(6lh + 1.1rem + 2px);
@@ -116,10 +118,11 @@
   resize: none;
   field-sizing: content;
 }
-.conversation-compose-actions { display: flex; flex-wrap: wrap; justify-content: end; align-items: center; gap: .3rem .4rem; }
+.conversation-compose-actions { display: grid; grid-auto-flow: column; align-items: end; gap: .4rem; }
+.conversation-compose-actions > span { display: flex; }
 .conversation-compose-actions button { white-space: nowrap; padding-inline: .7rem; }
 .conversation-compose-actions button:disabled { pointer-events: none; }
-.conversation-shortcuts { margin-inline-end: auto; }
+.conversation-shortcuts { line-height: 1.35; }
 .conversation-steering { font-size: .86rem; }
 .conversation-steering summary, .conversation-approval details summary { cursor: pointer; color: var(--accent); }
 .conversation-steering[open] .portal-actions { align-items: end; margin-block: .25rem; }
@@ -155,9 +158,11 @@
     position: static;
     block-size: max(26rem, calc(100dvh - 2rem));
   }
+  .conversation-compose-row .conversation-input { flex-basis: 100%; }
 }
 @media (max-width: 550px) {
   .conversation-compose-row .conversation-input { min-block-size: 44px; font-size: max(16px, 1rem); }
-  .conversation-compose-actions button { min-block-size: 44px; }
+  .conversation-compose-actions { inline-size: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .conversation-compose-actions button { inline-size: 100%; min-block-size: 44px; white-space: normal; }
   .approval-inbox li { grid-template-columns: minmax(0, 1fr); }
 }

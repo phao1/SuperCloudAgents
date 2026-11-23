@@ -142,8 +142,6 @@ const portalConversation = (() => {
     input.setAttribute('aria-label', message);
     const form = el('form', undefined, 'conversation-composer');
     const controls = el('fieldset');
-    const row = el('div', undefined, 'conversation-compose-row');
-    row.append(input);
     const sendLater = el('button', isTask ? '排队发送' : '下一代生效');
     const sendNow = el('button', isTask ? '打断并发送' : '立即生效', 'primary');
     Object.assign(sendLater, {type: 'submit', value: isTask ? 'queue' : 'next'});
@@ -153,9 +151,10 @@ const portalConversation = (() => {
     const nowAction = el('span');
     nowAction.append(sendNow);
     const actions = el('div', undefined, 'conversation-compose-actions');
-    actions.append(el('small', shortcuts, 'conversation-shortcuts'), sendLater, nowAction);
-    controls.append(row);
-    controls.append(actions);
+    actions.append(sendLater, nowAction);
+    const row = el('div', undefined, 'conversation-compose-row');
+    row.append(input, actions);
+    controls.append(row, el('small', shortcuts, 'conversation-shortcuts'));
     const feedback = el('p', undefined, 'status-text conversation-status');
     feedback.setAttribute('role', 'status');
     form.append(controls, feedback);
