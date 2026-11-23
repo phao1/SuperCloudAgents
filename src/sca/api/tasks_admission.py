@@ -1,5 +1,9 @@
+import os
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Annotated, Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, Header, Request
 from pydantic import BaseModel, ValidationError
@@ -16,6 +20,23 @@ from sca.kernel.kind import get
 from sca.observability import current_trace_id
 
 router = APIRouter(prefix="/v1")
+
+
+def new_empty_repository(data_dir: Path) -> str:
+    """Create a server-side git repository with one empty commit on main for a new project."""
+    path = data_dir / "new-repos" / uuid4().hex
+    path.mkdir(parents=True)
+    env = {**os.environ, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0"}
+    identity = ["-c", "user.name=SCA", "-c", "user.email=sca@localhost", "-c", "commit.gpgsign=false"]
+    try:
+        subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True, env=env,
+                       capture_output=True, timeout=30)
+        subprocess.run(["git", *identity, "-C", str(path), "commit", "-q", "--allow-empty",
+                        "-m", "Initial empty commit"], check=True, env=env, capture_output=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        shutil.rmtree(path, ignore_errors=True)
+        raise InvalidTaskError("repo_url: 新建空仓库失败") from exc
+    return path.resolve().as_posix()
 
 
 class Submission(BaseModel):
@@ -53,6 +74,11 @@ async def submit(
             raise InvalidTaskError(message) from exc
 
     def validate(values: dict) -> dict:
+        if body.kind == "coding" and not str(values.get("repo_url") or "").strip():
+            if settings is None:
+                raise InvalidTaskError("repo_url: 未配置数据目录，无法新建空仓库")
+            values = {**values, "repo_url": new_empty_repository(settings.data_dir),
+                      "base_ref": "main"}
         spec = parse(values)
         if local:
             from sca.agents.local import host_agent_binary, unavailable_source_backend

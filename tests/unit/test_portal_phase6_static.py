@@ -1736,7 +1736,7 @@ def test_portal_phase6_browser_submission():
         page.get_by_role("heading", name="代码影响分析").wait_for()
         assert calls[1]["spec"]["best_of"] == {"n": 2, "select": "human"}
         assert calls[1]["spec"]["tools"] == ["knowledge"]
-        assert calls[1]["spec"]["base_ref"] == "main"
+        assert "base_ref" not in calls[1]["spec"]  # blank branch: the server defaults to main
 
 
 def test_projects_browser_shared_modal_lifecycle():

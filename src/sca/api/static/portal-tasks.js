@@ -204,10 +204,9 @@ const portalTasks = (() => {
     );
     const form = ui.form([
       fields(
-        field('仓库地址', 'repo_url', {required: !primaryRepo,
-          placeholder: primaryRepo?.repo_url || 'Git URL 或服务端仓库路径'}),
-        field('基线分支、标签或提交', 'base_ref', {value: project ? '' : 'main', required: !project,
-          placeholder: primaryRepo?.base_ref || 'main'}),
+        field('仓库地址（可选）', 'repo_url',
+          {placeholder: primaryRepo?.repo_url || '留空则新建空仓库；也可填 Git URL 或服务端仓库路径'}),
+        field('基线分支、标签或提交（可选）', 'base_ref', {placeholder: primaryRepo?.base_ref || 'main'}),
         field(project ? '线程指令' : '任务指令', 'instruction', {required: true, multiline: true, wide: true}),
         field('准备命令（可选）', 'setup_command'),
         portalModels.field('模型（可选）', 'model', {placeholder: defaultModel}),
