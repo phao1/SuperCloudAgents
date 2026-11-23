@@ -140,6 +140,23 @@ def install_binaries(root: Path, *, include_opencode: bool = True) -> None:
         temporary.replace(metadata)
 
 
+def _bind_loopback(probe: socket.socket, port: int) -> None:
+    address = ("127.0.0.1", port)
+    try:
+        probe.bind(address)
+    except OSError as exc:
+        if sys.platform == "win32" or exc.errno != errno.EADDRINUSE:
+            raise
+        # A reusable bind can shadow a live wildcard listener on macOS.
+        # Check for a listener before retrying a bind blocked by TIME_WAIT.
+        with socket.socket() as connection:
+            connection.settimeout(0.25)
+            if connection.connect_ex(address) != errno.ECONNREFUSED:
+                raise
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(address)
+
+
 def select_port(port: int, strict: bool) -> int:
     try:
         probe = socket.socket()
@@ -149,7 +166,7 @@ def select_port(port: int, strict: bool) -> int:
         if sys.platform == "win32":
             probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         try:
-            probe.bind(("127.0.0.1", port))
+            _bind_loopback(probe, port)
         except OSError as exc:
             if exc.errno != errno.EADDRINUSE and getattr(exc, "winerror", None) not in (10013, 10048):
                 raise ValueError(f"无法检查本机端口 {port}。") from exc
