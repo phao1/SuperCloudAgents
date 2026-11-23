@@ -114,7 +114,8 @@ def test_new_project_form_shows_output_and_defaults_to_planning():
     assert "portalConfig.projects_dir" in builder and "'/<项目名>'" in builder
     assert "outputField.hidden = autoFinish.hidden = existingRepo || !projectsDir" in builder
     assert "pushOptions.hidden = !existingRepo" in builder
-    assert "existingRepo || !bestOptions.hidden ? 'none' : 'auto'" in builder
+    # Every Portal task plans automatically by default; Best-of-N disables planning.
+    assert "let savedPlanMode = 'auto';" in builder and "if (bestOf) plan.value = 'none';" in builder
     assert "check('规划后等待人工确认', 'plan_review')" in builder
     assert "check('完成后无需人工审核，直接写入', 'auto_finish')" in builder
     assert "control(form, 'plan_mode').onchange" in builder
