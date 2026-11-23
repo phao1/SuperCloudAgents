@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import tarfile
+import time
 from pathlib import Path
 
 import pytest
@@ -150,6 +151,9 @@ async def test_gc_cleans_interrupted_publication(tmp_path):
         orphan = store.root / name
         orphan.mkdir()
         (orphan / "data").write_text("unused")
+        # Windows clocks can place a fresh mtime slightly after time.time().
+        past = time.time() - 3600
+        os.utime(orphan, (past, past))
     assert await store.prune(0) == 0
     assert sorted(p.name for p in store.root.iterdir()) == ["locks"]
 
