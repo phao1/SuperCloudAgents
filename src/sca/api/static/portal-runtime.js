@@ -45,6 +45,7 @@ window.SCAPortalRuntime = (() => {
       node('small', '切换时自动迁移历史记录'), status, log);
 
     let info = null, loading = false, switching = false;
+    const mounted = () => mounts.get(target) === load;
 
     function render() {
       const record = info.switch;
@@ -72,13 +73,15 @@ window.SCAPortalRuntime = (() => {
     async function watch(id, step) {
       const deadline = Date.now() + 600000;
       let delay = 1000;
-      while (Date.now() < deadline) {
+      while (mounted() && Date.now() < deadline) {
         try {
           const health = await fetch('/healthz', {
             cache: 'no-store', signal: AbortSignal.timeout(Math.min(3000, deadline - Date.now())),
           });
+          if (!mounted()) return;
           if (!health.ok || Date.now() >= deadline) throw Error();
           const snapshot = await request(undefined, Math.min(30000, deadline - Date.now()));
+          if (!mounted()) return;
           if (snapshot.switch?.id === id) {
             info = snapshot;
             step = info.switch.step;
@@ -91,12 +94,14 @@ window.SCAPortalRuntime = (() => {
             }
           }
         } catch {
+          if (!mounted()) return;
           status.textContent = '正在重启…（' + steps[step] + '）';
         }
         const remaining = deadline - Date.now();
         if (remaining > 0) await new Promise(resolve => setTimeout(resolve, Math.min(delay, remaining)));
         delay = Math.min(8000, delay * 2);
       }
+      if (!mounted()) return;
       switching = false;
       status.textContent = '等待 Portal 恢复超时。请刷新数据查看最新切换结果。';
     }
@@ -110,11 +115,13 @@ window.SCAPortalRuntime = (() => {
       try {
         accepted = await request({mode, carry_history: true});
       } catch (error) {
+        if (!mounted()) return;
         switching = false;
         render();
         status.textContent = error.status ? error.message : '无法提交切换请求，请刷新数据查看切换状态。';
         return;
       }
+      if (!mounted()) return;
       status.textContent = '正在切换…（等待切换）';
       await watch(accepted.id, 'queued');
     }
@@ -123,11 +130,14 @@ window.SCAPortalRuntime = (() => {
       if (loading || switching) return;
       loading = true;
       try {
-        info = await request();
+        const snapshot = await request();
+        if (!mounted()) return;
+        info = snapshot;
         switching = info.switch?.status === 'running';
         render();
         if (switching) void watch(info.switch.id, info.switch.step);
       } catch (error) {
+        if (!mounted()) return;
         target.hidden = error.status === 401 || error.status === 403;
         if (!target.hidden) status.textContent = '无法读取运行模式，请刷新数据后重试。';
       } finally {
@@ -139,5 +149,11 @@ window.SCAPortalRuntime = (() => {
     return load();
   }
 
-  return {mount};
+  function unmount(target) {
+    mounts.delete(target);
+    target.replaceChildren();
+    target.hidden = false;
+  }
+
+  return {mount, unmount};
 })();

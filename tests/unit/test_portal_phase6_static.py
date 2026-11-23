@@ -263,7 +263,7 @@ def test_portal_route_bootstrap(tmp_path, destination):
     assert '只读访客模式 · <a href="#/settings/access">登录</a>' in source
     assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
-    assert 'href="#/approvals" data-nav="approvals" data-access="tenant" hidden' in source
+    assert 'href="#/approvals" id="approvals-link" data-nav="approvals" data-access="tenant" hidden' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
     node = shutil.which("node") or Path.home() / ".local/bin/node"
@@ -368,6 +368,7 @@ const links=Object.entries(config.nav).map(([page,[access,hidden]])=>Object.assi
 }));
 const navLink=page=>links.find(link=>link.dataset.nav===page);
 const approvalLink=navLink('approvals');
+elements.set('approvals-link',approvalLink);
 element('primary-nav').querySelectorAll=()=>links;
 const document={
   getElementById:element,createElement:tag=>Object.assign(new Element(),{tagName:tag.toUpperCase(),style:{}}),
@@ -612,6 +613,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('home-spend').textContent,'$0.0200');
     assert.equal(approvalLink.hidden,false);
     assert.equal($('approvals-count').textContent,'0');
+    assert.equal(approvalLink.getAttribute('aria-label'),'待审批 0 项');
     assert.equal($('local-access-badge').hidden,false);
     assert.equal($('connect-form').hidden,true);
     assert.equal($('guest-view-banner').hidden,true);
@@ -655,6 +657,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('guest-view-banner').hidden,false);
     assert.equal(approvalLink.hidden,true);
     assert.equal($('approvals-count').textContent,'');
+    assert.equal(approvalLink.hasAttribute('aria-label'),false);
     await assert.rejects(api('/tasks',{}),/请先登录/);
 
     $('token').value='fixture-admin';
@@ -1025,7 +1028,7 @@ def serve_portal(route, path):
         route.fulfill(status=200, content_type="text/html", body=(STATIC / "portal.html").read_text())
         return True
     name = path.rsplit("/", 1)[-1]
-    if name in {*ASSETS, *STYLES, "task-flow.js", "task-timeline.js"}:
+    if name in {*ASSETS, *STYLES, "portal-runtime.js", "task-flow.js", "task-timeline.js"}:
         kind = "text/javascript" if name.endswith(".js") else "text/css"
         route.fulfill(status=200, content_type=kind, body=(STATIC / name).read_text())
         return True
@@ -1098,8 +1101,10 @@ def test_portal_browser_tracks_provider_restart_after_writes(local):
         panel.get_by_role('heading', name=provider['name'], exact=True).wait_for(state='hidden')
 
 
-@pytest.mark.parametrize("width", [1440, 390])
-def test_portal_browser_navigation_layout(width):
+@pytest.mark.parametrize(("width", "height"), [(1440, 1000), (390, 844)])
+def test_portal_browser_navigation_layout(width, height):
+    title = "检查 Windows 导入的任务、项目、演进记录和审批，验证导入前后的关联与可读性"
+
     def handle(route):
         path = urlsplit(route.request.url).path
         if serve_portal(route, path):
@@ -1108,11 +1113,18 @@ def test_portal_browser_navigation_layout(width):
             '/v1/portal/config': {**TENANT_PORTAL_CONFIG, 'portal_require_token': False,
                                   'local_identity': {'role': 'admin', 'tenant_id': 'eval'}},
             '/v1/portal/access': {'require_token': False, 'local_no_token_active': True},
-            '/v1/approvals': {'items': [], 'count': 0},
+            '/v1/approvals': {'count': 1, 'items': [
+                {'id': 'task-fixture', 'kind': 'task_result', 'href': '#/tasks/task-fixture/approval',
+                 'title': title, 'created_at': '2026-11-22T16:31:00Z'},
+            ]},
+            '/v1/portal/runtime': {'current_mode': 'source', 'platform': 'Windows', 'switch': None,
+                                   'modes': [{'mode': 'source', 'available': True},
+                                             {'mode': 'docker', 'available': False,
+                                              'reason': 'Windows 版仅支持源码模式'}]},
         }.get(path, []))
 
     with portal_browser() as browser:
-        page = browser.new_page(viewport={"width": width, "height": 900})
+        page = browser.new_page(viewport={"width": width, "height": height})
         page.route('**/*', handle)
         page.goto('http://portal.test/portal')
         page.locator('#local-access-badge').wait_for()
@@ -1128,10 +1140,27 @@ def test_portal_browser_navigation_layout(width):
         assert len(bounds) == 11
         assert all(box['width'] == 18 and box['x'] == bounds[0]['x'] for box in bounds)
         assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        nav.get_by_role('link', name='待审批 1 项', exact=True).click()
+        item = page.get_by_role('link', name=title, exact=True)
+        item.wait_for()
+        assert item.evaluate('(link) => link.scrollWidth === link.clientWidth')
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        if width == 390:
+            toggle.click()
         nav.get_by_role('link', name='设置', exact=True).click()
         page.get_by_role('heading', name='设置 · 访问与安全').wait_for()
         assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
         assert nav.is_hidden() == (width == 390)
+        page.get_by_role('link', name='运行环境', exact=True).click()
+        runtime = page.locator('#settings-runtime')
+        runtime.get_by_text('当前运行模式 源码模式', exact=True).wait_for()
+        runtime.get_by_text('Windows 版仅支持源码模式', exact=True).wait_for()
+        assert runtime.get_by_role('button', name='切换到Docker 模式').is_disabled()
+        assert page.evaluate('document.documentElement.scrollWidth === innerWidth')
+        for breakpoint in (901, 900):
+            page.set_viewport_size({"width": breakpoint, "height": height})
+            assert toggle.is_visible() == (breakpoint == 900)
+            assert nav.is_visible() == (breakpoint == 901)
 
 
 def test_portal_browser_guest_evolution_dag_polls_and_links_to_task_history():
@@ -1417,7 +1446,7 @@ def test_portal_browser_task_chat_layout():
         text = composer.get_by_role("textbox", name="插话")
         send = composer.get_by_role("button", name="发送")
         feed.get_by_text("检查第 29 个边界条件").wait_for(state="attached")
-        page.get_by_text("(1)", exact=True).wait_for()
+        page.get_by_role("link", name="待审批 1 项", exact=True).get_by_text("1", exact=True).wait_for()
         assert chat.bounding_box()["x"] > dag.bounding_box()["x"]
         assert chat.evaluate("(node) => getComputedStyle(node).position") == "sticky"
         assert chat.bounding_box()["height"] >= 800
@@ -1460,7 +1489,9 @@ def test_portal_browser_task_chat_layout():
         before = feed.bounding_box()["height"]
         card.get_by_role("button", name="批准", exact=True).click()
         card.wait_for(state="hidden")
-        page.wait_for_function("document.getElementById('approvals-count').textContent === '0'")
+        refreshed_badge = page.locator('#approvals-link[aria-label="待审批 0 项"] #approvals-count')
+        refreshed_badge.wait_for(state="attached")
+        assert refreshed_badge.text_content() == "0"
         feed.locator(".conversation-approval-chip").get_by_text("已批准").wait_for()
         task["state"] = "SUCCEEDED"
         chat.get_by_text("任务已结束", exact=True).wait_for(timeout=6500)
@@ -1528,6 +1559,10 @@ def test_portal_phase6_browser_submission():
         path = urlsplit(req.url).path
         if serve_portal(route, path):
             return
+        if path == "/v1/portal/config" and not req.header_value("authorization"):
+            return route.fulfill(status=401, json={"error": {"message": "需要访问令牌"}})
+        if path == "/v1/portal/whoami" or (path == "/v1/tasks" and req.method == "POST"):
+            assert req.header_value("authorization") == "Bearer fixture-member"
         if path == "/v1/tasks" and req.method == "POST":
             calls.append(req.post_data_json)
             if len(calls) == 1:
@@ -1537,6 +1572,7 @@ def test_portal_phase6_browser_submission():
             "/v1/portal/whoami": {"tenant_id": "acme", "role": "member", "platform_admin": False},
             "/v1/portal/config": {"models": ["model-a"], "agent_backends": ["opencode", "codex", "dsh"],
                                   "default_agent_backend": "codex", "default_model": "model-a"},
+            "/v1/approvals": {"items": [], "count": 0},
             "/v1/agents/opencode/versions": [],
             "/v1/tools/available": [{"name": "knowledge", "description": "知识检索"}],
             "/v1/tasks": [],
@@ -1551,19 +1587,34 @@ def test_portal_phase6_browser_submission():
     with portal_browser() as browser:
         page = browser.new_page()
         page.route("**/*", handle)
+        page.goto("http://portal.test/portal")
+        connect = page.get_by_role("link", name="前往连接", exact=True)
+        token = page.get_by_label("Portal 访问令牌")
+        connect.click()
+        token.wait_for()
         page.goto("http://portal.test/portal#/submit")
-        page.locator("#token").fill("fixture-member")
+        token.wait_for(state="hidden")
+        connect.click()
+        page.get_by_role("heading", name="设置 · 访问与安全").wait_for()
+        token.fill("fixture-member")
         page.get_by_role("button", name="连接", exact=True).click()
-        page.get_by_role("heading", name="提交任务").wait_for()
-        nav = page.locator('nav[aria-label="主导航"]')
-        assert not nav.locator('a[href="#/team"]').is_visible()
-        assert not nav.locator('a[href="#/platform"]').is_visible()
+        page.wait_for_url("**/portal#/submit")
+        page.get_by_role("heading", name="新建任务", exact=True, level=1).wait_for()
+        form = page.locator("#submit-form")
+        form.get_by_role("button", name="提交任务", exact=True).wait_for()
+        nav = page.get_by_role("navigation", name="主导航")
+        nav.get_by_role("link", name="设置", exact=True).click()
+        tabs = page.get_by_role("navigation", name="设置导航")
+        tabs.get_by_role("link", name="访问与安全", exact=True).wait_for()
+        assert tabs.get_by_role("link", name="团队与用量").is_hidden()
+        assert tabs.get_by_role("link", name="平台管理").is_hidden()
+        nav.get_by_role("link", name="任务", exact=True).click()
+        page.get_by_role("link", name="新建任务", exact=True).click()
         page.get_by_label("仓库地址").fill("https://example.test/org/repo.git")
         page.get_by_label("任务指令").fill("补测试")
         page.get_by_label("Agent 后端").select_option("dsh")
         assert page.get_by_label("OpenCode 版本（可选）").is_disabled()
         page.get_by_label("Agent 后端").select_option("opencode")
-        form = page.locator("#submit-form")
         form.get_by_text("Best-of-N 与执行设置", exact=True).click()
         page.get_by_label("并行尝试数").select_option("2")
         page.get_by_label("选择方式").select_option("human")

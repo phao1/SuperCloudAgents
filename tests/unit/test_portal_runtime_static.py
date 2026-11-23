@@ -67,6 +67,11 @@ require(process.argv[1]);
   assert.equal(target.children[1].textContent, '当前运行模式 Docker 模式');
   assert.equal(status(), '运行模式切换完成。');
   assert.equal(reloaded, 1);
+  window.SCAPortalRuntime.unmount(target);
+  assert.equal(target.children.length, 0);
+  requests.push([endpoint, done]);
+  await window.SCAPortalRuntime.mount(target);
+  assert.equal(target.children[1].textContent, '当前运行模式 Docker 模式');
   assert.deepEqual(requests, []);
 })().catch(error => { console.error(error); process.exitCode = 1; });
 """

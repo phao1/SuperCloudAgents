@@ -72,7 +72,8 @@ Or open <http://localhost:8000> for the web page (token: `dev-token`). The Tempo
 
 两种模式都使用 Python 3.12 和 Git。打开脚本打印的 `http://127.0.0.1:8000/portal`，
 默认以 `eval` 管理员身份进入首页，顶部显示「本机免令牌」。可在「设置 → 访问与安全」开启
-「需要访问令牌」。需要登录时，从 `.data/portal.env` 私下查找 `SCA_EVAL_API_TOKEN`。
+「需要访问令牌」。需要登录时点「前往连接」，并在「访问与安全」输入令牌。本机管理员可从
+`.data/portal.env` 私下查找 `SCA_EVAL_API_TOKEN`。
 [访问开关与 API](docs/operations.md#本机-portal-访问令牌)
 
 ```bash
@@ -87,7 +88,7 @@ bash scripts/portal_demo.sh status
 bash scripts/portal_demo.sh down
 ```
 
-在 Linux 和 macOS 上，本机 `eval` 管理员可在 Portal「概览 → 运行模式」切换。确认后 Portal
+在 Linux 和 macOS 上，本机 `eval` 管理员可在 Portal「设置 → 运行环境」切换。确认后 Portal
 自动重启并迁移历史。后续运行 `bash scripts/portal_demo.sh up` 会使用保存的首选模式，
 `--mode` 优先于 `SCA_RUNTIME_MODE`，两者均覆盖首选模式。未指定或保存模式时，脚本优先使用
 可用的 Docker，否则提示并进入源码模式。[切换步骤与 API](docs/operations.md#切换运行模式)

@@ -8,7 +8,6 @@ const portalHome = (() => {
   }
 
   function sync() {
-    $('home-connect').hidden = Boolean(portalIdentity);
     $('home-evolution-panel').hidden = !canShowEvolutions();
   }
 

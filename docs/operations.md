@@ -59,6 +59,9 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 新请求立即需要令牌才能以管理员身份操作。用 Bash 的 `grep SCA_EVAL_API_TOKEN .data/portal.env`
 或 PowerShell 的 `Select-String SCA_EVAL_API_TOKEN .\.data\portal.env` 在本机私下查看令牌。
 
+尚未连接时，在首页或受限页面点「前往连接」，在「设置 → 访问与安全」输入令牌并连接。
+从受限页面进入连接时，登录成功且具备权限后会返回原页面。访客也可以点「只读访客模式」提示条上的「登录」。
+
 启动默认值是 `SCA_PORTAL_REQUIRE_TOKEN=0`。启动脚本优先使用进程环境中的值，其次是
 `.data/portal.env` 已保存的值，再其次是 `.env`，并将结果保存到 `.data/portal.env`。
 运行时开关保存在 `.data/portal-access.json`，优先于启动默认值。配置文件损坏时要求令牌。
@@ -70,6 +73,7 @@ curl "$SCA_API_URL/v1/tenant/members" -H "Authorization: Bearer $TENANT_TOKEN"
 
 ```bash
 API=http://127.0.0.1:8000
+curl -fsS "$API/v1/portal/whoami" -H "Authorization: Bearer $SCA_EVAL_API_TOKEN"
 curl -fsS "$API/v1/portal/access"
 curl -fsS -X PUT "$API/v1/portal/access" \
   -H "Authorization: Bearer $SCA_EVAL_API_TOKEN" \
@@ -290,7 +294,7 @@ curl -fsS http://127.0.0.1:8000/v1/tasks -H "Authorization: Bearer $PORTAL_TOKEN
 
 ## 切换运行模式
 
-在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「概览 → 运行模式」，选择可用模式
+在 Linux 和 macOS 上，用本机 `eval` 管理员身份打开 Portal「设置 → 运行环境」，选择可用模式
 并确认重启。页面会显示导出、停止、启动和导入进度，并在服务恢复后刷新工作区。首次准备 Docker
 沙箱镜像和 OpenCode 构建仍使用 `bash scripts/portal_demo.sh setup --mode docker`。
 Windows 启动脚本使用源码模式，页面会说明 Docker 模式不可用。

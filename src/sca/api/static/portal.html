@@ -454,7 +454,7 @@ body[data-trace-expanded] { overflow: hidden; }
           <a href="#/home" data-nav="home"><svg class="portal-icon" aria-hidden="true"><use href="#icon-home"/></svg>首页</a>
           <a href="#/projects" data-nav="projects" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-projects"/></svg>项目</a>
           <a href="#/tasks" data-nav="tasks" data-access="history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-tasks"/></svg>任务</a>
-          <a href="#/approvals" data-nav="approvals" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-approvals"/></svg>待审批<span id="approvals-count" class="nav-count"></span></a>
+          <a href="#/approvals" id="approvals-link" data-nav="approvals" data-access="tenant" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-approvals"/></svg>待审批<span id="approvals-count" class="nav-count"></span></a>
           <a href="#/history" data-nav="history" hidden><svg class="portal-icon" aria-hidden="true"><use href="#icon-history"/></svg>任务历史</a>
         </div>
         <div class="nav-group" role="group" aria-labelledby="nav-evolution">
@@ -497,17 +497,12 @@ body[data-trace-expanded] { overflow: hidden; }
     <p id="error" role="alert"></p>
     <div id="connect-prompt" class="panel" hidden>
       <p>请先在「设置 → 访问与安全」连接工作空间。</p>
-      <a href="#/settings/access" id="connect-link">前往连接</a>
+      <div class="form-actions"><a href="#/settings/access" id="connect-link" class="button primary">前往连接</a></div>
     </div>
     <nav id="page-tabs" class="page-tabs portal-tabs" hidden></nav>
 
     <section id="home-page" class="page">
       <p id="overview-provider-error" class="provider-error-banner" role="alert" hidden></p>
-      <div id="home-connect" class="panel">
-        <h2>连接工作空间</h2>
-        <p>连接后即可查看工作空间的任务和运行记录。</p>
-        <div class="form-actions"><a class="button primary" href="#/settings/access">连接工作空间</a></div>
-      </div>
       <div id="home-platform" class="panel" data-access="platform" hidden>
         <h2>平台管理</h2>
         <div class="form-actions"><a class="button" href="#/settings/platform">查看租户和平台用量</a></div>
@@ -995,7 +990,7 @@ const archivePortal=typeof SCAPortalArchive==='undefined'?null:SCAPortalArchive;
 let portalToken=archivePortal?'':localStorage.getItem('sca-portal-token')||'';
 let guestChecked=false;
 let portalConfig=null, portalIdentity=null, evidenceTrigger=null, appliedPreset=null, launchingRun=false;
-let routeLoad=null;
+let routeLoad=null, connectReturnHash='';
 let selectedIteration=null, currentLoopTask=null, pendingReview=null, promptPreviewKey=null;
 const pendingActions=new Set();
 $('token').value=portalToken;
@@ -2540,7 +2535,9 @@ async function showRoute({page,current,parts}){
   if(current!=='evolutions')portalEvolution.reset();
   syncAccess();
   portalNav.display(current,parts);
-  $('connect-prompt').hidden=current===page;
+  if(current!=='access')connectReturnHash='';
+  const showConnectPrompt=current!==page||(page==='home'&&!portalIdentity);
+  $('connect-prompt').hidden=!showConnectPrompt;
   $('connect-prompt').querySelector('p').textContent=portalIdentity&&!portalIdentity.guest
     ?'当前令牌无法访问此页面，请切换到具有相应权限的令牌。':'请先在「设置 → 访问与安全」连接工作空间。';
   $('evidence').hidden=true;
@@ -2623,7 +2620,7 @@ async function loadPage(page,parts,polling=false){
     if(portalUI.can('tenant'))await loadConfig();
     if(!current())return;
     if(page==='models')return portalModels.load();
-    if(page==='runtime')return portalSettings.runtime(portalConfig);
+    if(page==='runtime')return portalSettings.runtime(portalConfig,polling);
     return;
   }
   if(page==='versions')return loadVersions();
@@ -2703,11 +2700,16 @@ $('optimize-prompt').onclick=()=>{
     ||[...run.results].sort((a,b)=>Number(b.tokens||0)-Number(a.tokens||0))[0];
   chooseFix(run,row,'system_prompt');
 };
+$('connect-link').onclick=()=>{
+  const {page,current}=pageRoute();
+  if(current!==page)connectReturnHash=location.hash;
+};
 $('connect-form').onsubmit=async event=>{
   event.preventDefault();
   if(refreshing)return;
   const token=$('token').value.trim();
   if(!token)return;
+  const accessHash=location.hash;
   resetPortalSession();
   portalToken=token;
   $('connect').disabled=true;
@@ -2720,6 +2722,10 @@ $('connect-form').onsubmit=async event=>{
   }
   else{portalToken='';localStorage.removeItem('sca-portal-token')}
   $('connect').disabled=false;
+  if(portalToken&&connectReturnHash&&location.hash===accessHash){
+    const {page,current}=portalNav.liveRoute(connectReturnHash);
+    if(current===page)location.hash=connectReturnHash;
+  }
 };
 $('suite').onchange=syncEvalForm;
 $('backend').onchange=syncEvalForm;

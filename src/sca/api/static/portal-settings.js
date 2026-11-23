@@ -677,17 +677,20 @@ const portalSettings = (() => {
     if (visible && !input.disabled) input.checked = required;
   }
 
-  async function runtime(config) {
+  async function runtime(config, polling) {
     const root = $('settings-runtime');
     const extension = window.SCAPortalRuntime;
-    if (typeof extension?.mount === 'function') {
-      if (runtimeModule === extension) return;
-      root.replaceChildren();
-      runtimeModule = extension;
+    if (portalUI.can('eval-admin') && typeof extension?.mount === 'function') {
+      if (runtimeModule === extension && polling) return;
+      if (runtimeModule !== extension) {
+        root.replaceChildren();
+        runtimeModule = extension;
+      }
+      const identity = portalIdentity;
       try {
-        await window.SCAPortalRuntime?.mount(root);
+        await extension.mount(root);
       } catch (err) {
-        if (runtimeModule === extension) runtimeModule = null;
+        if (portalIdentity === identity) runtimeModule = null;
         throw err;
       }
       return;
@@ -744,8 +747,10 @@ const portalSettings = (() => {
     dismissToken = null;
     for (const page of mounted.keys()) $(page + '-content').replaceChildren();
     mounted.clear();
+    const runtimeRoot = $('settings-runtime');
+    if (runtimeModule?.unmount) runtimeModule.unmount(runtimeRoot);
+    else runtimeRoot.replaceChildren();
     runtimeModule = null;
-    $('settings-runtime').replaceChildren();
   }
 
   return {load, reset, clearSensitive, configureAccess, bindAccess, runtime};

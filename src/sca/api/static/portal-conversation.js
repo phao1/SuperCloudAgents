@@ -457,13 +457,20 @@ const portalApprovals = (() => {
     return {node, header, status, feedback};
   }
 
+  function setInboxCount(count) {
+    $('approvals-count').textContent = count === undefined ? '' : String(count);
+    const link = $('approvals-link');
+    if (count === undefined) link.removeAttribute('aria-label');
+    else link.setAttribute('aria-label', '待审批 ' + count + ' 项');
+    portalHome.setApprovals(count);
+  }
+
   function reset() {
     identity = pending = undefined;
     nextFetch = 0;
     rows = [];
     submitted.clear();
-    $('approvals-count').textContent = '';
-    portalHome.setApprovals();
+    setInboxCount();
     $('approvals-list').replaceChildren();
     $('approvals-status').textContent = '';
   }
@@ -489,8 +496,7 @@ const portalApprovals = (() => {
       entry.append(details, el('small', portalUI.date(row.created_at)));
       list.append(entry);
     }
-    $('approvals-count').textContent = String(visible.length);
-    portalHome.setApprovals(visible.length);
+    setInboxCount(visible.length);
     $('approvals-list').replaceChildren(visible.length ? list : el('p', '当前没有待审批事项。', 'empty-state'));
   }
 
