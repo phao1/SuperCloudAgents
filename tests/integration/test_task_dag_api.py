@@ -117,6 +117,37 @@ async def test_task_dag_http_contract_and_portal_assets_with_fake_store(tmp_path
             assert response.status_code == 200 and response.headers["content-type"].startswith(media)
 
 
+async def test_dag_api_projects_agent_lanes_and_dependencies(tmp_path, monkeypatch):
+    owner = make_task("tenant-a", spec={"subtasks": [
+        {"name": "a"}, {"name": "b"}, {"name": "c", "depends_on": ["a"]},
+        {"name": "join", "depends_on": ["a", "b"]},
+    ]})
+    assigned = [{"name": name, "agent_lane": lane, "backend": "dsh", "agent_label": f"Agent {lane} · DeepSeek Harness"}
+                for name, lane in (("a", 1), ("b", 2), ("c", 1), ("join", 3))]
+    events = [
+        Event(task_id=owner.id, seq=1, type="subtasks.scheduled", created_at=NOW,
+              payload={"subtasks": assigned, "max_parallel_agents": 2}),
+        Event(task_id=owner.id, seq=2, type="subtask.completed", created_at=NOW, payload={"subtask": "a", "passed": True}),
+        Event(task_id=owner.id, seq=3, type="agent.turn_started", created_at=NOW, payload={"subtask": "c", "turn": 1}),
+        Event(task_id=owner.id, seq=4, type="subtask.completed", created_at=NOW, payload={"subtask": "b", "passed": True}),
+    ]
+    async with app_client(MemoryHistory([owner], events), tmp_path, monkeypatch) as client:
+        response = await client.get(f"/v1/tasks/{owner.id}/dag", headers=VIEWER)
+    assert response.status_code == 200
+    graph = response.json()
+    root = graph["nodes"][0]["meta"]
+    assert (root["agent_count"], root["subtask_count"], root["max_parallel_agents"]) == (3, 4, 2)
+    assert root["agent_lanes"] == [
+        {"agent_lane": lane, "backend": "dsh", "agent_label": f"Agent {lane} · DeepSeek Harness",
+         "subtasks": names, "status": status}
+        for lane, names, status in ((1, ["a", "c"], "running"), (2, ["b"], "succeeded"), (3, ["join"], "pending"))
+    ]
+    subtasks = {node["label"]: node for node in graph["nodes"] if node["kind"] == "subtask"}
+    assert {"from": subtasks["a"]["id"], "to": subtasks["join"]["id"], "kind": "dependency"} in graph["edges"]
+    turn = next(node for node in graph["nodes"] if node["kind"] == "turn")
+    assert turn["meta"]["agent_lane"] == 1
+
+
 @pytest.fixture
 def postgres():
     try:

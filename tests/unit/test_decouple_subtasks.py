@@ -6,6 +6,7 @@ import asyncio
 import io
 import json
 import shutil
+import sys
 import tarfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -283,19 +284,84 @@ async def test_failed_or_conflicting_dependencies_block_agent_turn(build, confli
     assert "join" not in {event["subtask"] for event in h.events("agent.turn_started")}
 
 
-async def test_final_merge_blocks_changes_based_on_a_conflicted_dependency(build):
+@pytest.mark.parametrize("with_lanes", [False, True])
+async def test_final_merge_blocks_changes_based_on_a_conflicted_dependency(build, with_lanes):
     h = build(subtasks=[
         {"name": "first", "instruction": script("echo 'a = 1' > common.py")},
         {"name": "second", "instruction": script("echo 'b = 2' > common.py")},
         {"name": "dependent", "depends_on": ["second"],
          "instruction": script("grep 'b = 2' common.py\necho 'ok = True' > followup.py")},
     ])
+    if with_lanes:
+        h.spec["_max_parallel_agents"] = 2
     result = await h.run()
     assert {row["name"]: row["status"] for row in result["unresolved"]} == {
         "second": "conflict", "dependent": "blocked",
     }
     assert "dependent" in {event["subtask"] for event in h.events("agent.turn_started")}
     assert not (h.acts._workspace(h.task_id).workspace / "followup.py").exists()
+    if with_lanes:
+        patch = await h.objects.get(f"tasks/{h.task_id}/subtask-second.patch")
+        assert b"+b = 2" in patch and b"followup.py" not in patch
+
+
+@pytest.mark.parametrize(("transport", "driver", "resumable"), [
+    pytest.param("mount", "docker", True, marks=pytest.mark.skipif(
+        sys.platform == "win32", reason="The mount fixture uses POSIX commands",
+    )),
+    ("sync", "local", True),
+    ("sync", "local", False),
+])
+async def test_lane_reuses_workspace_and_reads_exact_dependency_checkpoints(build, transport, driver, resumable):
+    h = build(
+        transport=transport, driver=driver, setup_command="mkdir -p .sca && touch .sca/setup",
+        verify_command="if test -f left/seed.py; then echo dirty > left/seed.py; touch scratch; fi",
+        subtasks=[
+            {"name": "a", "instruction": script("echo from-a > left/seed.py"), "paths": ["left/"]},
+            {"name": "b", "instruction": script("echo from-b > right/seed.py"), "paths": ["right/"]},
+            {"name": "e", "depends_on": ["a"], "paths": ["left/"], "instruction": script(
+                "test -f .sca/setup\ntest ! -e scratch\ngrep -x from-a left/seed.py\n"
+                "test ! -f right/seed.py\nrm left/seed.py"
+            )},
+            {"name": "join", "depends_on": ["a", "b"], "paths": ["tests/"], "instruction": script(
+                "grep -x from-a left/seed.py\ngrep -x from-b right/seed.py\n"
+                "echo joined > tests/result.py"
+            )},
+        ],
+    )
+    h.spec["_max_parallel_agents"] = 1
+    runs = []
+
+    class RecordingFake(FakeBackend):
+        async def run_turn(self, sandbox, sandbox_id, ctx, prompt, *, session_id, timeout_s):
+            runs.append((sandbox_id, ctx.agent_home_host, session_id, prompt))
+            async for event in super().run_turn(
+                sandbox, sandbox_id, ctx, prompt, session_id=session_id, timeout_s=timeout_s,
+            ):
+                if resumable or event.type != "session_started":
+                    yield event
+
+    h.acts.backends["fake"] = RecordingFake()
+    h.acts.backends["fake"].state_transport = transport
+    assert await h.run() == {"skip_turn": True, "unresolved": []}
+    assert h.started == ["a", "e", "b", "join"]
+    assert runs[0][:2] == runs[1][:2] and len({run[0] for run in runs}) == 3
+    assert runs[0][2] is None
+    assert runs[1][2] == (f"fake-{h.task_id}" if resumable else None)
+    assert ("Previous subtask's turn summary: \"Fake turn completed.\"" in runs[1][3]) is not resumable
+    assert all(event["exit_code"] == 0 for event in h.events("agent.command"))
+    assert [event["subtask"] for event in h.events("setup.completed")] == ["a", "b", "join"]
+    assert h.events("subtask.queued")[0]["subtask"] == "b"
+    assert [event["agent_lane"] for event in h.events("agent.turn_started")] == [1, 1, 2, 3]
+    assert {event["agent_label"] for event in h.events("workspace.checkpointed")} == {
+        "Agent 1 · 脚本后端", "Agent 2 · 脚本后端", "Agent 3 · 脚本后端",
+    }
+    results = {row["name"]: row for row in h.store.task.result["subtasks"]}
+    assert results["a"]["branch"] == results["e"]["branch"]
+    assert results["e"]["status"] == "merged"
+    workspace = h.acts._workspace(h.task_id).workspace
+    assert not (workspace / "left/seed.py").exists()
+    assert (workspace / "tests/result.py").read_text().strip() == "joined"
 
 
 @pytest.mark.parametrize("transport", ["mount", "sync"])

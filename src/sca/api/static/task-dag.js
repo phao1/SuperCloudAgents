@@ -3,6 +3,7 @@
 const SCATaskDAG = (() => {
   const NS = 'http://www.w3.org/2000/svg';
   const nodeWidth = 216, nodeHeight = 60, summaryHeight = 84, margin = 24;
+  const agentNodeWidth = 138;
   const minScale = .85;
   const statusLabels = {
     pending: '待执行', running: '运行中', succeeded: '已完成',
@@ -71,6 +72,7 @@ const SCATaskDAG = (() => {
     return {
       id, kind: 'execution', label: title + activity, status, summary,
       task_id: scope.task_id, started_at, finished_at,
+      meta: {agent_lane: scope.meta?.agent_lane, agent_label: scope.meta?.agent_label},
       duration_s: duration === null ? null : Math.max(0, duration / 1000),
       cost_usd: totalMetric(steps, 'cost_usd'), tokens: totalMetric(steps, 'tokens'),
     };
@@ -159,7 +161,9 @@ const SCATaskDAG = (() => {
       if (edge.kind === 'dependency') addToList(dependencies, edge.to, edge.from);
     }
     // A planned subtask with a dependency already has a path from the plan through that dependency.
-    return {nodes, hidden, edges: [...edges.values()].filter(({from, to, kind}) =>
+    const root = dag.nodes.find(node => node.kind === 'task');
+    return {nodes, hidden, agentLanes: root?.meta?.agent_lanes, rootId: root?.task_id,
+      edges: [...edges.values()].filter(({from, to, kind}) =>
       kind !== 'spawn' || byId.get(to)?.kind !== 'subtask' ||
       !dependencies.get(to)?.some(need => edges.get(edgeKey(from, need))?.kind === 'spawn'))};
   }
@@ -219,6 +223,60 @@ const SCATaskDAG = (() => {
     }
   }
 
+  function positionAgentLanes(layers, agents, across, gap) {
+    const groups = layers.map(layer => {
+      const byAgent = new Map();
+      for (const item of layer) if (item.node) addToList(byAgent, item.agent, item);
+      return byAgent;
+    });
+    const extent = items => items?.reduce((sum, item) => sum + item[across] + gap, -gap) || 0;
+    const laidOut = new Map();
+    let breadth = margin;
+    for (const agent of agents) {
+      const width = Math.max(...groups.map(group => extent(group.get(agent.agent_lane))),
+        across === 'width' ? agentNodeWidth : summaryHeight) + 16;
+      laidOut.set(agent.agent_lane, {agent, width, left: breadth});
+      breadth += width + 10;
+    }
+    const end = breadth - 10;
+    let first = layers.length, last = -1;
+    for (const [rank, group] of groups.entries()) {
+      const mixed = group.has(undefined) && group.size > 1;
+      for (const [agent, items] of group) {
+        const span = extent(items);
+        const lane = laidOut.get(agent);
+        let left = lane ? lane.left + (lane.width - span) / 2
+          : mixed ? end + gap : Math.max(margin, (end + margin - span) / 2);
+        for (const item of items) {
+          item.cross = left + item[across] / 2;
+          left += item[across] + gap;
+        }
+        breadth = Math.max(breadth, left - gap);
+        if (lane) {
+          first = Math.min(first, rank);
+          last = rank;
+        }
+      }
+    }
+    for (const [rank, layer] of layers.entries()) {
+      const occupied = layer.filter(item => item.node).map(item =>
+        [item.cross - item[across] / 2 - 5, item.cross + item[across] / 2 + 5]);
+      for (const item of layer) {
+        if (item.node) continue;
+        const {source, target} = item.edge;
+        const fraction = (rank - source.rank) / (target.rank - source.rank);
+        const wanted = source.cross + (target.cross - source.cross) * fraction;
+        const available = [wanted, ...occupied.flatMap(([from, to]) => [from, to])]
+          .filter(cross => cross >= 5 && !occupied.some(([from, to]) => from < cross && cross < to));
+        item.cross = available.reduce((nearest, cross) =>
+          Math.abs(nearest - wanted) < Math.abs(cross - wanted) ? nearest : cross);
+        occupied.push([item.cross - 4, item.cross + 4]);
+        breadth = Math.max(breadth, item.cross);
+      }
+    }
+    return {lanes: [...laidOut.values()], breadth: breadth + margin, first, last};
+  }
+
   function layout(dag, orientation = 'vertical') {
     const horizontal = orientation === 'horizontal';
     const layerGap = horizontal ? 52 : 32, siblingGap = horizontal ? 24 : 34, wireGap = 17;
@@ -226,6 +284,14 @@ const SCATaskDAG = (() => {
       node, incoming: [], outgoing: [], before: [], after: [], remaining: 0, rank: 0,
       width: nodeWidth, height: node.summary || metricLine(node) ? summaryHeight : nodeHeight,
     }]));
+    const agents = dag.agentLanes || [];
+    const laneNumbers = new Set(agents.map(agent => agent.agent_lane));
+    for (const item of nodes.values()) {
+      const agent = item.node.meta?.agent_lane;
+      if (item.node.task_id !== dag.rootId || !laneNumbers.has(agent)) continue;
+      item.agent = agent;
+      if (!horizontal) item.width = agentNodeWidth;
+    }
     const links = [];
     for (const {from, to, kind} of dag.edges) {
       const source = nodes.get(from), target = nodes.get(to);
@@ -276,7 +342,7 @@ const SCATaskDAG = (() => {
       edge.route = [source];
       // Waypoints reserve space in intermediate layers for edges that skip a layer.
       for (let rank = source.rank + 1; rank < target.rank; rank++) {
-        const waypoint = {before: [], after: []};
+        const waypoint = {before: [], after: [], edge};
         layers[rank].push(waypoint);
         edge.route.push(waypoint);
       }
@@ -290,17 +356,24 @@ const SCATaskDAG = (() => {
     orderLayers(layers);
 
     const across = horizontal ? 'height' : 'width', along = horizontal ? 'width' : 'height';
-    const widths = layers.map(layer => layer.reduce((span, item, index) => {
+    const agentLayout = agents.length ? positionAgentLanes(layers, agents, across, siblingGap) : null;
+    const widths = agentLayout ? [] : layers.map(layer => layer.reduce((span, item, index) => {
       const gap = index === 0 ? 0 : (item.node && layer[index - 1].node ? siblingGap : wireGap);
       item.cross = span + gap + (item[across] || 0) / 2;
       return item.cross + (item[across] || 0) / 2;
     }, 0));
     const span = Math.max(0, ...widths);
+    const agentHeader = horizontal ? 173 : 70;
+    let bandStart, bandEnd;
     let depth = margin;
     layers.forEach((layer, rank) => {
+      if (rank === agentLayout?.first) {
+        bandStart = depth - 6;
+        depth += agentHeader;
+      }
       const size = Math.max(...layer.map(item => item[along] || 0));
       for (const item of layer) {
-        item.cross += margin + (span - widths[rank]) / 2;
+        if (!agentLayout) item.cross += margin + (span - widths[rank]) / 2;
         item.layerStart = depth;
         item.layerEnd = depth + size;
         if (!item.node) continue;
@@ -309,7 +382,12 @@ const SCATaskDAG = (() => {
         const left = item.cross - item[across] / 2;
         item.x = horizontal ? item.entry : left;
         item.y = horizontal ? left : item.entry;
+        if (rank === agentLayout?.first && item.agent != null) {
+          const lane = agentLayout.lanes.find(({agent}) => agent.agent_lane === item.agent);
+          item.laneEntrance = {start: bandStart, left: lane.left, right: lane.left + lane.width};
+        }
       }
+      if (rank === agentLayout?.last) bandEnd = depth + size + 7;
       depth += size + layerGap;
     });
     for (const item of ready) {
@@ -324,8 +402,13 @@ const SCATaskDAG = (() => {
         });
       }
     }
-    const length = Math.max(margin * 2, depth - layerGap + margin), breadth = span + margin * 2;
-    return {nodes: layers.flat().filter(item => item.node), edges, orientation,
+    const length = Math.max(margin * 2, depth - layerGap + margin);
+    const breadth = agentLayout?.breadth ?? span + margin * 2;
+    const agentBands = agentLayout?.lanes.map(({agent, left, width}) => ({
+      agent, x: horizontal ? bandStart : left, y: horizontal ? left : bandStart,
+      width: horizontal ? bandEnd - bandStart : width, height: horizontal ? width : bandEnd - bandStart,
+    }));
+    return {nodes: layers.flat().filter(item => item.node), edges, orientation, agentBands,
       width: horizontal ? length : breadth, height: horizontal ? breadth : length};
   }
 
@@ -377,6 +460,7 @@ const SCATaskDAG = (() => {
     const levels = new Map(), bands = [];
     for (const item of graph.nodes) addToList(levels, item.layerStart, item);
     for (const [start, group] of levels) {
+      if (graph.agentBands?.some(band => band.y <= start && start < band.y + band.height)) continue;
       const names = new Set(group.map(({node}) => titles[node.kind] || '执行'));
       const title = names.size === 1 ? [...names][0] : '并行阶段';
       const bottom = group[0].layerEnd + 5;
@@ -441,7 +525,28 @@ const SCATaskDAG = (() => {
     return node;
   }
 
-  function edgePath({source, target, route, sourcePort, targetPort, structured}, orientation) {
+  function drawAgentBand({agent, x, y, width, height}, horizontal) {
+    const status = {pending: '排队中', succeeded: '完成'}[agent.status] || statusLabels[agent.status];
+    const chain = agent.subtasks.join(' → ');
+    const label = agent.agent_label;
+    const group = svgElement('g', {class: 'dag-agent-lane', 'data-agent-lane': agent.agent_lane,
+      'data-status': agent.status, role: 'group', 'aria-label': `${label} · ${chain} · ${status}`});
+    group.append(svgElement('rect', {x, y, width, height, rx: 10}));
+    const box = svgElement('foreignObject',
+      {x: x + 8, y: y + (horizontal ? (height - 58) / 2 : 7), width: horizontal ? 155 : width - 16, height: 58});
+    const heading = element('div', undefined, 'dag-agent-heading');
+    const [name, backend] = label.split(' · ', 2);
+    const row = element('div', undefined, 'dag-agent-title');
+    row.append(element('strong', name), element('span', status, 'dag-agent-status'));
+    heading.append(row);
+    if (backend) heading.append(element('span', backend, 'dag-agent-backend'));
+    heading.append(element('span', chain, 'dag-agent-chain'));
+    box.append(heading);
+    group.append(box);
+    return group;
+  }
+
+  function edgePath({source, target, route, sourcePort, targetPort, structured, kind}, orientation) {
     if (structured) {
       const sx = source.x + source.width / 2, tx = target.x + target.width / 2;
       const toCase = target.node.kind === 'case_task', fromCase = source.node.kind === 'case_task';
@@ -463,6 +568,15 @@ const SCATaskDAG = (() => {
       const from = route[i - 1], to = route[i];
       const out = i === 1 ? sourcePort : from.cross;
       const into = to === target ? targetPort : to.cross;
+      if (to === target && target.laneEntrance && kind === 'spawn') {
+        const {start, left, right} = target.laneEntrance;
+        const gutter = out < target.cross ? left - 3 : right + 3;
+        const entry = (from.layerEnd + start) / 2;
+        const exit = to.layerStart - 12;
+        path += ` L ${point(out, from.layerEnd)} C ${point(out, entry)}, ${point(gutter, entry)}, ${point(gutter, start)}`
+          + ` L ${point(gutter, exit)} Q ${point(gutter, to.layerStart)}, ${point(into, to.layerStart)}`;
+        continue;
+      }
       const middle = (from.layerEnd + to.layerStart) / 2;
       path += ` L ${point(out, from.layerEnd)} C ${point(out, middle)}, ${point(into, middle)}, ${point(into, to.layerStart)}`;
     }
@@ -585,13 +699,17 @@ const SCATaskDAG = (() => {
       return camera.x !== previousX || camera.y !== previousY;
     }
 
-    function drawingNode({node, x, y, width, height}, path) {
+    function drawingNode({node, x, y, width, height, agent}, path) {
       const state = nodeStatus(node);
       const summary = node.summary;
-      const activity = summary ? `${summary.turns} 轮 · ${summary.tools} 工具 · ${summary.verification} 验证`
+      const activity = summary ? [
+        (!agent || summary.turns) && `${summary.turns} 轮`,
+        (!agent || summary.tools) && `${summary.tools} 工具`,
+        (!agent || summary.verification) && `${summary.verification} 验证`,
+      ].filter(Boolean).join(' · ')
         : metricLine(node);
-      const facts = summary ? [state, node.duration_s == null ? '—' : node.duration_s.toFixed(1) + ' 秒',
-        node.cost_usd == null ? '—' : '$' + node.cost_usd.toFixed(6)].join(' · ')
+      const facts = summary ? [state, node.duration_s == null ? (agent ? '' : '—') : node.duration_s.toFixed(1) + ' 秒',
+        node.cost_usd == null ? (agent ? '' : '—') : '$' + node.cost_usd.toFixed(6)].filter(Boolean).join(' · ')
         : [kindLabels[node.kind], state, node.caseCount && node.casePassed == null && `${node.caseCount} 个用例`]
           .filter(Boolean).join(' · ');
       const type = nodeTypes[node.kind] || 'work';
@@ -673,6 +791,7 @@ const SCATaskDAG = (() => {
       }
       if (meta.depends_on?.length) fact('依赖', meta.depends_on.join('、'));
       if (meta.parallelism != null) fact('规划建议并发数', meta.parallelism);
+      if (meta.agent_label) fact('Agent', meta.agent_label);
       if (meta.model) fact('模型', meta.model);
       if (meta.merge_status) fact('合并状态', meta.merge_status);
       if (meta.output_dir) fact('输出目录', meta.output_dir);
@@ -747,7 +866,10 @@ const SCATaskDAG = (() => {
         const meta = dag.nodes.find(node => node.kind === 'task')?.meta;
         const count = meta?.subtask_count;
         parallel.hidden = !count;
-        parallel.textContent = count ? [
+        parallel.textContent = meta?.agent_count ? [
+          `${meta.agent_count} 个 agent`, `${count} 个子任务`,
+          meta.max_parallel_agents && `最多并发 ${meta.max_parallel_agents}`,
+        ].filter(Boolean).join(' · ') : count ? [
           meta.max_parallel_agents && `并发上限 ${meta.max_parallel_agents} 个 agent`,
           `共 ${count} 个子任务`,
           meta.parallelism && `规划建议 ${meta.parallelism} 个并发`,
@@ -780,17 +902,22 @@ const SCATaskDAG = (() => {
       pathKey.textContent = path.nodes.size ? {champion: '冠军路径', failure: '失败路径', success: '完成路径'}[path.style] : '';
       pathKey.setAttribute('data-path', path.style);
       graphics.clear();
-      const edges = svgElement('g', {'aria-hidden': 'true'});
+      const edges = svgElement('g', graph.agentBands ? {} : {'aria-hidden': 'true'});
       for (const band of graph.bands || taskBands(graph)) {
         const group = svgElement('g', {class: 'dag-band', 'data-band': band.title});
         group.append(svgElement('rect', {x: 5, y: band.top, width: graph.width - 10,
-          height: band.bottom - band.top, rx: 10}), svgElement('text', {x: 17, y: band.top + 17}, band.title));
+          height: band.bottom - band.top, rx: 10}),
+        svgElement('text', {x: graph.agentBands ? margin + 8 : 17, y: band.top + 17}, band.title));
         edges.append(group);
+      }
+      for (const band of graph.agentBands || []) {
+        edges.append(drawAgentBand(band, graph.orientation === 'horizontal'));
       }
       for (const edge of graph.edges) {
         const highlighted = path.edges.has(edgeKey(edge.source.node.id, edge.target.node.id));
         edges.append(svgElement('path', {
           d: edgePath(edge, graph.orientation), class: 'dag-edge dag-edge-' + edge.kind,
+          'aria-hidden': 'true',
           'data-path': highlighted ? path.style : '',
           'marker-end': 'url(#' + markerPrefix + edge.kind + ')',
         }));

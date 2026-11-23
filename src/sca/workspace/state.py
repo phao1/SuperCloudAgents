@@ -29,6 +29,23 @@ class TaskStateStore:
         except NotFoundError:
             return None
 
+    async def _blob(self, manifest: dict, name: str) -> bytes:
+        digest = manifest["sha256"][name]
+        try:
+            blob = await self.objects.get(f"{self.prefix}/blobs/{digest}")
+        except NotFoundError as exc:
+            raise WorkspaceError(f"state checksum object missing: {name}") from exc
+        if hashlib.sha256(blob).hexdigest() != digest:
+            raise WorkspaceError(f"state checksum mismatch: {name}")
+        return blob
+
+    async def checkpoint_bundle(self, commit: str) -> bytes:
+        """Read a completed subtask's mirror without restoring its live workspace."""
+        manifest = await self.manifest()
+        if manifest is None or manifest["commit"] != commit:
+            raise WorkspaceError("subtask checkpoint manifest does not match its result")
+        return await self._blob(manifest, "mirror.bundle")
+
     async def save(self, ws: GitWorkspace, turn: int, commit: str) -> None:
         with tempfile.TemporaryDirectory(dir=ws.task_dir) as directory:
             bundle = Path(directory) / "mirror.bundle"
@@ -69,14 +86,7 @@ class TaskStateStore:
         data = {}
         for name in ("mirror.bundle", "agent_home.tar",
                      *(["overlay.json"] if "overlay.json" in manifest["sha256"] else [])):
-            digest = manifest["sha256"][name]
-            try:
-                blob = await self.objects.get(f"{self.prefix}/blobs/{digest}")
-            except NotFoundError as exc:
-                raise WorkspaceError(f"state checksum object missing: {name}") from exc
-            if hashlib.sha256(blob).hexdigest() != digest:
-                raise WorkspaceError(f"state checksum mismatch: {name}")
-            data[name] = blob
+            data[name] = await self._blob(manifest, name)
         ws.task_dir.mkdir(parents=True, exist_ok=True)
         marker.unlink(missing_ok=True)
         with tempfile.TemporaryDirectory(dir=ws.task_dir.parent) as directory:

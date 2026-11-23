@@ -21,6 +21,15 @@ def plan_data(paths=None):
     }
 
 
+@pytest.mark.parametrize(("hint", "expected"), [(2, 2), (True, None), ("2", None), (9, None)])
+def test_plan_accepts_only_numeric_agent_hints(hint, expected):
+    data = plan_data()
+    data["subtasks"][0]["agent"] = hint
+    plan = validate_plan(json.dumps(data).encode(), [])
+    assert plan.split
+    assert plan.subtasks[0].agent == expected
+
+
 async def test_overlap_uses_files_at_base_commit(tmp_path):
     seed = GitWorkspace(tmp_path / "seed", "main")
     seed.task_dir.mkdir()

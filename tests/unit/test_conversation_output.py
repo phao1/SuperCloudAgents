@@ -56,6 +56,19 @@ async def test_conversation_reports_plan_cap_and_labeled_subtask_progress():
     assert start.dag_node_id == finish.dag_node_id == f'task:{task.id}/subtask:compile'
 
 
+async def test_conversation_projects_lane_labels_for_progress_and_replies():
+    lane = {'backend': 'dsh', 'agent_lane': 2, 'agent_label': 'Agent 2 · DeepSeek Harness'}
+    task, events = history('dsh', [
+        ('subtask.started', lane),
+        ('agent.message', {'text': 'Changes are ready'}),
+        ('subtask.completed', {**lane, 'passed': True}),
+    ])
+    page = await project(task, events)
+    items = [item for item in page.items if item.kind in ('reply', 'subtask.started', 'subtask.completed')]
+    assert len(items) == 3
+    assert all(item.agent_lane == 2 and item.agent_label == lane['agent_label'] for item in items)
+
+
 def backend_events(backend: str) -> list[AgentEvent]:
     if backend.startswith('opencode'):
         return [event for line in OPENCODE_TRACE.splitlines() for event in parse_opencode_line(line)]

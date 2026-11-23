@@ -36,9 +36,9 @@ def _check(names: tuple[str, ...]) -> str:
     return " && ".join(f"test -f {FILES[name]}" for name in names)
 
 
-def _case(entries: list[tuple[str, str]], fallback: str) -> str:
+def _case(entries: list[tuple[str, str]], fallback: str, selector: str = '"$(git branch --show-current)"') -> str:
     return "\n".join([
-        'case "$(git branch --show-current)" in',
+        f"case {selector} in",
         *(f"  {pattern}) {commands} ;;" for pattern, commands in entries),
         f"  *) {fallback} ;;",
         "esac",
@@ -57,23 +57,28 @@ def submission(repo: str, base_ref: str = "main") -> dict:
     plan = {"split": True, "reason": "Independent work with shared prerequisites", "subtasks": subtasks}
     encoded = shlex.quote(json.dumps(plan, separators=(",", ":")))
     actions = [("*-plan-*", f"mkdir -p .sca && printf '%s' {encoded} > .sca/plan.json")]
-    checks = []
+    steps, checks = {}, []
     for name, needs in GRAPH.items():
-        pattern = "*-best-of-[123]" if name == "fx" else f"*-{name}"
-        destination = FILES[name] if name != "pricing" else "dag-demo/pricing.pending"
         prepare = f"{_check(needs)} && " if needs else ""
-        write = f"{prepare}mkdir -p dag-demo && {_write(destination, name)}"
-        if name == "fx":
-            extra = _write("dag-demo/fx.notes", "alternative fixture")
-            actions.append(("*-best-of-[13]", f"{write} && {extra}"))
-        actions.append((pattern, write))
-        checks.append((pattern, _check((*needs, name))))
+        write = _write(FILES[name], name)
+        if name == "pricing":
+            pending = "dag-demo/pricing.pending"
+            write = f"if test -f {pending}; then rm -f {pending} && {write}; else {_write(pending, name)}; fi"
+        marker = _write(".sca/demo-subtask", name)
+        steps[name] = f"mkdir -p .sca dag-demo && {marker} && {prepare}{write}"
+        checks.append((name, _check((*needs, name))))
+
+    # Steps on the same branch advance using the preceding step's checkpoint.
+    for chain in (("currency", "tax"), ("pricing", "invoices", "reports")):
+        commands = steps[chain[-1]]
+        for name in reversed(chain[:-1]):
+            commands = f"if test -f {FILES[name]}; then {commands}; else {steps[name]}; fi"
+        actions.append((f"*-{chain[0]}", commands))
+    extra = _write("dag-demo/fx.notes", "alternative fixture")
+    actions.extend([("*-best-of-[13]", f"{steps['fx']} && {extra}"), ("*-best-of-2", steps["fx"])])
+    actions.extend((f"*-{name}", steps[name]) for name in GRAPH if name not in {"currency", "fx", "pricing"})
     execute = _case(actions, _write("dag-demo/operator.txt", "operator guidance applied"))
-    repair = _case(
-        [("*-pricing", f"rm -f dag-demo/pricing.pending && {_write(FILES['pricing'], 'pricing')}")],
-        "true",
-    )
-    verify = _case(checks, _check(tuple(GRAPH)))
+    verify = _case(checks, _check(tuple(GRAPH)), '"$(cat .sca/demo-subtask 2>/dev/null)"')
     return {
         "kind": "coding",
         "spec": {
@@ -82,7 +87,7 @@ def submission(repo: str, base_ref: str = "main") -> dict:
             "instruction": (
                 "Demonstrate a multi-currency release using small fixture files.\n\n"
                 f"```sca-fake\n{execute}\n```\n\n"
-                f"```sca-fake\n{repair}\n```"
+                f"```sca-fake\n{execute}\n```"
             ),
             "agent_backend": "fake",
             "plan": "auto",
