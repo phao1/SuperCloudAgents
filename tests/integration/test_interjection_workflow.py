@@ -8,9 +8,14 @@ import pytest
 from temporalio.testing import WorkflowEnvironment
 from temporalio.worker import Replayer, Worker
 
-from sca.kernel.interjection import HEARTBEAT_INTERVAL
+from sca.core.models import TaskMessageInput
+from sca.kernel.interjection import HEARTBEAT_INTERVAL, Guidance
 from sca.kinds.coding.workflow import CodingTaskWorkflow
-from tests.interjection_harness import GUIDANCE_HEADER, InterjectionScript
+from tests.interjection_harness import (
+    GUIDANCE_HEADER,
+    GatewayInterjectionScript,
+    InterjectionScript,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -39,9 +44,9 @@ def worker(env, script, queue):
     )
 
 
-async def start(env, queue):
+async def start(env, queue, task_id="task"):
     return await env.client.start_workflow(
-        CodingTaskWorkflow.run, "task", id=str(uuid4()), task_queue=queue,
+        CodingTaskWorkflow.run, task_id, id=str(uuid4()), task_queue=queue,
     )
 
 
@@ -86,6 +91,33 @@ async def test_signal_during_review(env):
         assert await handle.result() == "SUCCEEDED"
     assert script.publish_turns == [1, 2]
     assert "Add another example" in script.turns[-1].prompt
+
+
+async def test_gateway_turn_restarts_before_spend_settles(env, store, tmp_path):
+    row, _ = await store.create_task(tenant_id="default", kind="coding", spec={"max_cost_usd": .18},
+                                     idempotency_key=None)
+    script = GatewayInterjectionScript(tmp_path, store)
+    queue = str(uuid4())
+    async with worker(env, script, queue), asyncio.timeout(20):
+        handle = await start(env, queue, str(row.id))
+        await script.turn_entered.wait()
+        message = await store.add_task_message(
+            row.id, TaskMessageInput(text="Test the empty case", mode="interrupt"), "operator",
+        )
+        script.pending[str(message.id)] = Guidance(str(message.id), message.text)
+        await handle.signal(CodingTaskWorkflow.user_message, args=[str(message.id), "interrupt"])
+        await asyncio.wait_for(script.second_turn_entered.wait(), 3)
+        assert [cap for _, cap in script.gateway.issued] == [.12, .06]
+        script.gateway.release_spend.set()
+        assert await handle.result() == "SUCCEEDED"
+    task = await store.get_task(row.id)
+    assert task.usage["cost_micro_usd"] == 50_000
+    events = await store.list_events(row.id)
+    interrupted = next(ev.seq for ev in events if ev.type == "agent.turn_interrupted")
+    delivery = next(ev.seq for ev in events if ev.type == "user.message.delivered")
+    charge = next(ev.seq for ev in events if ev.type == "agent.usage" and ev.payload["turn"] == 1)
+    assert interrupted < delivery < charge
+    await Replayer(workflows=[CodingTaskWorkflow]).replay_workflow(await handle.fetch_history())
 
 
 async def test_replay_history_without_the_interjection_patch(env):

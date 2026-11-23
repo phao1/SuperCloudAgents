@@ -76,6 +76,53 @@ async def test_settle_and_revoke(mode, monkeypatch):
         await gateway.aclose()
 
 
+async def test_block_key_denies_use_without_deleting_spend_record(monkeypatch):
+    import hashlib
+    import json
+
+    token = "sk-fixture-turn"
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    blocked = deleted = False
+    requests = []
+
+    def handle(request):
+        nonlocal blocked, deleted
+        requests.append(request.url.path)
+        match request.url.path:
+            case "/key/list":
+                rows = [] if deleted else [{"key_alias": "turn-1", "token": token}]
+                return httpx.Response(200, json={"keys": rows})
+            case "/key/block":
+                assert json.loads(request.content) == {"key": token_hash}
+                blocked = True
+                return httpx.Response(200, json={})
+            case "/v1/chat/completions":
+                assert blocked
+                return httpx.Response(403, json={})
+            case "/key/info":
+                assert blocked and not deleted
+                return httpx.Response(200, json={"info": {"spend": .23}})
+            case "/key/delete":
+                assert blocked
+                deleted = True
+                return httpx.Response(200, json={})
+        raise AssertionError(request.url.path)
+
+    gateway = LiteLLMGateway("http://gateway", "fixture", "http://sandbox")
+    await gateway.aclose()
+    monkeypatch.setattr(gateway, "SETTLE_POLLS", 0)
+    async with httpx.AsyncClient(base_url="http://gateway", transport=httpx.MockTransport(handle)) as http:
+        gateway._http = http
+        assert await gateway.block_key("turn-1", issued_key=token)
+        assert requests == ["/key/block"]
+        assert await gateway.block_key("turn-1")
+        response = await http.post("/v1/chat/completions", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 403
+        assert await gateway.read_key_spend("turn-1") == (.23, True)
+        await gateway.delete_key("turn-1")
+        assert not await gateway.block_key("turn-1")
+
+
 @pytest.mark.parametrize("spent,expected,unpriced", [
     (250000, 0.75, False), (0, 1.0, False), (1000000, None, False), (0, None, True),
 ])

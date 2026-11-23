@@ -16,6 +16,7 @@ from temporalio import activity
 from sca.codegraph.index import CodeIndex, analyze_impact
 from sca.codegraph.repository import index_commit
 from sca.core.errors import WorkspaceError
+from sca.core.model_provider import GatewayError
 from sca.core.models import EventType
 from sca.host import remove_tree
 from sca.kernel.interjection import with_guidance
@@ -176,7 +177,8 @@ class PlanningActivities:
                 task.result.get("memory_note", ""),
             ])
             await child.run_agent_turn(
-                TurnInput(inp.task_id, 0, with_guidance(prompt, inp.guidance), guidance=inp.turn_guidance)
+                TurnInput(inp.task_id, 0, with_guidance(prompt, inp.guidance),
+                          guidance=inp.turn_guidance, defer_spend=inp.defer_spend)
             )
             exit_event, output = await child._run(
                 sandbox_id,
@@ -224,6 +226,8 @@ class PlanningActivities:
             return None
         except Exception as exc:
             if provider_account_error(exc):
+                raise
+            if inp.defer_spend and isinstance(exc, GatewayError):
                 raise
             # Backend and sandbox failures may contain credentials or arbitrary output.
             await self.reject_plan(

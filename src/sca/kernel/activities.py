@@ -28,6 +28,7 @@ from sca.core.errors import (
 )
 from sca.core.interfaces import (
     AgentBackend,
+    DeferredSpendGateway,
     ModelGateway,
     ObjectStore,
     SandboxProvider,
@@ -58,6 +59,7 @@ from sca.kernel.interjection import (
     ApplyMessages,
     DeliverMessages,
     Guidance,
+    SettleTurnSpend,
     TurnGuidance,
 )
 from sca.kernel.kind import ExecutionSpec, get
@@ -109,6 +111,7 @@ class TurnInput:
     session_id: str | None = None
     interjectible: bool = False
     guidance: TurnGuidance | None = None
+    defer_spend: bool = False
 
 
 @dataclass
@@ -218,6 +221,7 @@ class KernelActivities:
             self.deliver_task_messages,
             self.apply_task_messages,
             self.project_work_blocked,
+            self.settle_turn_spend,
         ]
 
     def _state(self, task_id: str) -> TaskStateStore:
@@ -380,6 +384,7 @@ class KernelActivities:
                 **get(task.kind).workflow_options(spec),
                 "review_idle_release_s": self.settings.review_idle_release_s,
                 "turn_heartbeat_timeout_s": self.settings.turn_heartbeat_timeout_s,
+                "_deferred_turn_spend": isinstance(self.gateway, DeferredSpendGateway),
             }
         except _NON_RETRYABLE as e:
             raise _non_retryable(e) from e
@@ -915,6 +920,10 @@ class KernelActivities:
         spec = await self._spec(task_id)
         agent = self._backend(spec)
         gateway = self.gateway if getattr(agent, "uses_model_gateway", True) else None
+        deferred = gateway if inp.defer_spend and isinstance(gateway, DeferredSpendGateway) else None
+        scope = getattr(self, "name", None)
+        if deferred and attempt > 1:
+            await self.settle_turn_spend(SettleTurnSpend(task_id, turn, scope))
         sandbox_id = await self._sandbox_id(task_id)
         await self._before_agent_turn(task_id, sandbox_id)
         # A session first created by the interrupted turn is absent from the snapshot.
@@ -928,7 +937,7 @@ class KernelActivities:
         model = read_registry(self.settings.data_dir).models.get(
             spec.model or self.settings.default_model) if gateway else None
         turn_budget = None if model and model.unpriced else self.settings.model_gateway_turn_budget_usd
-        if gateway and turn_budget is not None and spec.max_cost_usd is not None:
+        if gateway and deferred is None and turn_budget is not None and spec.max_cost_usd is not None:
             task = await self.store.get_task(task_id)
             remaining = spec.max_cost_usd - task.usage.get("cost_micro_usd", 0) / 1e6
             if remaining <= 0:
@@ -946,7 +955,7 @@ class KernelActivities:
         start = {"turn": turn, "attempt": attempt, "prompt": inp.prompt, "backend": agent.name,
                  "prompt_version": getattr(spec, "prompt_version", None) or EvaluationSettings().default_prompt_version,
                  **overlay_metadata, **self._activity_route()}
-        if inp.guidance is None:
+        if inp.guidance is None and deferred is None:
             await self.store.append_event(task_id, EventType.AGENT_TURN_STARTED, start, dedup_key=f"{key}.started")
         await self._resolve_opencode_version(ctx, agent, task_id)
 
@@ -973,7 +982,9 @@ class KernelActivities:
         provider_error: ModelProviderError | None = None
         n = 0
         issued = False
-        started = inp.guidance is None
+        reserved = False
+        interrupted = False
+        started = inp.guidance is None and deferred is None
 
         async def note_interrupted() -> None:
             if started and (inp.interjectible or inp.guidance is not None):
@@ -983,6 +994,17 @@ class KernelActivities:
 
         try:
             if gateway:
+                if deferred:
+                    event = {"turn": turn, "attempt": attempt, "model": ctx.model,
+                             **({"subtask": scope} if scope else {})}
+                    turn_budget = await self._reserve_turn_spend(task_id, key_alias, turn_budget, event)
+                    if turn_budget == 0:
+                        if await self.store.check_budget(task_id):
+                            return TurnResult(session_id=session_id, final_message="", skipped=True)
+                        raise ApplicationError(
+                            "No virtual model key budget available", type="BudgetExceeded", non_retryable=True,
+                        )
+                    reserved = True
                 # Wait for an in-progress issuance before revoking the alias on cancellation.
                 issue = asyncio.create_task(gateway.issue_key(
                     key_alias,
@@ -995,14 +1017,17 @@ class KernelActivities:
                     ctx.model_api_key = await asyncio.shield(issue)
                 except asyncio.CancelledError:
                     with contextlib.suppress(GatewayError):
-                        await issue
-                    issued = True
+                        ctx.model_api_key = await issue
+                    issued = ctx.model_api_key is not None or deferred is None
                     raise
                 issued = True
                 await self.store.append_event(
                     task_id, EventType.MODEL_KEY_ISSUED, {"turn": turn, "model": ctx.model},
                     dedup_key=f"{key}.model_key_issued",
                 )
+            if deferred and inp.guidance is None:
+                await self.store.append_event(task_id, EventType.AGENT_TURN_STARTED, start, dedup_key=f"{key}.started")
+                started = True
             if guide := inp.guidance:
                 await self.store.start_guided_turn(
                     task_id, start, f"{key}.started", guide.message_ids, guide.interrupted_ids,
@@ -1060,7 +1085,7 @@ class KernelActivities:
                         dedup_key=f"{key}.{n}",
                     )
         except asyncio.CancelledError:
-            # The execution stream has closed. Spend settlement can take several seconds.
+            interrupted = True
             await note_interrupted()
             raise
         except (AgentTurnError, ModelProviderError) as e:
@@ -1085,7 +1110,28 @@ class KernelActivities:
             if self.settings.sandbox_suspend_idle and agent.name == "opencode-brain":
                 await self.store.append_event(task_id, "sandbox.transition",
                     {"paused": False, "at": time.time()}, dedup_key=f"{key}.suspend_end")
-            if gateway and issued:
+            if deferred and reserved:
+                if issued:
+                    blocked = False
+                    try:
+                        blocked = await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
+                        if not blocked:
+                            raise GatewayError("virtual model key is missing before spend settlement")
+                        if not interrupted:
+                            spend = await self._settle_blocked_key(deferred, task_id, key_alias, task_kind)
+                            cost_final = True
+                    except asyncio.CancelledError:
+                        await note_interrupted()
+                        if not blocked:
+                            await deferred.block_key(key_alias, issued_key=ctx.model_api_key)
+                        raise
+                    except GatewayError:
+                        if provider_error is None or not provider_error.is_account_error:
+                            raise
+                        activity.logger.warning("Could not finalize virtual model key after account failure")
+                else:
+                    await self.store.clear_turn_spend(task_id, key_alias)
+            elif gateway and issued:
                 finalize = getattr(gateway, "finalize_key", None)
                 cancelled = None
                 try:
@@ -1139,13 +1185,52 @@ class KernelActivities:
         )
         return TurnResult(session_id=session_id, final_message=final_message)
 
+    # Interrupted turn spend
+    async def _reserve_turn_spend(
+        self, task_id: str, alias: str, cap: float | None, event: dict,
+    ) -> float | None:
+        while True:
+            budget, waiting = await self.store.reserve_turn_spend(task_id, alias, cap, event)
+            if not waiting:
+                return budget
+            await asyncio.sleep(0.25)
+
+    async def _settle_blocked_key(
+        self, gateway: DeferredSpendGateway, task_id: str, alias: str, task_kind: str,
+    ) -> float:
+        spend, final = await gateway.read_key_spend(alias)
+        if not final or spend is None:
+            raise GatewayError("virtual model key spend has not settled")
+        if await self.store.apply_turn_spend(task_id, alias, spend) and spend:
+            with metric_guard():
+                business_metrics.cost.labels(task_kind).inc(spend)
+        await gateway.delete_key(alias)
+        await self.store.clear_turn_spend(task_id, alias)
+        return spend
+
+    @activity.defn
+    async def settle_turn_spend(self, inp: SettleTurnSpend) -> None:
+        gateway = self.gateway
+        if not isinstance(gateway, DeferredSpendGateway):
+            raise GatewayError("virtual model key settlement requires its model gateway")
+        reservations = await self.store.turn_spend_reservations(inp.task_id, inp.turn, inp.scope)
+        if reservations:
+            task_kind = (await self.store.get_task(inp.task_id)).kind
+            for alias, reservation in reservations.items():
+                if "spend_usd" in reservation:
+                    await gateway.delete_key(alias)
+                elif await gateway.block_key(alias):
+                    await self._settle_blocked_key(gateway, inp.task_id, alias, task_kind)
+                    continue
+                await self.store.clear_turn_spend(inp.task_id, alias)
+
     # Model gateway budget refusals
     async def _model_budget_failure(
         self, inp: TurnInput, key: str, error: ModelBudgetRefused,
     ) -> ApplicationError:
         model_responded = error.model_responded
         if not model_responded:
-            # Read after key settlement to include usage from interrupted and earlier turns.
+            # Include usage already recorded from earlier turns in this task.
             usage = (await self.store.get_task(inp.task_id)).usage
             model_responded = any(usage.get(field, 0) > 0 for field in (
                 "input_tokens", "output_tokens", "cost_micro_usd",

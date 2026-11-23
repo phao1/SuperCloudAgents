@@ -203,3 +203,19 @@ async def closing_stream[T](stream: AsyncIterator[T]) -> AsyncIterator[None]:
     finally:
         if close := getattr(stream, "aclose", None):
             await close()
+
+
+# Interrupted turn spend
+@runtime_checkable
+class DeferredSpendGateway(Protocol):
+    async def block_key(self, alias: str, *, issued_key: str | None = None) -> bool:
+        """Disable authentication, retaining spend. Return False if the alias is absent."""
+        ...
+
+    async def read_key_spend(self, alias: str) -> tuple[float | None, bool]:
+        """Return the latest spend and whether it has settled."""
+        ...
+
+    async def delete_key(self, alias: str) -> None:
+        """Remove a blocked key after spend has been recorded. Missing is success."""
+        ...

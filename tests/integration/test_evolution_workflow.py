@@ -17,7 +17,7 @@ with workflow.unsafe.imports_passed_through():
 
 from sca.config import Settings, get_settings
 from sca.eval.activities import EvalActivities
-from sca.eval.errors import GUIDANCE_ABORT
+from sca.eval.errors import GUIDANCE_ABORT, GUIDANCE_CANCELLED_SIGNAL
 from sca.eval.suites import load_suite
 from sca.eval.workflow import EvalRunWorkflow
 from sca.evolve.activities import EvolutionActivities
@@ -53,6 +53,12 @@ class SteerableFakeEval:
             return 'completed'
         await workflow.execute_activity('evo_test_candidate_ready', start_to_close_timeout=timedelta(seconds=5))
         await workflow.wait_condition(lambda: self.skipped)
+        if request.get('defer'):
+            parent = workflow.info().parent
+            await workflow.get_external_workflow_handle(parent.workflow_id, run_id=parent.run_id).signal(
+                GUIDANCE_CANCELLED_SIGNAL, args=[request['id'], 50_000],
+            )
+            await workflow.execute_activity('evo_test_wait_for_spend', start_to_close_timeout=timedelta(seconds=15))
         return 'cancelled'
 
 
@@ -153,10 +159,11 @@ async def test_evolution_paths(temporal_env, scenario, expected, promotions):
     assert all(c['decision'] != 'pending' for c in records.values())
 
 
-@pytest.mark.parametrize('control', ['skip', 'now'])
-async def test_live_steering_and_replay(temporal_env, control):
+@pytest.mark.parametrize('control,defer', [('skip', False), ('now', False), ('now', True)])
+async def test_live_steering_and_replay(temporal_env, control, defer):
     started, release, paused, evaluating = (asyncio.Event() for _ in range(4))
-    runs, records, transcript, proposals = {}, {}, [], []
+    spend_release, reproposed = asyncio.Event(), asyncio.Event()
+    runs, records, transcript, proposals, spent = {}, {}, [], [], []
 
     @activity.defn(name='evolve_initialize')
     async def initialize(request: dict) -> dict:
@@ -167,7 +174,7 @@ async def test_live_steering_and_replay(temporal_env, control):
     @activity.defn(name='evolve_prepare_run')
     async def prepare(request: dict) -> dict:
         run_id = request['run_id']
-        runs[run_id] = {'block': len(runs) == 1, 'id': run_id}
+        runs[run_id] = {'block': len(runs) == 1, 'id': run_id, 'defer': defer}
         return runs[run_id]
 
     @activity.defn(name='evolve_read_run')
@@ -181,6 +188,8 @@ async def test_live_steering_and_replay(temporal_env, control):
     @activity.defn(name='evolve_propose')
     async def propose(request: dict) -> list[dict]:
         proposals.append(request['operator_guidance'])
+        if len(proposals) == 2:
+            reproposed.set()
         if item := request.get('guidance_receipt'):
             transcript.append(item)
         return [{'hypothesis': 'Check boundaries', 'overlay': {'tool_guidance': 'Be precise'},
@@ -192,7 +201,7 @@ async def test_live_steering_and_replay(temporal_env, control):
 
     @activity.defn(name='evolve_status')
     async def status(request: dict) -> None:
-        pass
+        spent.append(request['spent_usd'])
 
     @activity.defn(name='evolve_conversation')
     async def conversation(request: dict) -> None:
@@ -204,11 +213,16 @@ async def test_live_steering_and_replay(temporal_env, control):
     async def candidate_ready() -> None:
         evaluating.set()
 
+    @activity.defn(name='evo_test_wait_for_spend')
+    async def wait_for_spend() -> None:
+        await spend_release.wait()
+
     config = EvolutionConfig(suite='fixture', agent_backend='dsh', generations=2, candidates=1).model_dump()
     workflows = [EvolutionWorkflow, SteerableFakeEval]
     queue = f'evochat-test-{uuid4()}'
     async with Worker(temporal_env.client, task_queue=queue, workflows=workflows,
-                      activities=[initialize, prepare, read, propose, record, status, conversation, candidate_ready]):
+                      activities=[initialize, prepare, read, propose, record, status, conversation,
+                                  candidate_ready, wait_for_spend]):
         async with asyncio.timeout(30):
             handle = await temporal_env.client.start_workflow(
                 EvolutionWorkflow.run, {'id': str(uuid4()), 'config': config}, id=f'evolve-{uuid4()}', task_queue=queue,
@@ -224,10 +238,14 @@ async def test_live_steering_and_replay(temporal_env, control):
             await handle.signal(EvolutionWorkflow.user_message, {'id': 'stop', 'mode': 'stop'})
             await handle.signal(EvolutionWorkflow.user_message,
                                 {'id': control, 'mode': control, 'text': 'Use fresh evidence', 'seq': 2})
+            if defer:
+                await asyncio.wait_for(reproposed.wait(), 3)
+                spend_release.set()
             assert await handle.result() == 'stopped'
     assert proposals == (['Check bounds', 'Use fresh evidence'] if control == 'now' else ['Check bounds'])
     assert next(iter(records.values()))['reason'] == (GUIDANCE_ABORT if control == 'now' else '操作者已跳过候选')
     assert {row['generation'] for row in records.values()} == {1}
+    assert spent[-1] == pytest.approx(.006 if control == 'now' else .004)
     assert {item['message_id'] for item in transcript if item['kind'] == 'receipt'} == {
         'guidance', 'pause', 'resume', 'stop', control,
     }

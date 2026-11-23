@@ -1,12 +1,19 @@
 """Scripted activities shared by interjection workflow tests."""
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from temporalio import activity
+from temporalio.testing import ActivityEnvironment
 
+from sca.config import Settings
+from sca.core.model_provider import GatewayError
+from sca.core.models import AgentContext, AgentEvent, AgentEventType
 from sca.kernel.activities import (
     CheckpointResult,
+    KernelActivities,
     PublishInput,
     SetStateInput,
     StepInput,
@@ -15,7 +22,12 @@ from sca.kernel.activities import (
     VerifyResult,
     WorkspaceInfo,
 )
-from sca.kernel.interjection import MESSAGES_PENDING, ApplyMessages, DeliverMessages, Guidance
+from sca.kernel.interjection import (
+    MESSAGES_PENDING,
+    ApplyMessages,
+    DeliverMessages,
+    Guidance,
+)
 from sca.kinds.coding.kind import workflow_spec
 
 GUIDANCE_HEADER = "User guidance received during the run (highest priority, may change direction):"
@@ -150,3 +162,96 @@ class InterjectionScript:
             self.run_agent_turn, self.deliver_task_messages, self.apply_task_messages,
             self.checkpoint, self.verify, self.publish,
         )}
+
+
+class DelayedSpendGateway:
+    sandbox_url = "http://gateway.invalid/v1"
+
+    def __init__(self) -> None:
+        self.keys: dict[str, float] = {}
+        self.issued: list[tuple[str, float]] = []
+        self.blocked: set[str] = set()
+        self.settlement_started = asyncio.Event()
+        self.release_spend = asyncio.Event()
+        self.fail_delete = False
+
+    async def issue_key(self, alias, *, max_budget_usd, **kwargs):
+        self.issued.append((alias, max_budget_usd))
+        self.keys[alias] = .03 if "-turn1-" in alias else .02
+        return "fixture-" + alias
+
+    async def block_key(self, alias, *, issued_key=None):
+        assert issued_key is None or issued_key == "fixture-" + alias
+        if alias not in self.keys:
+            return False
+        self.blocked.add(alias)
+        return True
+
+    async def read_key_spend(self, alias):
+        assert alias in self.blocked
+        if "-turn1-" in alias:
+            self.settlement_started.set()
+            await self.release_spend.wait()
+        return self.keys[alias], True
+
+    async def delete_key(self, alias):
+        if self.fail_delete:
+            self.fail_delete = False
+            raise GatewayError("fixture delete failed")
+        self.keys.pop(alias, None)
+
+
+class GatewayInterjectionScript(InterjectionScript):
+    def __init__(self, tmp_path, store, *, stall_turn=True):
+        super().__init__(block=stall_turn)
+        self.gateway = DelayedSpendGateway()
+        self.first_turn_stopped = asyncio.Event()
+        self.second_turn_entered = asyncio.Event()
+        self.kernel = KernelActivities(
+            settings=Settings(_env_file=None, data_dir=tmp_path, model_gateway_turn_budget_usd=.12),
+            store=store, sandbox=SimpleNamespace(),
+            agent=SimpleNamespace(name="dsh", run_turn=self.run_backend),
+            objects=SimpleNamespace(), gateway=self.gateway,
+        )
+        self.kernel._ensure_state = AsyncMock(return_value=False)
+        self.kernel._spec = AsyncMock(
+            return_value=SimpleNamespace(model="fixture", max_cost_usd=None, turn_timeout_s=30),
+        )
+        self.kernel._sandbox_id = AsyncMock(return_value="sandbox")
+        self.kernel._before_agent_turn = AsyncMock()
+        self.kernel._attach_tools = AsyncMock(side_effect=lambda task_id, *_: AgentContext(
+            task_id=task_id, agent_home_host=str(tmp_path), model="fixture",
+        ))
+        self.kernel.transport = SimpleNamespace(pull_agent_home=AsyncMock())
+        self.activity_env = ActivityEnvironment()
+
+    @activity.defn
+    async def load_task(self, task_id: str) -> dict:
+        return {**await super().load_task(task_id), "_deferred_turn_spend": True}
+
+    @activity.defn
+    async def run_agent_turn(self, inp: TurnInput) -> TurnResult:
+        self.turns.append(inp)
+        self.workspace.append("edit")
+        if activity.in_activity():
+            return await self.kernel.run_agent_turn(inp)
+        return await self.activity_env.run(self.kernel.run_agent_turn, inp)
+
+    def activities(self) -> dict:
+        return {**super().activities(), "settle_turn_spend": self.kernel.settle_turn_spend}
+
+    async def run_backend(self, sandbox, sandbox_id, ctx, *args, **kwargs):
+        if len(self.turns) == 1:
+            self.turn_entered.set()
+            try:
+                if self.block:
+                    await self.release.wait()
+            finally:
+                self.first_turn_stopped.set()
+        else:
+            old, new = (alias for alias, _ in self.gateway.issued)
+            assert old in self.gateway.blocked and new not in self.gateway.blocked
+            assert self.first_turn_stopped.is_set()
+            assert ctx.model_api_key == "fixture-" + new
+            self.second_turn_entered.set()
+        yield AgentEvent(type=AgentEventType.TURN_COMPLETED, data={"final_message": "done"})

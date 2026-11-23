@@ -5,6 +5,7 @@ from temporalio.exceptions import ActivityError, ApplicationError
 SUITE_CHANGED = "SuiteChanged"
 INVALID_EVAL_INPUT = "InvalidEvalInput"
 GUIDANCE_ABORT = "已因指引中止"
+GUIDANCE_CANCELLED_SIGNAL = "guidance_cases_cancelled"
 
 
 def suite_changed(message: str) -> ApplicationError:

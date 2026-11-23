@@ -340,8 +340,14 @@ Ctrl/Cmd+Enter 打断并发送，Shift+Enter 换行。任务验证、等待审�
 
 `queue`（默认）把消息按发送顺序放到下一轮指令开头。若本轮已完成并通过验证，待处理的插话会触发
 一轮续跑。在 Docker 和源码模式下，`interrupt` 都会停止当前单代理轮次的进程组，保存已完成的编辑，
-再沿用可恢复的会话开启下一轮。Worker 在进程关闭时报告打断，真实模型调用的用量结算和密钥撤销
-会在续跑前完成。
+再沿用可恢复的会话开启下一轮。Worker 在进程关闭时报告打断。LiteLLM 会先封禁旧轮次的临时密钥，
+下一轮使用新密钥，旧轮次的费用在后台结算。结算前按旧密钥的费用上限预留额度。若任务或租户剩余额度
+已被全部预留，Worker 会等待结算释放额度后再签发新密钥。结算费用只记账一次，可通过
+`GET /v1/tasks/{id}` 的 `usage.cost_micro_usd` 和 `GET /v1/tasks/{id}/events` 的 `agent.usage`
+事件核对。
+
+自管 LiteLLM 时，请启用金额预留和 `general_settings.fail_closed_budget_enforcement`，并为已定价模型配置费率。
+平台自带配置已启用该选项。[LiteLLM 密钥封禁](https://github.com/BerriAI/litellm/blob/v1.110.2/litellm/proxy/management_endpoints/key_management_endpoints.py#L7472-L7575)
 审核中的插话会发起修改并重新提交审核。并行子任务或 Best-of-N 尝试期间收到的消息，会在合并或选定
 候选后交给主任务。恢复执行仍受任务的用量及费用上限约束。
 

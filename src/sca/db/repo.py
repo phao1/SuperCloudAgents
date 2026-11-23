@@ -3334,3 +3334,104 @@ class Store:
                      "interrupted": row["mode"] == "interrupt" and id_ in interrupted_ids},
                     f"{key}.message.{id_}",
                 )
+
+    # Interrupted turn spend
+    _TURN_SPEND = "model_spend_reservations"
+
+    @staticmethod
+    def _spend_reserved(result: dict) -> int:
+        if result.get("history_imported") is True:
+            return 0
+        return sum(row["cap_micro_usd"] for row in result.get(Store._TURN_SPEND, {}).values()
+                   if "spend_usd" not in row)
+
+    async def reserve_turn_spend(
+        self, task_id: str, alias: str, cap_usd: float | None, event: dict,
+    ) -> tuple[float | None, bool]:
+        """Allocate a key budget and report whether a zero allocation is temporary."""
+        async with self._transaction() as session:
+            task = await self._task(session, task_id)
+            daily_limit = await session.scalar(select(tenants.c.daily_cost_budget_usd).where(
+                tenants.c.id == task["tenant_id"],
+            ).with_for_update(key_share=True))
+            task = await self._task(session, task_id, True)
+            reservations = task["result"].get(self._TURN_SPEND, {})
+            if alias in reservations:
+                return reservations[alias]["cap_micro_usd"] / 1_000_000 if cap_usd is not None else None, False
+            alloc = 0
+            if cap_usd is not None:
+                spent = task["usage"].get("cost_micro_usd", 0)
+                reserved = self._spend_reserved(task["result"])
+                remaining: list[tuple[Decimal, int]] = []
+                if (limit := task["spec"].get("max_cost_usd")) is not None:
+                    remaining.append((Decimal(str(limit)) * 1_000_000 - spent, reserved))
+                if daily_limit is not None:
+                    midnight = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+                    query = select(tasks.c.created_at, tasks.c.usage, tasks.c.result).where(
+                        tasks.c.tenant_id == task["tenant_id"],
+                        (tasks.c.created_at >= midnight) | tasks.c.result.has_key(self._TURN_SPEND),
+                    )
+                    rows = (await session.execute(query)).mappings()
+                    spent_today = reserved_today = 0
+                    for row in rows:
+                        if row["created_at"] >= midnight:
+                            spent_today += row["usage"].get("cost_micro_usd", 0)
+                        reserved_today += self._spend_reserved(row["result"])
+                    remaining.append((daily_limit * 1_000_000 - spent_today, reserved_today))
+                cap = int(Decimal(str(cap_usd)) * 1_000_000)
+                alloc = min([cap, *(int(budget - held) for budget, held in remaining)])
+                if alloc <= 0:
+                    return 0.0, cap > 0 and all(budget >= 1 for budget, _ in remaining)
+            await self._write_turn_spend(session, task, {
+                **reservations, alias: {"cap_micro_usd": alloc, "event": event},
+            })
+            return alloc / 1_000_000 if cap_usd is not None else None, False
+
+    async def turn_spend_reservations(self, task_id: str, turn: int, scope: str | None) -> dict:
+        task = await self.get_task(task_id)
+        return {alias: row for alias, row in task.result.get(self._TURN_SPEND, {}).items()
+                if row["event"]["turn"] == turn and row["event"].get("subtask") == scope}
+
+    async def apply_turn_spend(self, task_id: str, alias: str, spend: float) -> bool:
+        """Commit the metered event and replace the reservation with actual usage atomically."""
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            reservations = dict(task["result"].get(self._TURN_SPEND, {}))
+            row = reservations.get(alias)
+            if row is None or "spend_usd" in row:
+                return False
+            cost = round(spend * 1_000_000)
+            recorded = await self._event(session, task["id"], "agent.usage", {
+                **row["event"], "source": "model_gateway", "cost_final": True,
+                "cost_usd": spend, "cost_micro_usd": cost,
+            }, f"{alias}.spend")
+            reservations[alias] = {**row, "spend_usd": spend}
+            if recorded is None:
+                await self._write_turn_spend(session, task, reservations)
+                return False
+            usage = dict(task["usage"])
+            if cost:
+                usage["cost_micro_usd"] = usage.get("cost_micro_usd", 0) + cost
+            await self._write_turn_spend(session, task, reservations, usage=usage)
+            if task["state"] in TERMINAL_STATES:
+                await self._meter_finished_task(session, {**task, "usage": usage})
+            return True
+
+    async def clear_turn_spend(self, task_id: str, alias: str) -> None:
+        async with self._transaction() as session:
+            task = await self._task(session, task_id, True)
+            reservations = dict(task["result"].get(self._TURN_SPEND, {}))
+            if reservations.pop(alias, None) is not None:
+                await self._write_turn_spend(session, task, reservations)
+
+    async def _write_turn_spend(
+        self, session: AsyncSession, task: RowMapping, reservations: dict, **columns: Any,
+    ) -> None:
+        result = dict(task["result"])
+        if reservations:
+            result[self._TURN_SPEND] = reservations
+        else:
+            result.pop(self._TURN_SPEND, None)
+        await session.execute(update(tasks).where(tasks.c.id == task["id"]).values(
+            result=result, updated_at=func.now(), **columns,
+        ))

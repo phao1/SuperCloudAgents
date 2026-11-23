@@ -28,6 +28,7 @@ class PlanningInput:
     guidance: list[str] = field(default_factory=list)
     interjectible: bool = False
     turn_guidance: TurnGuidance | None = None
+    defer_spend: bool = False
 
 
 @dataclass

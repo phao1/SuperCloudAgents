@@ -6,7 +6,7 @@ from datetime import timedelta
 from temporalio import workflow
 from temporalio.exceptions import ActivityError, is_cancelled_exception
 
-from sca.eval.errors import GUIDANCE_ABORT, eval_failure_reason
+from sca.eval.errors import GUIDANCE_ABORT, GUIDANCE_CANCELLED_SIGNAL, eval_failure_reason
 from sca.orchestration.provider_errors import patched_provider_account_error
 
 
@@ -87,6 +87,8 @@ class EvalRunWorkflow:
                     # All regular activity slots may be occupied by the cases being cancelled.
                     await workflow.execute_local_activity('eval_cancel_cases', list(active), **options)
                     cancelled = True
+                    if request.get("defer_guidance_spend") and workflow.patched("eval-deferred-guidance-spend"):
+                        await self.report_cancelled_cases(request, spent, case_budget, active)
                 for task_id, item in list(active.items()):
                     if abortable and self.guidance_abort and not cancelled:
                         break  # Wake at once to cancel the rest of the batch.
@@ -115,6 +117,22 @@ class EvalRunWorkflow:
         if errored * 2 > collected:
             return "failed", f"评测执行错误（{errored}/{collected} 个已执行用例），请查看任务日志"
         return ("budget_exhausted" if pending else "completed"), None
+
+    async def report_cancelled_cases(
+        self, request: dict, spent: int, case_budget: int, active: dict[str, dict],
+    ) -> None:
+        parent = workflow.info().parent
+        if parent is None:
+            return
+        for item in active.values():
+            spec = item["case"].get("spec", {})
+            if spec.get("subtasks") or spec.get("plan") == "auto":
+                # Parallel subtasks can each use the case's remaining budget.
+                return
+        bound = spent + case_budget * sum(not item["case"].get("model_unpriced") for item in active.values())
+        await workflow.get_external_workflow_handle(parent.workflow_id, run_id=parent.run_id).signal(
+            GUIDANCE_CANCELLED_SIGNAL, args=[request["id"], bound],
+        )
 
     async def collect_case(self, collect: dict, options: dict, *, interruptible: bool) -> dict | float | None:
         if not interruptible:
