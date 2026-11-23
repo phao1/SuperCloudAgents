@@ -374,6 +374,66 @@ const portalEvolution = (() => {
     });
     state.root.append(ui.panel('演进详情', header, actions, message), workbench,
       ui.panel('每代开发集成绩', legend, plots, baselineList), ui.panel('候选与晋升决定', candidates));
+    const approvalCards = new Map();
+
+    function pendingApproval(run, candidate) {
+      return run.status === 'awaiting_approval' && candidate.decision === 'pending'
+        && candidate.reason === 'awaiting approval';
+    }
+
+    function updateApprovals(run) {
+      for (const candidate of run.candidates) {
+        const awaiting = pendingApproval(run, candidate);
+        let approval = approvalCards.get(candidate.id);
+        if (!approval && !awaiting && state.approval !== candidate.id) continue;
+        if (!approval) {
+          const card = portalApprovals.card('candidate-approval-' + candidate.id, '候选晋升审批 · 第 ' + candidate.generation + ' 代');
+          const locate = evidenceLink('定位候选节点', '#node-' + enc('candidate:' + candidate.id));
+          locate.onclick = event => {
+            event.preventDefault();
+            state.dag.focus('candidate:' + candidate.id);
+          };
+          const controls = el('fieldset');
+          controls.dataset.access = 'eval-admin';
+          const wrap = el('div');
+          wrap.append(controls);
+          approval = {...card, controls, wrap};
+          const app = approval;
+          if (canManage) controls.append(ui.actions(...[['approve', '批准'], ['reject', '拒绝']].map(([action, label]) =>
+            ui.action(label, async () => {
+              if (!canManage || !active(state) || app.sent) return;
+              controls.disabled = true;
+              try {
+                await data(path + '/' + action, {candidate_id: candidate.id});
+                if (!active(state)) return;
+                app.sent = action;
+                app.status.textContent = portalApprovals.decisions[action] + ' · 等待演进继续';
+                app.wrap.hidden = true;
+                void portalApprovals.refresh(true);
+                await refresh(state);
+              } finally {
+                controls.disabled = false;
+              }
+            }, card.feedback))));
+          card.node.append(el('p', candidate.hypothesis), ui.actions(locate),
+            ui.actions(el('span', '开发集'), metricLine(candidate.dev_metrics, candidate.dev_run_id),
+              el('span', '留出集'), metricLine(candidate.holdout_metrics, candidate.holdout_run_id)),
+            wrap, card.feedback);
+          approvalCards.set(candidate.id, approval);
+          state.conversation.approvals.append(card.node);
+        }
+        approval.wrap.hidden = !awaiting || !canManage || Boolean(approval.sent);
+        approval.status.textContent = candidate.decision === 'promoted' ? '已批准 · 已晋升'
+          : candidate.decision === 'rejected' ? '已拒绝'
+          : approval.sent ? portalApprovals.decisions[approval.sent] + ' · 等待演进继续'
+          : awaiting ? (canManage ? '等待人工审批' : '等待人工审批 · 只读') : '当前未等待审批';
+      }
+      if (state.approval && state.focusedApproval !== state.approval) {
+        portalApprovals.focus(approvalCards.get(state.approval)?.node || state.conversation.title);
+        state.focusedApproval = state.approval;
+      }
+    }
+
     let signature, initial, parents;
     return async () => {
       const row = await data(path);
@@ -383,6 +443,7 @@ const portalEvolution = (() => {
       state.dag.refresh(id, true);
       state.polling = activeStates.includes(row.status);
       state.conversation.setState(state.polling ? '' : '演进已结束，无法发送消息。', row.status === 'paused');
+      updateApprovals(row);
       void state.conversation.refresh();
       const nextSignature = JSON.stringify([row.status, row.reason, row.spent_usd, row.best_champion_id,
         row.config.budget_usd,
@@ -437,14 +498,13 @@ const portalEvolution = (() => {
           detail.open = opened.has(candidate.id);
           const operations = el('div', undefined, 'stack');
           operations.append(detail);
-          if (canManage && row.status === 'awaiting_approval' && candidate.decision === 'pending'
-              && candidate.reason === 'awaiting approval') {
-            operations.append(ui.actions(...[['approve', '批准'], ['reject', '拒绝']].map(([action, label]) =>
-              ui.action(label, async () => {
-                await data(path + '/' + action, {candidate_id: candidate.id});
-                ui.setMessage(message, '已提交审批，等待演进继续。');
-                await refresh(state);
-              }, message))));
+          if (pendingApproval(row, candidate)) {
+            const link = evidenceLink('在对话中查看审批', pageHref('runs', id) + '/approval/' + enc(candidate.id));
+            link.onclick = event => {
+              event.preventDefault();
+              portalApprovals.focus(approvalCards.get(candidate.id)?.node);
+            };
+            operations.append(link);
           }
           return [candidate.generation, candidate.hypothesis, reason,
             metricLine(candidate.dev_metrics, candidate.dev_run_id),
@@ -658,6 +718,8 @@ const portalEvolution = (() => {
 
   function mountHarvest(state) {
     const rows = ui.scroll('采集候选'), message = notice();
+    const target = el('div');
+    target.hidden = true;
     const form = ui.form([ui.fields(
       ui.field('失败或被拒绝的任务 ID', 'task_id', {required: true, value: state.id || ''}),
       ui.field('目标套件', 'suite', {required: true, value: 'opencode-harvested'}),
@@ -668,6 +730,7 @@ const portalEvolution = (() => {
       const body = Object.fromEntries(['task_id', 'suite', 'split', 'notes'].map(name => [name, ui.value(form, name)]));
       const command = ui.value(form, 'acceptance_command');
       await data(harvestPath, {...body, ...(command && {acceptance_command: command})});
+      void portalApprovals.refresh(true);
       form.reset();
       state.tenant = '';
       if (filter) filter.reset();
@@ -682,26 +745,49 @@ const portalEvolution = (() => {
     }) : null;
     state.tenant = '';
     state.root.append(ui.panel('采集失败任务', form),
-      ui.panel('采集候选', ...(filter ? [filter] : []), rows, message));
+      ui.panel('采集候选', ...(filter ? [filter] : []), target, rows, message));
+    function operations(row, query, feedback) {
+      if (row.status !== 'pending') return '—';
+      return ui.actions(
+        ui.can('eval-admin') && ui.action('批准发布', async () => {
+          if (!confirm('确认将该候选发布到目标评测套件？')) return;
+          await data(harvestPath + '/' + enc(row.id) + '/approve' + query, {});
+          void portalApprovals.refresh(true);
+          await refresh(state);
+        }, feedback),
+        ui.action('拒绝', async () => {
+          await data(harvestPath + '/' + enc(row.id) + '/reject' + query, {});
+          void portalApprovals.refresh(true);
+          await refresh(state);
+        }, feedback),
+      );
+    }
     return async () => {
       const from = state.tenant;
       const query = from ? '?tenant_id=' + enc(from) : '';
       const list = await data(harvestPath + query);
-      if (from !== state.tenant) return;
+      if (from !== state.tenant || !active(state)) return;
+      target.hidden = !state.approval || Boolean(from);
+      if (!target.hidden) {
+        const row = list.find(item => item.id === state.approval);
+        const card = portalApprovals.card('harvest-approval-' + state.approval, '采集发布审批');
+        card.status.textContent = row ? row.status === 'pending' ? '等待发布审批' : stateLabel(row.status)
+          : '该采集候选已不可用';
+        if (row) {
+          card.node.append(el('p', row.case_id + ' · ' + row.suite), el('p', row.notes),
+            evidenceLink('查看来源任务', taskHref(row.task_id)));
+          if (row.status === 'pending') card.node.append(operations(row, query, card.feedback), card.feedback);
+        }
+        target.replaceChildren(card.node);
+        if (state.focusedApproval !== state.approval) {
+          portalApprovals.focus(card.node);
+          state.focusedApproval = state.approval;
+        }
+      }
       ui.list(rows, ['用例 / 套件', '分组', '来源任务', '备注', '状态', '操作'], list.map(row => [
         row.case_id + ' · ' + row.suite, row.split === 'dev' ? '开发集' : '留出集',
         row.tenant_id === state.identity.tenant_id ? evidenceLink(short(row.task_id), taskHref(row.task_id)) : row.task_id,
-        row.notes, stateLabel(row.status), row.status === 'pending' ? ui.actions(
-          ui.can('eval-admin') && ui.action('批准发布', async () => {
-            if (!confirm('确认将该候选发布到目标评测套件？')) return;
-            await data(harvestPath + '/' + enc(row.id) + '/approve' + query, {});
-            await refresh(state);
-          }, message),
-          ui.action('拒绝', async () => {
-            await data(harvestPath + '/' + enc(row.id) + '/reject' + query, {});
-            await refresh(state);
-          }, message)
-        ) : '—',
+        row.notes, stateLabel(row.status), operations(row, query, message),
       ]), '当前租户无采集候选。');
     };
   }
@@ -717,7 +803,10 @@ const portalEvolution = (() => {
     const visible = evalAdmin ? ['runs', 'schedules', 'champions', 'rollouts', 'harvest']
       : portalIdentity.guest ? ['runs', 'champions'] : ui.can('eval') ? ['runs'] : ['rollouts', 'harvest'];
     const tab = visible.includes(parts[0]) ? parts[0] : visible[0];
-    const id = parts[0] === tab && parts[1] ? decodeURIComponent(parts[1]) : '';
+    const harvestApproval = parts[0] === 'harvest' && parts[1] === 'approval';
+    const id = parts[0] === tab && parts[1] && !harvestApproval ? decodeURIComponent(parts[1]) : '';
+    const approval = tab === 'harvest' && harvestApproval ? parts[2]
+      : tab === 'runs' && parts[2] === 'approval' ? parts[3] : '';
     const root = $('evolution-content');
     const titles = {runs: '演进记录', schedules: '定期计划', champions: '冠军谱系与固化', rollouts: '租户灰度', harvest: '采集候选'};
     $('evolution-nav').replaceChildren(...visible.map(key => {
@@ -737,6 +826,11 @@ const portalEvolution = (() => {
         rollouts: mountRollouts, harvest: mountHarvest,
       }[tab];
       state.refresh = mount(state);
+    }
+    if (view.approval !== approval) {
+      view.approval = approval;
+      view.focusedApproval = '';
+      if (tab === 'harvest') view.tenant = '';
     }
     return refresh(view);
   }

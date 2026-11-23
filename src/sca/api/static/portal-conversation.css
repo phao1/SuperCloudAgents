@@ -1,42 +1,103 @@
 .portal-run-workbench {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(17rem, 1fr);
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
 }
 .portal-conversation { min-width: 0; display: grid; gap: .7rem; }
+.conversation-scroll-area { position: relative; min-width: 0; }
 .conversation-feed {
-  block-size: clamp(18rem, 48vh, 35rem);
+  block-size: clamp(20rem, 60vh, 49rem);
   overflow-y: auto;
+  overscroll-behavior: contain;
   border: 1px solid var(--line);
   border-radius: 10px;
   background: var(--subtle);
-  padding: .65rem;
+  padding: .8rem;
+}
+.conversation-jump {
+  position: absolute; bottom: .7rem; left: 50%; transform: translateX(-50%);
+  min-height: 2rem; border-color: var(--accent); border-radius: 999px;
+  color: var(--accent); background: var(--panel); white-space: nowrap;
 }
 .conversation-items { display: grid; gap: .65rem; padding: 0; margin: 0; list-style: none; }
-.conversation-row { display: flex; }
+.conversation-row { display: flex; align-items: start; min-width: 0; }
 .conversation-row.conversation-user { justify-content: end; }
 .conversation-bubble {
-  max-inline-size: 94%; min-inline-size: 0; padding: .5rem .7rem;
+  min-inline-size: 0; padding: .5rem .7rem;
   background: var(--panel); border: 1px solid var(--line); border-radius: 3px 10px 10px 10px;
   overflow-wrap: anywhere;
 }
+.conversation-user-body { max-inline-size: 90%; min-width: 0; }
 .conversation-user .conversation-bubble {
   background: var(--accent-bg); color: var(--ink); border-radius: 10px 3px 10px 10px;
 }
-.conversation-bubble p { margin: 0 0 .2rem; }
-.conversation-user p { white-space: pre-wrap; }
-.conversation-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .55rem; }
+.conversation-user p { color: var(--ink); white-space: pre-wrap; }
+.conversation-user .conversation-meta { justify-content: end; }
+.conversation-agent { gap: .5rem; }
+.conversation-agent-body { max-inline-size: calc(100% - 2.2rem); min-width: 0; }
+.conversation-avatar {
+  display: grid; place-items: center; flex: 0 0 1.7rem; block-size: 1.7rem;
+  background: var(--accent-bg); color: var(--accent); border-radius: 50%; font-weight: 700;
+}
+.conversation-agent-label { display: flex; flex-wrap: wrap; gap: .15rem .55rem; margin-bottom: .22rem; }
+.conversation-agent-label span { color: var(--muted); overflow-wrap: anywhere; }
+.conversation-meta {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .55rem; margin-top: .18rem;
+}
 .conversation-meta, .conversation-empty { font-size: .8rem; color: var(--muted); }
-.conversation-meta a { white-space: nowrap; }
+.conversation-tag { border-radius: 999px; padding-inline: .42em; background: var(--panel); }
+.conversation-receipt[data-status="applied"] a { color: var(--good); }
+.conversation-receipt[data-status="rejected"] a, .conversation-error { color: var(--bad); }
+.conversation-row.conversation-system { justify-content: center; }
+.conversation-chip {
+  display: flex; flex-wrap: wrap; justify-content: center; align-items: center;
+  gap: .3rem .5rem; padding: .15rem .55rem; border-radius: .7rem;
+  color: var(--muted); font-size: .78rem; text-align: center;
+}
+.conversation-chip time { font-size: .72rem; opacity: .85; }
+.conversation-evaluation .conversation-bubble { width: 100%; }
+.conversation-evidence, .conversation-approvals { display: grid; gap: .4rem; }
+.conversation-preview {
+  display: -webkit-box; overflow: hidden; -webkit-box-orient: vertical; -webkit-line-clamp: 3;
+}
+.conversation-reply > summary { display: grid; gap: .25rem; }
+.conversation-reply[open] .conversation-preview, .conversation-reply[open] .conversation-expand,
+.conversation-reply:not([open]) .conversation-collapse { display: none; }
+.conversation-collapse, .conversation-expand { color: var(--accent); font-size: .85rem; }
+.conversation-reply .conversation-markdown { margin-top: .45rem; }
+.conversation-markdown { gap: .45rem; }
+.conversation-bubble pre { max-width: 100%; overflow: auto; white-space: pre-wrap; }
+.conversation-operation > code { white-space: pre-wrap; }
+.conversation-bubble summary { cursor: pointer; color: var(--accent); }
+.conversation-operation-list, .conversation-file-list { display: grid; gap: .35rem; margin: .4rem 0; padding-left: 1.1rem; }
+.conversation-operation-failed > small { color: var(--bad); }
+.conversation-edit-counts { display: inline; margin-inline-start: .4rem; }
+.conversation-composer { position: sticky; bottom: 0; background: var(--panel); }
 .conversation-composer fieldset { min-inline-size: 0; margin: 0; padding: 0; border: 0; }
 .conversation-composer textarea { inline-size: 100%; resize: vertical; }
 .conversation-composer .portal-actions { align-items: end; }
 .conversation-budget summary { cursor: pointer; color: var(--accent); }
 .conversation-budget[open] .portal-actions { margin-top: .4rem; }
 .conversation-status { margin: 0; }
-.conversation-status:empty, .portal-conversation [hidden] { display: none; }
+.conversation-status:empty, .conversation-approvals:empty, .portal-conversation [hidden] { display: none; }
+.conversation-approval {
+  display: grid; min-width: 0; gap: .6rem; padding: .75rem;
+  border: 1px solid var(--line); border-inline-start: 3px solid var(--warn);
+  border-radius: 9px; background: var(--warn-bg); overflow-wrap: anywhere;
+}
+.conversation-approval-state { font-size: .85rem; color: var(--warn); }
+.conversation-approval fieldset { min-width: 0; margin: 0; padding: 0; border: 0; }
+.conversation-approval .memory-proposal { background: var(--panel); }
+.conversation-approval ul { margin: .25rem 0; padding-inline-start: 1.2rem; }
+.approval-inbox { display: grid; padding: 0; margin: 0; list-style: none; }
+.approval-inbox li {
+  display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center;
+  gap: .25rem 1rem; padding: .65rem 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere;
+}
+.approval-inbox li:last-child { border-bottom: 0; }
 @media (max-width: 950px) {
   .portal-run-workbench { grid-template-columns: minmax(0, 1fr); }
-  .conversation-feed { block-size: clamp(16rem, 45vh, 24rem); }
+  .portal-run-workbench .portal-conversation { grid-row: 1; }
+  .conversation-feed { block-size: clamp(18rem, 58vh, 32rem); }
 }

@@ -530,6 +530,7 @@ class _TaskTrace:
                 self._request_review(None, p)
             self.review.meta.update(_fields(p, "decision", "actor", "feedback"))
             self.review.close("failed" if p.get("decision") == "reject" else "succeeded", at)
+            return self.review
         elif type_ == "subtasks.merged":
             if self.merge is None:
                 self._merge(p.get("subtasks"), at)

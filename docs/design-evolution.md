@@ -401,6 +401,13 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
   -H "Authorization: Bearer $SCA_API_TOKEN" --json '{"mode":"guidance","text":"优先验证边界条件"}'
 ```
 
+### 对话与审批
+
+演进详情的「对话」显示候选假设、提议依据、覆盖变更概况与开发集及留出集的评测结果。
+候选等待人工晋升时，审批卡片出现在对话顶部，也可通过侧栏「待审批」打开。
+`eval` 租户管理员可在卡片上批准或拒绝。`GET /v1/approvals` 返回当前租户可查看的待审事项和
+Portal 跳转链接，晋升和采集继续使用各自的审批接口。
+
 ### 验证
 
 在 GitHub Actions 的 **Source mode** 工作流中选择 **Run workflow**，可在 Windows、macOS
@@ -415,3 +422,7 @@ curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/messages" \
 单测验证了首个请求被拒和中途耗尽预算对应的评测结果。
 当前沙箱拒绝 Postgres 和 Temporal 套接字连接。真实服务、Docker 安装体积、Windows 实机
 和付费模型仍需现场验证。
+
+对话和待审批测试覆盖六种后端输出、按轮分组、访客脱敏、租户范围和 Portal 跳转及提交。
+单元回归通过 1,180 项，跳过 41 项。测试进程使用带超时的选择器轮询，依赖本地套接字或
+Chromium 的用例在沙箱中跳过。涉及数据库的对话及审批集成测试共跳过 4 项。

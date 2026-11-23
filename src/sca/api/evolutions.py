@@ -316,5 +316,5 @@ async def read_evolution_conversation(
 ) -> ConversationPage:
     if cursor is not None and int(cursor.partition(':')[2]) > 2**63 - 1:
         raise HTTPException(422, '对话游标无效')
-    page = await evolution_page(scoped(request, user), evolution_id, cursor, limit)
+    page = await evolution_page(scoped(request, user), evolution_id, cursor, limit, user)
     return ConversationPage.model_validate(history_payload(user, page.model_dump(exclude_none=True)))

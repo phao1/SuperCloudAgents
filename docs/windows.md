@@ -90,12 +90,22 @@ Windows 本机可用 `export-history <zip>` 导出。[历史归档内容与高�
    仓库可使用本机绝对路径，例如 `C:/work/demo`。平台的准备和验证命令由 Git Bash
    执行，使用相对于任务工作目录的路径，例如 `python -m pytest -q`。在「冠军覆盖」选择
    「使用当前冠军」，可应用同一 DSH 版本和模型的冠军指引。
-2. 提交后进入任务详情，在「执行图 DAG」和执行泳道查看进展。验证通过后，可在「任务审核」
-   检查补丁并选择批准或继续修改。
+2. 提交后进入任务详情，在「执行图 DAG」和「对话」查看进展。需要人工确认时，在对话顶部
+   审阅规划或任务结果。卡片可打开最终补丁和「任务证据 → 任务审核」。
 3. 在「自动演进」选择 DeepSeek Harness、评测套件、模型和预算，点击「开始演进」。
    首次建议用内置套件 `dsh-smoke` 和 `deepseek-flash`，按下方参数试跑预计花费 ¥1–2。
    基线版本留空时使用 `SCA_DSH_VERSION`。打开演进记录查看执行图与评测结果。
    启动脚本会应用 DSH 演进所需的迁移 `0025`。
+
+### 对话与待审批
+
+「对话」按 Agent 和子任务显示回复，命令、工具和文件变更可按轮展开。任务插话可选择
+「排队」或「打断」，演进指引用于下一代提议，回执显示在对应消息下方。点击「定位节点」
+可打开关联的 DAG 节点。
+
+侧栏「待审批 (N)」汇总当前租户可查看的规划、结果、修复、候选晋升和采集发布审批。
+点击事项可跳到对应卡片。任务审核可填写修改意见，批准结果时可勾选需要启用的共享记忆。
+演进晋升与采集发布沿用各自的管理员权限。只读用户可查看有权访问的审批卡片。
 
 ### API 提交示例
 
@@ -139,8 +149,14 @@ $body = @{
 $run = Invoke-RestMethod -Method Post -Uri "$api/v1/evolutions" -Headers $headers `
     -ContentType 'application/json' -Body $body
 Invoke-RestMethod -Uri "$api/v1/evolutions/$($run.id)/dag" -Headers $headers
+$inbox = Invoke-RestMethod -Uri "$api/v1/approvals" -Headers $headers
+$inbox.items | Select-Object kind, title, href
 Remove-Variable token, headers
 ```
+
+任务审批使用 `POST /v1/tasks/{id}/review`，例如提交
+`{"decision":"request_changes","feedback":"请补充空输入测试"}`。演进候选使用
+`POST /v1/evolutions/{id}/approve` 或 `/reject`，请求体提供 `candidate_id`。
 
 ## 状态、日志和停止
 

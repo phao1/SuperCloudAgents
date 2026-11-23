@@ -182,7 +182,10 @@ assert.match(portalEvolution.equivalence(a,{...a,results:a.results.slice(1)}),/�
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("destination", ["guest", "local", "projects", "task", "evolution", "archive"])
+@pytest.mark.parametrize("destination", [
+    "guest", "local", "projects", "task", "evolution", "approvals", "result-approval", "evolution-approval",
+    "archive",
+])
 def test_portal_route_bootstrap(tmp_path, destination):
     responses = {}
     if destination == "archive":
@@ -203,6 +206,7 @@ def test_portal_route_bootstrap(tmp_path, destination):
     assert '只读访客模式 · <a href="#/overview">登录</a>' in source
     assert '尚未接入模型，可浏览历史记录' in source
     assert 'id="task-conversation" aria-label="任务对话"' in source
+    assert 'href="#/approvals" data-access="tenant" hidden' in source
     assert "headers:authHeaders(),signal:stream.controller.signal" in source
 
     node = shutil.which("node") or Path.home() / ".local/bin/node"
@@ -215,12 +219,23 @@ const destination=process.argv[2];
 const archived=destination==='archive';
 const guest=destination==='guest'||destination==='evolution';
 const local=destination==='local';
-const task={id:'task-id',kind:'coding',state:'SUCCEEDED',spec:{},result:{}};
+const resultApproval=destination==='result-approval';
+const evolutionApproval=destination==='evolution-approval';
+const taskApproval=destination==='approvals'||resultApproval;
+const task={id:'task-id',kind:'coding',state:taskApproval?'AWAITING_REVIEW':'SUCCEEDED',spec:{},result:
+  resultApproval?{verification_passed:true,memory_proposals:['memory']} : {}};
+const at='2026-11-22T00:00:00Z';
+const approvalHref='#/tasks/'+task.id+'/approval';
+const reviewRequests=[];
+let moreMessages=false;
+const harvest={id:'harvest-id',task_id:task.id,tenant_id:'eval',case_id:'boundary-case',suite:'fixture',status:'pending'};
+const harvestHref='#/evolutions/harvest/approval/'+harvest.id;
+const harvestPath='/v1/evals/harvest';
 const missingReason='文件缺失（源机器上已清理）';
 const artifacts=destination==='task'?['changes.patch','verify.log','report.md']
-  .map(name=>({name,missing_reason:missingReason})):[];
+  .map(name=>({name,missing_reason:missingReason})):resultApproval?[{name:'changes.patch'}]:[];
 const project={id:'project-id',name:'默认项目',status:'active',group_counts:{resolved:1030}};
-const candidate={id:'candidate',generation:1,decision:'pending',reason:'awaiting approval',overlay:{}};
+const candidate={id:'candidate',generation:1,decision:'pending',reason:'awaiting approval',overlay:{},hypothesis:'Edge cases'};
 const evolution={id:'evo-id',status:'awaiting_approval',spent_usd:0,
   config:{suite:'fixture',agent_version:'fake',model:'fake',budget_usd:1},candidates:[candidate],journal:[]};
 let liveSpend=.0042;
@@ -228,8 +243,10 @@ const champion={id:'champion-id',candidate_id:candidate.id,active:true,parent_ch
   agent_version:'fake',model:'fake',solidify_builds:[{version:'built',status:'succeeded',regression_status:'completed'}]};
 const taskPath='/v1/tasks/'+task.id;
 const evolutionPath='/v1/evolutions/'+evolution.id;
+const candidateHref='#/evolutions/runs/'+evolution.id+'/approval/'+candidate.id;
 const location={hash:{guest:'#/projects/private-project',local:'#/projects',projects:'#/projects',task:'#/tasks/'+task.id,
-  evolution:'#/evolutions',archive:''}[destination]};
+  evolution:'#/evolutions',approvals:'#/approvals','result-approval':'#/approvals',
+  'evolution-approval':'#/approvals',archive:''}[destination]};
 const history={replaceState:(_state,_title,hash)=>{location.hash=hash}};
 const storage=new Map(!guest&&!local?[['sca-portal-token','fixture-member']]:[]);
 const localStorage={getItem:key=>storage.get(key),setItem:(key,value)=>storage.set(key,value),removeItem:key=>storage.delete(key)};
@@ -249,7 +266,9 @@ class Element {
   prepend(...nodes){this.children.unshift(...nodes)}
   replaceChildren(...nodes){this.children=nodes}
   addEventListener(){}
-  focus(){}
+  focus(){this.focused=true}
+  scrollIntoView(){this.scrolled=true}
+  hasChildNodes(){return this.children.length>0}
   hasAttribute(name){return this.attributes.has(name)}
   setAttribute(name,value){this.attributes.set(name,value)}
   getAttribute(name){return this.attributes.get(name)}
@@ -259,7 +278,7 @@ class Element {
     if(!this.selectors.has(selector))this.selectors.set(selector,new Element());
     return this.selectors.get(selector);
   }
-  querySelectorAll(){return []}
+  querySelectorAll(selector){return selector==='input'?walk(this).slice(1).filter(node=>node.type==='checkbox'):[]}
   reset(){}
 }
 const Node=Element;
@@ -269,12 +288,14 @@ function element(id){
   if(!elements.has(id))elements.set(id,new Element(id));
   return elements.get(id);
 }
-const sections=['overview','projects-page','evaluation','trace','evolutions-page','memories-page'].map(element);
+const sections=['overview','projects-page','evaluation','trace','evolutions-page','memories-page','approvals-page'].map(element);
 element('trace').after=node=>sections.push(node);
 element('task-run-workbench').hidden=false;
 element('evolution-dag-template').content={firstElementChild:{cloneNode:()=>element('evolution-dag')}};
 const controls=['history','member','admin'].map(access=>({dataset:{access},hidden:true}));
-const links=['tasks','evals','memories','evolutions'].map(page=>Object.assign(new Element(),{href:'#/'+page}));
+const links=['tasks','evals','memories','evolutions','approvals'].map(page=>Object.assign(new Element(),{href:'#/'+page}));
+const approvalLink=links.at(-1);
+approvalLink.dataset.access='tenant';
 links[0].after=link=>links.splice(1,0,link);
 const nav=new Element();
 nav.selectors.set('[href="#/tasks"]',links[0]);
@@ -282,16 +303,17 @@ nav.querySelectorAll=()=>links;
 const document={
   getElementById:element,createElement:()=>new Element(),documentElement:new Element(),
   createElementNS:()=>new Element(),createTextNode:textContent=>({textContent}),
+  createDocumentFragment:()=>new Element(),
   addEventListener(){},
   querySelector:selector=>({'.sidebar .brand':element('brand'),'.sidebar nav':nav})[selector],
-  querySelectorAll:selector=>({'main > section':sections,'[data-access]':controls,'.sidebar nav a':links})[selector]||[],
+  querySelectorAll:selector=>({'main > section':sections,'[data-access]':[...controls,approvalLink],'.sidebar nav a':links})[selector]||[],
 };
 const window=globalThis;
 const listeners=new Map();
 window.addEventListener=(name,listener)=>listeners.set(name,listener);
 const setInterval=()=>assert.equal(archived,false);
 let graphsDestroyed=0;
-const fixtureDAG=['task','evolution'].includes(destination)?{
+const fixtureDAG=['task','evolution','evolution-approval'].includes(destination)?{
   projectEvolution:()=>null,
   create(panel, fetchGraph, options){
     if(panel.id==='evolution-dag')assert.equal(options.project,SCATaskDAG.projectEvolution);
@@ -332,20 +354,63 @@ global.fetch=async (path,request={})=>{
   if(['/v1/portal/whoami','/v1/projects'].includes(path)){
     assert.equal(auth,local?(required?'Bearer fixture-admin':undefined):'Bearer fixture-member');
   }
+  if(path==='/v1/approvals')assert.equal(auth,local?(required?'Bearer fixture-admin':undefined):'Bearer fixture-member');
+  if(path===taskPath+'/review'){
+    reviewRequests.push(JSON.parse(request.body));
+    task.state='RUNNING';
+  }
+  if(path===taskPath+'/artifacts/changes.patch'){
+    return {ok:true,text:async()=> 'diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-x\n+y\n'};
+  }
+  if(path===evolutionPath+'/approve'){
+    reviewRequests.push(JSON.parse(request.body));
+    candidate.decision='promoted';
+    evolution.status='completed';
+  }
+  if(path===harvestPath+'/'+harvest.id+'/approve'){
+    reviewRequests.push(JSON.parse(request.body));
+    harvest.status='approved';
+  }
   await blocked.get(path);
+  const pending=evolutionApproval?[
+    ...(evolution.status==='awaiting_approval'?[{id:candidate.id,href:candidateHref,kind:'evolution_candidate',
+      title:candidate.hypothesis,created_at:at}]:[]),
+    ...(harvest.status==='pending'?[{id:harvest.id,href:harvestHref,kind:'harvest',title:harvest.case_id,created_at:at}]:[]),
+  ]:taskApproval&&task.state==='AWAITING_REVIEW'?[{href:approvalHref,id:task.id,
+    kind:resultApproval?'task_result':'task_plan',title:'校验任务',created_at:at}]:[];
   const fixtures={
-    '/v1/portal/whoami':local?evalAdmin:{tenant_id:'eval',role:'member'},
+    '/v1/portal/whoami':local?evalAdmin:{tenant_id:'eval',role:evolutionApproval?'admin':'member'},
     '/v1/portal/config':local?(
       auth?{...config.tenant,portal_require_token:required}:
       required?config.guest:{...config.tenant,portal_require_token:false,local_identity:evalAdmin}
     ):auth?config.tenant:config.guest,
     '/v1/projects':[project],
+    '/v1/approvals':{count:pending.length,items:pending},
     '/v1/evals/suites':[{name:'opencode-demo',cases:[]}],
+    '/v1/memories?status=proposed':[{id:'memory',text:'检查空输入',scope:'repo',category:'convention'}],
     [taskPath]:task,
-    [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}}],
+    [taskPath+'/events?after=0']:[{seq:1,type:'task.created',payload:{}},...(!taskApproval?[]:[
+      {seq:2,type:'review.requested',payload:resultApproval?{verification_passed:true}
+        :{plan:{subtasks:[{name:'verify',instruction:'覆盖边界条件'}]}}},
+    ])],
     [taskPath+'/artifacts']:artifacts,
-    [taskPath+'/conversation?limit=100']:{items:[],cursor:'0',has_more:false},
+    [taskPath+'/conversation?limit=100']:taskApproval?{items:[
+      {id:'run',kind:'operations',backend:'dsh',activity:{turn_seq:1,
+        operations:[{kind:'command',name:'pwd',exit_code:0,output_tail:'C:/w'}],files:[]},created_at:at},
+    ],cursor:'2',has_more:true}:{items:[],cursor:'0',has_more:false},
+    [taskPath+'/conversation?limit=100&cursor=2']:{items:[
+      {id:'edit',kind:'operations',backend:'dsh',activity:{turn_seq:1,operations:[],files:[{path:'verify.py',additions:1}]},
+        created_at:at},
+      {id:'reply',kind:'reply',backend:'dsh',text:'**Done**',created_at:at},
+      {id:'message',kind:'message',mode:'queue',message_id:'message',text:'看看边界',created_at:at},
+      {id:'receipt',kind:'receipt',message_id:'message',status:'delivered',text:'已送达',created_at:at}
+    ],cursor:'6',has_more:false},
+    [taskPath+'/conversation?limit=100&cursor=6']:{items:moreMessages?[
+      {id:'verification',kind:'verification.completed',text:'验证通过',created_at:at},
+    ]:[],cursor:moreMessages?'7':'6',has_more:false},
+    [taskPath+'/conversation?limit=100&cursor=7']:{items:[],cursor:'7',has_more:false},
     '/v1/evolutions':[evolution],[evolutionPath]:evolution,
+    [harvestPath]:[harvest],
     [evolutionPath+'/dag']:{nodes:[{kind:'evolution',cost_usd:liveSpend}],edges:[]},
     [evolutionPath+'/conversation?limit=100']:{items:[],cursor:'e:0',has_more:false},
     '/v1/champions':[champion],['/v1/champions/'+champion.id]:champion,
@@ -358,6 +423,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
 (async()=>{
   const nextTick=()=>new Promise(setImmediate);
   const waitForStartup=async()=>{while(refreshing)await nextTick()};
+  const approve=card=>walk(card).find(node=>node.textContent==='批准');
   await nextTick();
   if(archived){
     assert.deepEqual(calls,['/portal/archive.json']);
@@ -365,6 +431,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal($('overview').hidden,false);
     assert.deepEqual(links.filter(link=>!link.hidden).map(link=>link.hash),
       ['#/tasks','#/history','#/evals','#/memories','#/evolutions']);
+    assert.equal(approvalLink.hidden,true);
 
     $('memory-status').value='active';
     location.hash='#/memories';
@@ -401,7 +468,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     portalToken='fixture-member';
     location.hash='#/projects';
     await refresh(true);
-    assert.deepEqual(calls.slice(2),['/v1/portal/whoami','/v1/projects']);
+    assert.deepEqual(calls.slice(2),['/v1/portal/whoami','/v1/approvals','/v1/projects']);
     assert.equal($('projects-home').hidden,false);
     assert.equal($('guest-view-banner').hidden,true);
     assert.equal($('model-not-configured').hidden,true);
@@ -450,7 +517,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(storage.get('sca-portal-token'),'fixture-admin');
     assert.deepEqual(authHeaders(),{Authorization:'Bearer fixture-admin'});
   }else if(destination==='projects'){
-    assert.deepEqual(calls,['/v1/portal/whoami','/v1/projects']);
+    assert.deepEqual(calls,['/v1/portal/whoami','/v1/approvals','/v1/projects']);
     const duplicate=route();
     await refresh();
     assert.equal(calls.filter(path=>path==='/v1/projects').length,1);
@@ -462,7 +529,7 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     assert.equal(card.children[1].children.at(-1).children[1].textContent,'1,030');
     await refresh();
     await refresh();
-    assert.deepEqual(calls,['/v1/portal/whoami','/v1/projects']);
+    assert.deepEqual(calls,['/v1/portal/whoami','/v1/approvals','/v1/projects']);
 
     location.hash='#/evals/repair';
     const evaluation=route();
@@ -511,9 +578,87 @@ const deadline=setTimeout(()=>{throw Error('Portal bootstrap did not settle')},4
     await route();
     assert(calls.includes(taskPath+'/dag'));
     assert.equal($('task-dag').hidden,false);
+  }else if(taskApproval){
+    await waitForStartup();
+    assert.equal(approvalLink.hidden,false);
+    assert.equal($('approvals-page').hidden,false);
+    assert.equal($('approvals-count').textContent,' (1)');
+    const entry=walk($('approvals-list')).find(node=>node.href);
+    assert.equal(entry.href,approvalHref);
+    location.hash=entry.href;
+    await route();
+    const chat=walk($('task-conversation'));
+    const card=chat.find(node=>node.id==='task-approval');
+    assert(card.scrolled);
+    if(resultApproval){
+      assert(walk(card).some(node=>node.textContent==='验证结果 · 通过'));
+      assert(walk(card).some(node=>node.textContent==='app.py'));
+      const patch=walk(card).find(node=>node.textContent==='查看最终补丁');
+      patch.onclick({preventDefault(){}});
+      assert($('patch').focused);
+      const check=card.querySelectorAll('input')[0];
+      check.checked=true;
+      check.onchange();
+      assert($('task-memory-proposals').querySelectorAll('input')[0].checked);
+    }else{
+      assert(walk(card).some(node=>node.textContent==='覆盖边界条件'));
+    }
+    assert(chat.some(node=>node.textContent==='执行了 1 个命令，修改了 1 个文件'));
+    assert(chat.some(node=>node.textContent==='Done'));
+    assert.equal(chat.filter(node=>node.className==='conversation-receipt').length,1);
+    assert.equal(chat.find(node=>node.className==='conversation-receipt').children[0].textContent,'已送达');
+    assert.equal($('task-review-chat').href,approvalHref);
+    $('task-review-chat').onclick({preventDefault(){}});
+    assert(card.focused);
+    const feed=chat.find(node=>node.className==='conversation-feed');
+    const jump=chat.find(node=>node.className==='conversation-jump');
+    Object.assign(feed,{scrollHeight:1000,clientHeight:400,scrollTop:100});
+    moreMessages=true;
+    await refresh();
+    await nextTick();
+    assert.equal(feed.scrollTop,100);
+    assert.equal(jump.hidden,false);
+    jump.onclick();
+    assert.equal(feed.scrollTop,1000);
+    assert.equal(jump.hidden,true);
+    const change=walk(card).find(node=>node.textContent==='要求修改');
+    await change.onclick();
+    assert.equal(reviewRequests.length,0);
+    await approve(card).onclick();
+    assert.deepEqual(reviewRequests,[{decision:'approve',feedback:null,accept_memories:resultApproval?['memory']:[]}]);
+    assert(walk(card).some(node=>node.textContent==='已批准'));
+    await nextTick();
+    assert.equal($('approvals-count').textContent,' (0)');
+    portalIdentity={tenant_id:'eval',role:'viewer'};
+    portalTasks.render({...task,state:'AWAITING_REVIEW'},taskEvents);
+    const readOnly=walk($('task-conversation')).find(node=>node.id==='task-approval');
+    assert(walk(readOnly).some(node=>node.textContent==='等待人工审核 · 只读'));
+    assert(!approve(readOnly));
+  }else if(evolutionApproval){
+    releaseSuites();
+    await waitForStartup();
+    assert.equal($('approvals-count').textContent,' (2)');
+    const link=href=>walk($('approvals-list')).find(node=>node.href===href);
+    location.hash=link(candidateHref).href;
+    await route();
+    const content=()=>walk($('evolution-content'));
+    const card=content().find(node=>node.id==='candidate-approval-'+candidate.id);
+    assert(card.scrolled);
+    await approve(card).onclick();
+    assert.deepEqual(reviewRequests,[{candidate_id:candidate.id}]);
+    assert(walk(card).some(node=>node.textContent==='已批准 · 已晋升'));
+    location.hash=link(harvestHref).href;
+    await route();
+    const publication=content().find(node=>node.id==='harvest-approval-'+harvest.id);
+    assert(publication.scrolled);
+    global.confirm=()=>true;
+    await walk(publication).find(node=>node.textContent==='批准发布').onclick();
+    await nextTick();
+    assert(content().some(node=>node.id===publication.id&&walk(node).some(child=>child.textContent==='已批准')));
+    assert.equal($('approvals-count').textContent,' (0)');
   }else{
     assert.deepEqual(new Set(calls),new Set([
-      '/v1/portal/whoami',taskPath,taskPath+'/events?after=0',
+      '/v1/portal/whoami','/v1/approvals',taskPath,taskPath+'/events?after=0',
       '/v1/tasks?limit=100','/v1/portal/config',
     ]));
     releaseTask();
@@ -757,7 +902,10 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         (root, run), (run, 'case'), ('case', generation),
     )]}
     journal = [{'id': 'baseline', 'kind': 'evaluation', 'text': '基线评测结果 · 1/1 通过 · $0.01',
-                'created_at': at, 'dag_node_id': run}]
+                'created_at': at, 'dag_node_id': run, 'evaluation': {
+                    'role': 'baseline', 'split': 'dev', 'status': 'completed', 'passed': 1, 'total': 1,
+                    'cost_usd': .01,
+                }}]
     starts, messages, cursors = [], [], []
 
     def handle(route):
@@ -777,10 +925,11 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
                 row['status'] = 'running'
             if mode == 'guidance':
                 journal.extend([
-                    {'id': 'hint', 'kind': 'message', 'text': body['text'], 'actor': 'operator',
+                    {'id': 'hint', 'kind': 'message', 'text': body['text'], 'actor': 'operator', 'mode': 'guidance',
+                     'message_id': 'hint',
                      'created_at': at, 'dag_node_id': root},
                     {'id': 'applied', 'kind': 'receipt', 'text': '已应用于第 1 代提议',
-                     'created_at': at, 'dag_node_id': generation},
+                     'created_at': at, 'dag_node_id': generation, 'message_id': 'hint', 'status': 'applied'},
                 ])
             route.fulfill(status=202, json={})
         elif url.path == path + '/conversation':
@@ -858,14 +1007,14 @@ def test_portal_browser_launches_evolution_and_steers_through_the_conversation()
         assert chat.locator('.conversation-user').get_by_text('留意边界条件').is_visible()
         assert messages[-1] == {'text': '留意边界条件', 'mode': 'guidance'}
         assert 1 in cursors
-        chat.get_by_text('已应用于第 1 代提议', exact=True).locator('..').get_by_role('link').click()
+        chat.locator('.conversation-user').get_by_role('link', name='已应用于第 1 代提议', exact=True).click()
         assert panel.locator(f'[data-node="{generation}"]').get_attribute('aria-pressed') == 'true'
         chat.get_by_role('button', name='暂停', exact=True).click()
         chat.get_by_role('button', name='恢复', exact=True).wait_for(timeout=6000)
         chat.get_by_role('button', name='恢复', exact=True).click()
         assert [msg['mode'] for msg in messages] == ['guidance', 'pause', 'resume']
         page.set_viewport_size({'width': 820, 'height': 850})
-        assert chat.bounding_box()['y'] > panel.bounding_box()['y']
+        assert chat.bounding_box()['y'] < panel.bounding_box()['y']
         row['status'] = 'stopped'
         chat.get_by_text('演进已结束，无法发送消息。').wait_for(timeout=6000)
         assert prompt.is_disabled()

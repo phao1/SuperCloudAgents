@@ -257,6 +257,11 @@ def create_app(
     app.include_router(model_providers_router)
     # Local Portal authentication
     app.state.local_portal_port = local_portal_port
+
+    # Portal approvals inbox
+    from sca.api.approvals import router as approvals_router
+
+    app.include_router(approvals_router)
     return app
 
 
