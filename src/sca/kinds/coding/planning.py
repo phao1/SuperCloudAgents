@@ -140,10 +140,11 @@ class PlanningActivities:
 
     @activity.defn(name="coding.plan_task")
     async def plan_task(self, inp: PlanningInput) -> dict | None:
-        if inp.interjectible:
-            async with self.acts._turn_heartbeats(interjectible=True):
-                return await self._plan_task(inp)
-        return await self._plan_task(inp)
+        async with self.acts._live_task(inp.task_id, "plan"):
+            if inp.interjectible:
+                async with self.acts._turn_heartbeats(interjectible=True):
+                    return await self._plan_task(inp)
+            return await self._plan_task(inp)
 
     async def _plan_task(self, inp: PlanningInput) -> dict | None:
         acts = self.acts

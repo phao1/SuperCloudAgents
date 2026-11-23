@@ -14,22 +14,28 @@ def test_fixture():
     assert [event.type for event in events] == [
         "session_started",
         "message",
+        "activity",
         "command",
+        "activity",
         "command",
+        "activity",
         "file_change",
+        "activity",
         "command",
         "message",
         "usage",
     ]
     assert events[0].data["session_id"] == "01a1d9d6-f916-7b90-b8f9-6ba787195501"
-    assert events[2].data["output_tail"] == "/workspace\ncalc.py\n"
-    assert events[4].data == {"changes": [{"path": "/workspace/calc.py", "kind": "update"}]}
+    assert events[2].data["operation"] == "command"
+    assert events[3].data["output_tail"] == "/workspace\ncalc.py\n"
+    assert events[2].data["call_id"] == events[3].data["call_id"]
+    assert events[7].data == {"changes": [{"path": "/workspace/calc.py", "kind": "update"}], "call_id": "item_3"}
     assert events[-1].data == {
         "input_tokens": 58559,
         "cached_input_tokens": 53120,
         "output_tokens": 221,
     }
-    assert all(event.raw for event in events)
+    assert all(event.raw for event in events if event.type != "activity")
 
 
 @pytest.mark.parametrize(

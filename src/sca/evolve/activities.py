@@ -16,12 +16,13 @@ from sca.core.model_provider import ModelProviderError
 from sca.db.repo import Store
 from sca.eval.activities import load_activity_suite
 from sca.eval.errors import invalid_eval_input, suite_changed
-from sca.eval.suites import matches_suite_hash
+from sca.eval.suites import case_metadata, matches_suite_hash, select_cases
 from sca.eval.trajectory import is_errored, overall_passed
 from sca.evolve.checks import measured_efficiency, overlay_hash, static_check
 from sca.evolve.models import Proposal
 from sca.gateway.configuration import local_default_model
 from sca.gateway.model_providers import read_registry
+from sca.live_heartbeat import worker_activity
 from sca.orchestration.provider_errors import account_failure
 
 # OpenCode 2.3 renders this guidance when no overlay replaces it (session/system-prompt.ts).
@@ -92,6 +93,10 @@ class EvolutionActivities:
 
     @activity.defn(name='evolve_initialize')
     async def initialize(self, request: dict) -> dict:
+        async with worker_activity(self.settings.data_dir, "evolution", request["id"], "prepare"):
+            return await self._initialize(request)
+
+    async def _initialize(self, request: dict) -> dict:
         await self.suite(request)
         store = self.scoped(request)
         cfg = request['config']
@@ -104,6 +109,12 @@ class EvolutionActivities:
 
     @activity.defn(name='evolve_prepare_run')
     async def prepare_run(self, request: dict) -> dict:
+        if "id" not in request:
+            return await self._prepare_run(request)
+        async with worker_activity(self.settings.data_dir, "evolution", request["id"], "prepare_evaluation"):
+            return await self._prepare_run(request)
+
+    async def _prepare_run(self, request: dict) -> dict:
         suite = await self.suite(request)
         cfg = request['config']
         # Preserve the pinned hash so runs within an existing evolution can still be paired.
@@ -128,11 +139,21 @@ class EvolutionActivities:
         if request.get('schedule_id') is not None:
             payload.update(evolution_schedule_id=request['schedule_id'],
                            champion_id=request.get('champion_id'))
+        cases = self._case_metadata(suite, payload) if payload.get('evolution_id') else {}
         await self.scoped(request).create_eval_run({
             'id': UUID(payload['id']), 'tenant_id': request['tenant_id'], 'suite': suite['name'],
-            'suite_hash': suite_hash, 'variant': payload, 'created_by': request['created_by'],
+            'suite_hash': suite_hash, 'variant': {**payload, **({'case_metadata': cases} if cases else {})},
+            'created_by': request['created_by'],
             'status': 'queued'})
         return payload
+
+    @staticmethod
+    def _case_metadata(suite: dict, payload: dict) -> dict:
+        try:
+            return case_metadata(select_cases(suite, payload["split"]))
+        except (KeyError, ValueError):
+            # Preserve the existing suite error path in eval_prepare.
+            return {}
 
     @activity.defn(name='evolve_read_run')
     async def read_run(self, request: dict) -> dict:
@@ -176,6 +197,10 @@ class EvolutionActivities:
 
     @activity.defn(name='evolve_propose')
     async def propose(self, request: dict) -> list[dict]:
+        async with worker_activity(self.settings.data_dir, "evolution", request["id"], "proposal"):
+            return await self._propose(request)
+
+    async def _propose(self, request: dict) -> list[dict]:
         if self.gateway is None:
             raise ValueError('evolution requires a model gateway')
         store = self.scoped(request)

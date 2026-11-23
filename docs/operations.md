@@ -422,3 +422,29 @@ curl -fsS -X POST "$SCA_API_URL/v1/tasks/$TASK_ID/messages" \
   -H 'Content-Type: application/json' \
   -d '{"text":"先修复空输入处理。","mode":"interrupt"}'
 ```
+
+## 对话实时状态
+
+打开任务或演进详情的「对话」。顶部约每 2 秒读取进度，计时器每秒更新。总用时从提交算起，
+包含排队和审批，结束后固定。任务会显示阶段用时、各 Agent 当前操作、轮次、Token 和已知费用。
+演进会显示代数、候选、当前用例及通过数。评测预算用于评测任务，总费用还包括已记录的反思和提议费用。
+
+「正常运行」表示仍有新事件或 Worker 心跳。任务运行期间两者都超过 120 秒没有更新时显示「可能卡住」。
+可在启动 API 前设置 `SCA_STALL_WARN_S` 调整秒数。Worker 和 API 使用同一个 `SCA_DATA_DIR`，
+活动期间每 10 秒更新 `SCA_DATA_DIR/run/live` 中的心跳。命令长时间没有输出时，心跳仍可表明 Worker 在运行。
+排队、依赖等待、暂停和待审批各有状态。可用「查看日志」跳到任务的事件记录或实时终端，
+在可打断的轮次用「打断并发送…」聚焦插话框。
+
+对话中的里程碑显示可用的耗时。展开命令组查看逐条耗时和退出码，展开失败验证查看输出末尾。
+结束后可在消息底部查看运行总结。各 Agent 的耗时可能并行重叠，历史记录只显示能够从已有事件计算的耗时。
+访客继续使用只读脱敏范围。此功能无需数据库迁移。
+
+```bash
+curl -fsS "$SCA_API_URL/v1/tasks/$TASK_ID/live" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+curl -fsS "$SCA_API_URL/v1/evolutions/$EVOLUTION_ID/live" \
+  -H "Authorization: Bearer $SCA_API_TOKEN"
+```
+
+快照的 `as_of` 是服务端时间，`phase.started_at` 是阶段起点，`last_activity_at` 取最近事件或心跳时间。
+任务返回 `agents`，演进返回 `generation`、`candidate`、`evaluation` 和评测预算。结束后返回 `summary`。

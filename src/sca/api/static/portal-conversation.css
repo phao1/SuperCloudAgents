@@ -98,6 +98,7 @@
 .conversation-markdown { gap: .45rem; }
 .conversation-bubble pre { max-width: 100%; overflow: auto; white-space: pre-wrap; }
 .conversation-operation > code { white-space: pre-wrap; }
+.conversation-operation > small { display: inline-block; margin-inline-start: .45rem; }
 .conversation-bubble summary { cursor: pointer; color: var(--accent); }
 .conversation-operation-list, .conversation-file-list { display: grid; gap: .35rem; margin: .4rem 0; padding-left: 1.1rem; }
 .conversation-operation-failed > small { color: var(--bad); }
@@ -152,6 +153,69 @@
 }
 .approval-inbox-title { display: block; }
 .approval-inbox li:last-child { border-bottom: 0; }
+
+/* Live conversation */
+.conversation-live {
+  flex: none;
+  max-block-size: min(48%, 20rem);
+  min-inline-size: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  padding: .6rem .7rem;
+  background: var(--subtle);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  font-size: .84rem;
+  overflow-wrap: anywhere;
+}
+.conversation-live > :not(.conversation-live-lanes) { flex: none; }
+.conversation-live-heading, .conversation-live-phase, .conversation-live-lane-head,
+.conversation-live-operation, .conversation-live-health, .conversation-live-actions,
+.conversation-live-evaluation, .conversation-live-generation, .conversation-summary-metrics {
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: .15rem .65rem;
+}
+.conversation-live-heading { align-items: center; }
+.conversation-live-heading > :last-child { margin-inline-start: auto; color: var(--muted); }
+.conversation-live :is(p, ul) { margin: 0; }
+.conversation-live-phase > :first-child, .conversation-live-time { color: var(--muted); }
+.conversation-live-time, .conversation-live-heading > strong { font-variant-numeric: tabular-nums; }
+.conversation-live-lanes {
+  display: grid; gap: .4rem; list-style: none; padding: 0;
+  min-block-size: 0; overflow: hidden auto; overscroll-behavior-y: contain;
+}
+.conversation-live-lanes:empty, .conversation-live-phase:empty { display: none; }
+.conversation-live-lane {
+  display: grid; gap: .15rem; padding: .3rem .45rem; background: var(--panel);
+  border-inline-start: 2px solid var(--line); border-radius: 4px;
+}
+.conversation-live-operation { min-width: 0; }
+.conversation-live-operation > :first-child { min-width: 0; }
+.conversation-live-warning { color: var(--warn); }
+.conversation-live-health { padding: .25rem .4rem; border-radius: 5px; }
+.conversation-live-health[data-tone="good"] { color: var(--good); background: var(--good-bg); }
+.conversation-live-health[data-tone="warn"] { color: var(--warn); background: var(--warn-bg); }
+.conversation-live-actions { flex-basis: 100%; align-items: center; }
+.conversation-live-actions button { min-height: 2rem; padding: .15rem .45rem; }
+.conversation-step-output { flex: 1 1 100%; min-width: 0; text-align: start; }
+.conversation-step-output :is(pre, code) { overflow-wrap: anywhere; white-space: pre-wrap; }
+.conversation-step-output pre { max-block-size: 14rem; }
+.conversation-summary:empty { display: none; }
+.conversation-run-summary {
+  display: grid; gap: .4rem; margin-block-start: .65rem; padding: .7rem;
+  border: 1px solid var(--line); background: var(--panel); border-radius: 10px;
+}
+.conversation-run-summary :is(h3, h4, ul) { margin: 0; }
+.conversation-run-summary h4 { font-size: .85rem; }
+.conversation-run-summary ul { padding: 0; list-style: none; }
+.conversation-run-summary li {
+  display: flex; flex-wrap: wrap; justify-content: space-between; gap: .1rem .5rem;
+  padding-block: .15rem; font-size: .82rem; border-block-end: 1px solid var(--line);
+  overflow-wrap: anywhere;
+}
+.conversation-run-summary li:last-child { border: 0; }
+
 @media (max-width: 900px) {
   .portal-run-workbench { grid-template-columns: minmax(0, 1fr); }
   .portal-run-workbench .portal-conversation {
@@ -161,6 +225,8 @@
   .conversation-compose-row .conversation-input { flex-basis: 100%; }
 }
 @media (max-width: 550px) {
+  .conversation-live { max-block-size: min(48%, 19rem); padding: .45rem .55rem; }
+  .conversation-live-heading > :last-child { margin-inline-start: 0; }
   .conversation-compose-row .conversation-input { min-block-size: 44px; font-size: max(16px, 1rem); }
   .conversation-compose-actions { inline-size: 100%; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .conversation-compose-actions button { inline-size: 100%; min-block-size: 44px; white-space: normal; }

@@ -9,6 +9,262 @@ const portalConversation = (() => {
     stop: '停止', skip: '跳过', budget: '预算'};
   const pendingLabels = {queue: '排队中 · 当前轮结束后送达', interrupt: '正在打断…',
     next: '排队中 · 等待下一代提议', guidance: '排队中 · 等待下一代提议', now: '正在准备重新提议…'};
+  const dollars = new Intl.NumberFormat('en-US', {style: 'currency', currency: 'USD', maximumFractionDigits: 6});
+  const phases = {
+    queue: '排队', setup: '准备环境', plan: '规划', agent: '单任务执行', subtasks: '子任务执行',
+    verification: '验证', merge: '合并', output: '写入代码', review: '等待审批', paused: '暂停',
+    prepare: '准备演进', prepare_evaluation: '准备评测', proposal: '反思与生成候选', gate: '评测门禁',
+    evaluation: '评测', evaluation_dev: '开发集评测', evaluation_holdout: '留出集评测',
+  };
+  const operations = {
+    model: '正在调用模型', command: '正在执行命令', tool: '正在调用工具', edit: '正在修改',
+    workspace: '正在准备工作区', sandbox: '正在创建沙箱', setup: '正在准备依赖和环境',
+    model_retry: '正在等待模型重试', model_rate_limit: '正在等待限流恢复', ci: '正在等待 CI',
+    agent: 'Agent 正在执行', slot: '排队等待并发名额', dependency: '正在等待依赖',
+    settle: '正在结算费用', checkpoint: '正在保存工作区', verification: '正在验证',
+    prepare_evaluation: '正在准备评测', submit_case: '正在提交用例',
+  };
+
+  function elapsed(seconds, precise = false) {
+    seconds = Math.max(0, seconds);
+    if (precise && seconds < 60) return Number(seconds.toFixed(1)) + ' 秒';
+    const whole = Math.floor(seconds), minutes = Math.floor(whole / 60), hours = Math.floor(minutes / 60);
+    return [hours && hours + ' 小时', minutes % 60 ? minutes % 60 + ' 分' : '',
+      whole % 60 || !minutes ? whole % 60 + ' 秒' : ''].filter(Boolean).join(' ');
+  }
+
+  function cost(value) {
+    return value == null ? '费用待结算' : dollars.format(value);
+  }
+
+  function metrics(agent) {
+    return [agent.turn === 0 ? '规划轮' : agent.turn != null ? '第 ' + agent.turn + ' 轮' : '',
+      (agent.tokens || 0).toLocaleString('zh-CN') + ' tokens', cost(agent.cost_usd)].filter(Boolean).join(' · ');
+  }
+
+  function agentName(agent) {
+    return [agent.label, ui.backendLabel(agent.backend), agent.subtask].filter(Boolean).join(' · ');
+  }
+
+  function operationText(activity) {
+    const label = operations[activity.operation] || operations.agent;
+    const line = el('span', label);
+    if (activity.detail) line.append(' ', el('code', activity.detail));
+    return line;
+  }
+
+  function summaryCard(snapshot) {
+    const card = el('article', undefined, 'conversation-run-summary');
+    const heading = el('h3', '运行总结');
+    const top = el('div', undefined, 'conversation-summary-metrics');
+    top.append(el('strong', '总用时 ' + elapsed(snapshot.elapsed_s, true)),
+      el('span', '总费用 ' + cost(snapshot.cost_usd)));
+    card.append(heading, top);
+    const {phases: stages, agents} = snapshot.summary;
+    function rows(title, lines) {
+      if (!lines.length) return;
+      const details = el('ul');
+      details.append(...lines.map(([name, value]) => {
+        const row = el('li');
+        row.append(el('span', name), el('span', value));
+        return row;
+      }));
+      card.append(el('h4', title), details);
+    }
+    rows('各阶段用时', stages.map(stage => [phases[stage.phase] || stage.phase, elapsed(stage.duration_s, true)]));
+    rows('Agent 用时与费用', agents.map(agent => [agentName(agent),
+      [agent.duration_s == null ? '' : elapsed(agent.duration_s, true),
+        agent.cost_usd == null ? '费用无记录' : cost(agent.cost_usd)].filter(Boolean).join(' · ')]));
+    return card;
+  }
+
+  function liveStatus({path, active, isTask, interrupt, logLink, summary, followSummary}) {
+    const strip = el('section', undefined, 'conversation-live');
+    strip.setAttribute('aria-label', '实时运行状态');
+    strip.hidden = true;
+    const heading = el('div', undefined, 'conversation-live-heading');
+    const status = el('span', undefined, 'badge');
+    const total = el('strong'), spend = el('span');
+    heading.append(status, total, spend);
+    const stage = el('p', undefined, 'conversation-live-phase');
+    const detail = el('ul', undefined, 'conversation-live-lanes');
+    detail.setAttribute('aria-label', isTask ? 'Agent 活动' : '评测进度');
+    const health = el('div', undefined, 'conversation-live-health');
+    const fresh = el('strong');
+    fresh.setAttribute('role', 'status');
+    const recent = el('span');
+    const actions = el('div', undefined, 'conversation-live-actions');
+    const steer = el('button', isTask ? '打断并发送…' : '立即生效…');
+    steer.type = 'button';
+    steer.onclick = interrupt.focus;
+    const logs = el('span');
+    actions.append(steer, logs);
+    health.append(fresh, recent, actions);
+    const error = el('small', '实时状态暂不可用', 'conversation-live-error');
+    error.hidden = true;
+    strip.append(heading, stage, health, detail, error);
+
+    let snapshot, received, refreshTimer, ticker, loading, destroyed, signature, logTask;
+    let clocks = [], warnings = [];
+    const set = (node, text) => { if (node.textContent !== text) node.textContent = text; };
+    const age = (at, now) => Math.max(0, (now - Date.parse(at)) / 1000);
+    function timer(parent, at, prefix = '') {
+      const node = el('span', undefined, 'conversation-live-time');
+      parent.append(node);
+      clocks.push({node, at, prefix});
+    }
+
+    function rebuild() {
+      const {agents, evaluation, generation, generation_started_at, candidate, phase, finished} = snapshot;
+      const content = JSON.stringify([agents.map(({label, backend, subtask, activity, turn, tokens, cost_usd}) =>
+        [label, backend, subtask, activity, turn, tokens, cost_usd]),
+      evaluation && {...evaluation, cases: evaluation.cases.map(({task_id, label, state, started_at}) =>
+        [task_id, label, state, started_at])}, generation, generation_started_at, candidate, phase, finished]);
+      if (signature === content) return;
+      signature = content;
+      clocks = [];
+      warnings = [];
+      stage.replaceChildren();
+      detail.replaceChildren();
+      if (finished) return;
+      stage.append(el('span', '当前阶段'), el('strong', phases[phase.operation] || phase.operation));
+      timer(stage, phase.started_at, phase.operation === 'queue' ? '已等 ' : '');
+      if (phase.detail === 'gateway_pressure') stage.append(el('span', '等待模型网关限流恢复'));
+      else if (phase.operation === 'queue' && phase.detail) stage.append(el('span', '等待并发名额'));
+      else if (operations[phase.detail]) stage.append(el('span', operations[phase.detail]));
+      if (generation != null) {
+        const scope = el('li', undefined, 'conversation-live-generation');
+        const name = generation === 0 ? '基线' : '第 ' + generation + ' 代';
+        scope.append(el('strong', candidate == null ? name : name + ' · 候选 ' + candidate));
+        if (generation_started_at) timer(scope, generation_started_at, '本代 ');
+        detail.append(scope);
+      }
+      if (evaluation) addCases(evaluation);
+      agents.forEach(addLane);
+    }
+
+    function addCases(evaluation) {
+      const line = el('li', undefined, 'conversation-live-evaluation');
+      const split = {dev: '开发集', holdout: '留出集'}[evaluation.split] || '评测';
+      const progress = evaluation.total == null ? evaluation.completed : evaluation.completed + '/' + evaluation.total;
+      line.append(el('strong', split), el('span', '已完成 ' + progress + ' 用例 · 通过 ' + evaluation.passed));
+      detail.append(line);
+      evaluation.cases.forEach((entry, index) => {
+        const item = el('li', undefined, 'conversation-live-lane');
+        const head = el('div', undefined, 'conversation-live-lane-head');
+        head.append(evidenceLink(entry.label, '#/tasks/' + enc(entry.task_id)));
+        const line = el('div', undefined, 'conversation-live-operation');
+        line.append(el('span', statusText(entry.state)));
+        timer(line, entry.started_at);
+        const warning = el('small', undefined, 'conversation-live-warning');
+        item.append(head, line, warning);
+        detail.append(item);
+        warnings.push({node: warning, entry: () => snapshot.evaluation.cases[index]});
+      });
+    }
+
+    function addLane(agent, index) {
+      const item = el('li', undefined, 'conversation-live-lane');
+      const head = el('div', undefined, 'conversation-live-lane-head');
+      head.append(el('strong', agentName(agent)));
+      if (agent.turn != null || agent.tokens || agent.cost_usd != null) head.append(el('small', metrics(agent)));
+      item.append(head);
+      if (agent.activity) {
+        const task = el('div', undefined, 'conversation-live-operation');
+        task.append(operationText(agent.activity));
+        const waiting = ['slot', 'dependency'].includes(agent.activity.operation);
+        timer(task, agent.activity.started_at, waiting ? '已等 ' : '');
+        item.append(task);
+      }
+      const warning = el('small', undefined, 'conversation-live-warning');
+      item.append(warning);
+      detail.append(item);
+      warnings.push({node: warning, entry: () => snapshot.agents[index]});
+    }
+
+    function tick() {
+      if (!active() || destroyed) {
+        stop();
+        return;
+      }
+      if (!snapshot) return;
+      const now = Date.parse(snapshot.as_of) + performance.now() - received;
+      set(total, '总用时 ' + elapsed(snapshot.finished ? snapshot.elapsed_s : age(snapshot.started_at, now)));
+      for (const {node, at, prefix} of clocks) set(node, prefix + elapsed(age(at, now)));
+      const silence = age(snapshot.last_activity_at, now);
+      const stalled = snapshot.running && (snapshot.stalled || silence > snapshot.stall_warn_s);
+      const laneStalled = warnings.some(warning => warning.entry().stalled);
+      const waiting = snapshot.phase.operation === 'queue';
+      const state = snapshot.running ? '运行中' : waiting ? '排队中'
+        : snapshot.phase.operation === 'review' ? '等待审批' : statusText(snapshot.state);
+      set(status, state);
+      detail.tabIndex = detail.scrollHeight > detail.clientHeight ? 0 : -1;
+      status.className = 'badge ' + (stalled || laneStalled ? 'waiting'
+        : snapshot.running ? 'complete' : waiting ? 'waiting' : statusClass(snapshot.state));
+      health.hidden = !snapshot.running;
+      health.dataset.tone = stalled || laneStalled ? 'warn' : 'good';
+      set(fresh, stalled ? '可能卡住' : laneStalled ? '有步骤可能卡住' : '正常运行');
+      set(recent, stalled ? '已 ' + elapsed(silence) + ' 无进展' : '最近活动 ' + elapsed(silence) + '前');
+      for (const {node, entry} of warnings) {
+        const row = entry();
+        node.hidden = !row.stalled;
+        if (row.stalled) set(node, '可能卡住 · 已 ' + elapsed(age(row.last_activity_at, now)) + ' 无进展');
+      }
+      actions.hidden = !stalled && !laneStalled;
+      steer.hidden = !interrupt.available();
+      const currentLog = snapshot.evaluation?.cases.find(entry => entry.stalled)?.task_id
+        ?? snapshot.evaluation?.cases[0]?.task_id;
+      if (logTask !== currentLog || !logs.hasChildNodes()) {
+        logTask = currentLog;
+        const link = logLink?.() || (currentLog && evidenceLink('查看日志', '#/tasks/' + enc(currentLog)));
+        logs.replaceChildren(...(link ? [link] : []));
+      }
+    }
+
+    function stop() {
+      clearTimeout(refreshTimer);
+      clearInterval(ticker);
+      refreshTimer = ticker = undefined;
+    }
+
+    async function poll() {
+      refreshTimer = undefined;
+      if (loading || destroyed || !active() || snapshot?.finished) return;
+      loading = true;
+      try {
+        const next = await data(path + '/live');
+        if (!active() || destroyed || !next?.phase) return;
+        snapshot = next;
+        received = performance.now();
+        strip.hidden = false;
+        error.hidden = true;
+        const totalCost = '费用 ' + cost(next.cost_usd);
+        spend.textContent = next.budget_usd == null ? totalCost
+          : totalCost + ' · 评测 ' + cost(next.eval_spent_usd) + ' / ' + cost(next.budget_usd);
+        rebuild();
+        tick();
+        if (next.finished) {
+          if (next.summary) followSummary(() => summary.replaceChildren(summaryCard(next)));
+          stop();
+        }
+      } catch {
+        if (snapshot && active()) error.hidden = false;
+      } finally {
+        loading = false;
+        if (active() && !destroyed && !snapshot?.finished) refreshTimer = setTimeout(poll, 2000);
+      }
+    }
+
+    return {
+      strip,
+      start() {
+        if (!active() || destroyed || snapshot?.finished) return;
+        if (!ticker) ticker = setInterval(tick, 1000);
+        if (!refreshTimer && !loading) void poll();
+      },
+      destroy() { destroyed = true; stop(); },
+    };
+  }
 
   function timeLabel(item, format = clock) {
     const time = new Date(item.created_at);
@@ -68,6 +324,7 @@ const portalConversation = (() => {
       if (operation.summary) line.append(el('small', operation.summary));
       if (operation.failed) line.append(el('small', '调用失败', 'bad'));
     }
+    if (operation.duration_s != null) line.append(el('small', '用时 ' + elapsed(operation.duration_s, true)));
     line.classList.toggle('conversation-operation-failed', operation.failed);
     return line;
   }
@@ -114,7 +371,7 @@ const portalConversation = (() => {
     return {turn: activity.turn_seq, append};
   }
 
-  function create(mount, {path, type, focus, active, canWrite}) {
+  function create(mount, {path, type, focus, active, canWrite, logLink}) {
     const list = el('ol', undefined, 'conversation-items');
     list.setAttribute('role', 'log');
     list.setAttribute('aria-label', '运行进度与消息');
@@ -123,7 +380,8 @@ const portalConversation = (() => {
     const loadStatus = el('p', undefined, 'status-text conversation-status');
     loadStatus.setAttribute('role', 'status');
     const feed = el('div', undefined, 'conversation-feed');
-    feed.append(empty, list, loadStatus);
+    const summary = el('div', undefined, 'conversation-summary');
+    feed.append(empty, list, loadStatus, summary);
     const jump = el('button', '有新消息 ↓', 'conversation-jump');
     jump.type = 'button';
     jump.hidden = true;
@@ -167,7 +425,17 @@ const portalConversation = (() => {
     title.tabIndex = -1;
     const guidanceChip = el('p', 'agent 正在按你的指引执行', 'conversation-guidance-chip');
     guidanceChip.setAttribute('role', 'status');
-    mount.replaceChildren(title, scrollArea, guidanceChip, form, footer);
+    const live = liveStatus({path, active, isTask, logLink, summary, followSummary: update => {
+      const follow = atEnd();
+      update();
+      empty.hidden = true;
+      if (follow) scrollToEnd();
+      else jump.hidden = false;
+    }, interrupt: {
+      focus: () => input.focus(),
+      available: () => allowed() && !sendNow.disabled,
+    }});
+    mount.replaceChildren(title, live.strip, scrollArea, guidanceChip, form, footer);
 
     let cursor, loading, posting, ended = '', paused = false, finishedLoaded = false;
     let turnRunning = false, following = false;
@@ -213,6 +481,7 @@ const portalConversation = (() => {
       turnRunning = running;
       following = guided;
       syncForm();
+      live.start();
     }
 
     function updateTask(task, events) {
@@ -334,6 +603,7 @@ const portalConversation = (() => {
       const body = el('div', undefined, 'conversation-bubble');
       const meta = el('div', undefined, 'conversation-meta');
       meta.append(timeLabel(item));
+      if (item.duration_s != null) meta.append(el('span', '用时 ' + elapsed(item.duration_s, true)));
       if (item.dag_node_id) meta.append(locate(item.dag_node_id));
       if (item.kind === 'message') userBubble(item, row, body, meta);
       else if (['reply', 'operations', 'error'].includes(item.kind) || item.proposal) {
@@ -347,13 +617,23 @@ const portalConversation = (() => {
         body.classList.add('conversation-chip');
         const decision = ['review.submitted', 'approval.decision'].includes(item.kind);
         const agent = item.agent_label || (item.kind.startsWith('subtask.') && ui.backendLabel(item.backend));
-        const label = agent ? `${agent} · ${item.text}` : item.text;
+        const waited = ['admission.granted', 'subtask.started'].includes(item.kind);
+        const timing = item.duration_s == null ? '' : (waited ? '已等 ' : '用时 ') + elapsed(item.duration_s, true);
+        const label = [agent, item.text, timing, item.cost_usd == null ? '' : cost(item.cost_usd)]
+          .filter(Boolean).join(' · ');
         body.append(item.dag_node_id ? locate(item.dag_node_id, label) : el('span', label));
         if (decision) {
           body.classList.add('conversation-approval-chip');
           body.append(el('span', '·'));
         }
         body.append(timeLabel(item, decision ? minuteClock : clock));
+        if (item.command || item.output_tail) {
+          const output = el('details', undefined, 'conversation-step-output');
+          output.append(el('summary', item.output_tail ? '查看输出末尾' : '查看命令'));
+          if (item.command) output.append(el('code', item.command));
+          if (item.output_tail) output.append(el('pre', item.output_tail));
+          body.append(output);
+        }
         row.append(body);
       }
       list.append(row);
@@ -403,7 +683,7 @@ const portalConversation = (() => {
             for (const item of page.items) {
               if (addItem(item)) changed = true;
             }
-            empty.hidden = list.hasChildNodes();
+            empty.hidden = list.hasChildNodes() || summary.hasChildNodes();
             if (follow) scrollToEnd();
             else if (changed) jump.hidden = false;
             more = page.has_more && page.cursor !== cursor;
@@ -463,7 +743,10 @@ const portalConversation = (() => {
       if (allowed() && !button.disabled) form.requestSubmit(button);
     };
     syncForm();
-    return {approvals, title, refresh, setState, updateTask, recordDecision, destroy() { mount.replaceChildren(); }};
+    return {approvals, title, refresh, setState, updateTask, recordDecision, destroy() {
+      live.destroy();
+      mount.replaceChildren();
+    }};
   }
 
   return {create};

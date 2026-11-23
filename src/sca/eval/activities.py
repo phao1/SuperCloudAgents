@@ -28,6 +28,7 @@ from sca.eval.trajectory import evaluate
 from sca.gateway.configuration import local_default_model
 from sca.gateway.model_providers import read_registry
 from sca.host import remove_tree
+from sca.live_heartbeat import worker_activity
 from sca.orchestration.provider_errors import account_failure
 
 
@@ -73,6 +74,10 @@ class EvalActivities:
 
     @activity.defn(name="eval_prepare")
     async def prepare(self, request: dict) -> dict:
+        async with worker_activity(self.settings.data_dir, "evaluation", request["id"], "prepare_evaluation"):
+            return await self._prepare(request)
+
+    async def _prepare(self, request: dict) -> dict:
         suite = await load_activity_suite(Path(request["suite"]))
         expected_hash = request.get("suite_hash")
         if expected_hash is not None and not matches_suite_hash(suite, expected_hash):
@@ -112,6 +117,10 @@ class EvalActivities:
 
     @activity.defn(name="eval_submit")
     async def submit(self, request: dict) -> str:
+        async with worker_activity(self.settings.data_dir, "evaluation", request["id"], "submit_case"):
+            return await self._submit(request)
+
+    async def _submit(self, request: dict) -> str:
         case = request["case"]
         current = await load_activity_suite(Path(request["suite"]))
         if not matches_suite_hash(current, case["suite_hash"]):

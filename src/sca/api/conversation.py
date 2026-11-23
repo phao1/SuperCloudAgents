@@ -11,6 +11,15 @@ from pydantic import BaseModel, Field
 
 from sca.api.authz import GuestPrincipal
 from sca.api.guest_history import history_payload
+from sca.core.live_timing import (
+    OPERATION_EVENTS,
+    TIMING_CONTEXT,
+    TaskTimings,
+    event_is_start,
+    event_scope,
+    number,
+    seconds,
+)
 from sca.core.models import Event, Principal, Task, TaskState
 from sca.core.task_dag import (
     TASK_MILESTONE_CONTEXT,
@@ -44,6 +53,7 @@ class Operation(BaseModel):
     exit_code: int | None = None
     output_tail: str | None = None
     failed: bool = False
+    duration_s: float | None = None
 
 
 class TurnActivity(BaseModel):
@@ -85,6 +95,10 @@ class ConversationItem(BaseModel):
     activity: TurnActivity | None = None
     proposal: ProposalSummary | None = None
     evaluation: EvaluationSummary | None = None
+    duration_s: float | None = None
+    cost_usd: float | None = None
+    command: str | None = None
+    output_tail: str | None = None
 
 
 class ConversationPage(BaseModel):
@@ -181,7 +195,8 @@ def evolution_finish_item(row: dict) -> ConversationItem:
     if reason == 'imported while running':
         reason = '仅导入历史记录'
     return ConversationItem(id='finished', kind='finish', text=finish_text(row['status'], reason),
-                            created_at=row['finished_at'], dag_node_id=f'evolution:{row["id"]}')
+                            created_at=row['finished_at'], dag_node_id=f'evolution:{row["id"]}',
+                            duration_s=seconds(row['created_at'], row['finished_at']))
 
 
 def _overlay_changes(before: dict, after: dict, user: Principal) -> list[str]:
@@ -237,6 +252,8 @@ def _add_evolution_evidence(items: list[ConversationItem], history: EvolutionHis
                 total=len(rows), cost_usd=sum(float(row['cost_usd']) for row in rows),
                 status=run['status'], reason=_display(user, variant.get('reason'), 220) or None,
             )
+            if run.get('finished_at') is not None:
+                item.duration_s = seconds(run['created_at'], run['finished_at'])
 
 
 async def evolution_page(
@@ -284,10 +301,12 @@ TASK_STATES = {
     TaskState.SUCCEEDED: '任务完成', TaskState.FAILED: '任务失败', TaskState.CANCELLED: '任务已取消',
 }
 REVIEW_DECISIONS = {'approve': '已批准', 'request_changes': '已要求修改', 'reject': '已拒绝'}
-OPERATION_EVENTS = frozenset({'agent.command', 'agent.tool', 'agent.file_change'})
 CHAT_EVENTS = TASK_MILESTONES | OPERATION_EVENTS | {
     'agent.message', 'agent.error', 'model.provider_error', 'review.submitted',
+    'workspace.prepared', 'sandbox.created', 'sandbox.restored', 'setup.completed',
+    'admission.waiting', 'admission.granted', 'subtask.queued', 'subtasks.merged', 'agent.activity',
 }
+CHAT_CONTEXT = TASK_MILESTONE_CONTEXT | TIMING_CONTEXT | CHAT_EVENTS
 REPLY_LIMIT = 8000
 
 
@@ -353,18 +372,21 @@ def _file_edit(entry: object, user: Principal) -> FileEdit | None:
                     deletions=removed if type(removed) is int and removed >= 0 else None)
 
 
-def _operation(event: Event, adapter: AgentOutputAdapter, user: Principal) -> Operation | None:
+def _operation(
+    event: Event, adapter: AgentOutputAdapter, user: Principal, duration_s: float | None,
+) -> Operation | None:
     p = event.payload
     if event.type == 'agent.command':
         exit_code = p.get('exit_code')
         return Operation(kind='command', name=_display(user, p.get('command'), 800) or '命令',
                          exit_code=exit_code if type(exit_code) is int else None,
-                         output_tail=_display(user, p.get('output_tail'), 1600, tail=True) or None, failed=_failed(p))
+                         output_tail=_display(user, p.get('output_tail'), 1600, tail=True) or None,
+                         failed=_failed(p), duration_s=duration_s)
     if event.type == 'agent.tool' and not p.get('name') and not _failed(p):
         return None
     return Operation(kind='tool', name=_display(user, p.get('name'), 100)
                      or ('文件编辑' if event.type == 'agent.file_change' else '工具调用'),
-                     summary=adapter.tool_summary(p, user), failed=_failed(p))
+                     summary=adapter.tool_summary(p, user), failed=_failed(p), duration_s=duration_s)
 
 
 def _reply_text(event: Event) -> str:
@@ -381,7 +403,7 @@ def _reply_text(event: Event) -> str:
 
 
 def _content_key(event: Event, turn: int) -> tuple[int, str, str] | None:
-    if (event.type in OPERATION_EVENTS and event.payload.get('status') not in ('started', 'pending', 'in_progress')
+    if (event.type in OPERATION_EVENTS and not event_is_start(event)
             and isinstance(call_id := event.payload.get('call_id'), str)):
         return turn, 'operation', call_id
     if event.type in ('agent.message', 'agent.turn_completed') and (text := _reply_text(event)):
@@ -425,7 +447,11 @@ def _task_control_receipt(event: Event) -> str:
 def _turn_text(event: Event, node: DAGNode | None) -> str:
     status = {'agent.turn_started': '开始', 'agent.turn_completed': '完成', 'agent.turn_interrupted': '已打断'}
     number = event.payload.get('turn', node.meta.get('turn', 1) if node else 1)
-    return f'第 {number} 轮{status[event.type]}'
+    text = f'第 {number} 轮{status[event.type]}'
+    attempt = event.payload.get('attempt')
+    if event.type == 'agent.turn_started' and type(attempt) is int and attempt > 1:
+        text += f' · 第 {attempt} 次尝试'
+    return text
 
 
 def _task_progress(
@@ -440,6 +466,22 @@ def _task_progress(
             label = TASK_STATES.get(p.get('to'))
             reason = one_line(_display(user, p.get('reason'), 220))
             return f'{label} · {reason}' if label and reason else label
+        case 'workspace.prepared':
+            if p.get('phase') != 'after_setup':
+                return '仓库已准备' if p.get('mirror_only') else '工作区已准备'
+        case 'sandbox.created' | 'sandbox.restored':
+            return '沙箱已创建' if event.type == 'sandbox.created' else '沙箱已恢复'
+        case 'setup.completed':
+            if p.get('skipped'):
+                return '环境已从快照恢复'
+            if p.get('exit_code') != 0:
+                return '环境准备失败'
+            return '依赖与环境准备完成' if p.get('command') else '环境准备完成'
+        case 'admission.waiting':
+            return '等待模型网关限流恢复' if p.get('reason') == 'gateway_pressure' else '等待并发名额'
+        case 'admission.granted':
+            if (number(p.get('wait_seconds')) or 0) >= 1:
+                return '已获得并发名额'
         case 'agent.turn_started' | 'agent.turn_completed' | 'agent.turn_interrupted':
             return _turn_text(event, node)
         case 'plan.started':
@@ -450,13 +492,25 @@ def _task_progress(
                 return '规划完成 · 采用单任务执行'
             cap = p.get('max_parallel_agents')
             return f'规划完成 · {count} 个子任务' + (f'，最多 {cap} 个并发' if type(cap) is int else '')
-        case 'subtask.started' | 'subtask.completed':
+        case 'subtask.queued' | 'subtask.started' | 'subtask.completed':
             name = one_line(_display(user, p.get('subtask'), 50))
+            if event.type == 'subtask.queued':
+                return f'子任务 {name} · 等待并发名额' if name else None
             if event.type == 'subtask.started':
                 status = '开始'
             else:
                 status = '已阻塞' if p.get('status') == 'blocked' else ('完成' if p.get('passed') else '失败')
-            return f'{name} · {status}' if name else None
+            return f'子任务 {name} {status}' if name else None
+        case 'subtasks.merged':
+            return '子任务合并完成'
+        case 'agent.activity':
+            if (p.get('operation') == 'settle' and p.get('status') == 'completed'
+                    and (number(p.get('duration_s')) or 0) >= 1):
+                return '费用结算完成'
+            if p.get('operation') in ('model_retry', 'model_rate_limit'):
+                label = '等待模型限流恢复' if p['operation'] == 'model_rate_limit' else '重试模型请求'
+                attempt = p.get('retry_attempt')
+                return f'{label} · 第 {attempt} 次尝试' if type(attempt) is int else label
         case 'plan.rejected':
             reason = one_line(_display(user, p.get('reason'), 220))
             return '子任务规划未通过' + (f' · {reason}' if reason else '')
@@ -493,7 +547,7 @@ def _task_progress(
 
 def _add_operation(
     activity: TurnActivity, event: Event, adapter: AgentOutputAdapter, user: Principal,
-    files: dict[str, FileEdit],
+    files: dict[str, FileEdit], duration_s: float | None,
 ) -> None:
     if event.type == 'agent.file_change' and (edits := adapter.edits(event.payload, user)):
         for edit in edits:
@@ -504,24 +558,48 @@ def _add_operation(
             for name in ('additions', 'deletions'):
                 if (count := getattr(edit, name)) is not None:
                     setattr(existing, name, (getattr(existing, name) or 0) + count)
-    elif operation := _operation(event, adapter, user):
+    elif operation := _operation(event, adapter, user, duration_s):
         activity.operations.append(operation)
+
+
+def _milestone_details(event: Event, timings: TaskTimings, user: Principal) -> dict:
+    p = event.payload
+    details = {'duration_s': timings.durations.get(event.seq), 'cost_usd': timings.costs.get(event.seq)}
+    failed_check = event.type == 'verification.completed' and p.get('passed') is False
+    if failed_check or event.type == 'setup.completed':
+        details['command'] = _display(user, p.get('command'), 800) or None
+        if failed_check or p.get('exit_code') not in (None, 0):
+            details['output_tail'] = _display(user, p.get('output_tail'), 2400, tail=True) or None
+    return details
+
+
+def _error_text(event: Event, user: Principal) -> str:
+    p = event.payload
+    kind = _object(p.get('model_provider_error')).get('kind') or p.get('kind')
+    if kind == 'rate_limit':
+        return '模型服务限流 · 等待重试'
+    if kind == 'unavailable':
+        return '模型服务暂不可用 · 等待重试'
+    return _display(user, p.get('message') or kind, 600) or '执行出错'
 
 
 async def task_page(store: Store, task_id: UUID, user: Principal, after: int, limit: int) -> ConversationPage:
     task, page, context = await store.task_conversation_events(
-        task_id, after, limit + 1, CHAT_EVENTS, TASK_MILESTONE_CONTEXT,
+        task_id, after, limit + 1, CHAT_EVENTS, CHAT_CONTEXT,
     )
     if not page:
         return ConversationPage(items=[], cursor=str(after), has_more=False)
     shown = page[:limit]
     position = shown[-1].seq
-    focus, _ = task_conversation_nodes(task, [event for event in context if event.seq <= position])
+    history = [event for event in context if event.seq <= position]
+    focus, _ = task_conversation_nodes(task, [event for event in history if event.type in TASK_MILESTONE_CONTEXT])
+    timings = TaskTimings(history)
     keys = {key for event in context if event.seq <= after
             if (key := _content_key(event, _turn_seq(event, focus.get(event.seq)))) is not None}
     items: list[ConversationItem] = []
     activity = None
     files: dict[str, FileEdit] = {}
+    activity_scope = None
     root = f'task:{task_id}'
     for event in shown:
         node, p = focus.get(event.seq), event.payload
@@ -535,17 +613,19 @@ async def task_page(store: Store, task_id: UUID, user: Principal, after: int, li
             dag_id = root
         common = {'id': f'event:{event.seq}', 'created_at': event.created_at, 'dag_node_id': dag_id}
         if event.type in OPERATION_EVENTS:
-            if duplicate or p.get('status') in ('started', 'pending', 'in_progress'):
+            if duplicate or event_is_start(event):
                 continue
             identity = _agent_identity(event, task, node, user)
             adapter = AGENT_ADAPTERS.get(identity['backend'], _STANDARD)
-            if activity is not None and activity.turn_seq == turn:
-                _add_operation(activity, event, adapter, user, files)
+            scope = event_scope(p)
+            duration_s = timings.durations.get(event.seq)
+            if activity is not None and activity.turn_seq == turn and activity_scope == scope:
+                _add_operation(activity, event, adapter, user, files, duration_s)
             else:
                 current, changed = TurnActivity(turn_seq=turn), {}
-                _add_operation(current, event, adapter, user, changed)
+                _add_operation(current, event, adapter, user, changed, duration_s)
                 if current.operations or current.files:
-                    activity, files = current, changed
+                    activity, files, activity_scope = current, changed, scope
                     items.append(ConversationItem(kind='operations', text='执行详情', activity=activity,
                                                   **identity, **common))
             continue
@@ -555,7 +635,7 @@ async def task_page(store: Store, task_id: UUID, user: Principal, after: int, li
                                           **{**common, 'id': f'event:{event.seq}:reply'}))
             activity = None
         if event.type in ('agent.error', 'model.provider_error') and not duplicate:
-            text = _display(user, p.get('message') or p.get('kind'), 600) or '执行出错'
+            text = _error_text(event, user)
             items.append(ConversationItem(kind='error', text=text, **_agent_identity(event, task, node, user), **common))
             activity = None
         if event.type == 'user.message':
@@ -572,7 +652,8 @@ async def task_page(store: Store, task_id: UUID, user: Principal, after: int, li
             if identity['agent_lane'] is None:
                 identity = {'backend': identity['backend']} if kind.startswith('subtask.') else {}
             source = ConversationItem(kind=kind, text=text, message_id=p.get('message_id'),
-                                      status=p.get('status', status), **identity, **common)
+                                      status=p.get('status', status), **identity, **common,
+                                      **_milestone_details(event, timings, user))
         else:
             continue
         items.append(source)

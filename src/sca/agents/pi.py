@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
+from sca.agents.live import activity_start, operation_id
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider, closing_stream
@@ -48,8 +49,14 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
     kind = raw.get("type")
     events = []
     if kind == "tool_execution_start" and tools is not None:
-        if isinstance(raw.get("toolCallId"), str) and isinstance(raw.get("args"), dict):
-            tools[raw["toolCallId"]] = raw["args"]
+        call_id, args, name = raw.get("toolCallId"), raw.get("args"), raw.get("toolName")
+        if isinstance(call_id, str) and isinstance(args, dict):
+            tools[call_id] = args
+            if name == "bash":
+                return [activity_start("command", args.get("command"), call_id)]
+            if name in ("write", "edit"):
+                return [activity_start("edit", args.get("path"), call_id)]
+            return [activity_start("tool", name, call_id)]
     elif kind == "tool_execution_end":
         call_id = raw.get("toolCallId")
         args = tools.pop(call_id, {}) if tools is not None and isinstance(call_id, str) else {}
@@ -58,6 +65,8 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
         name = raw.get("toolName")
         data = {"input": args, "output_tail": tail(_text(result.get("content"))),
                 "is_error": raw.get("isError", False)}
+        if id_ := operation_id(call_id):
+            data["call_id"] = id_
         if type(raw.get("durationMs")) in (int, float) and raw["durationMs"] >= 0:
             data["duration_ms"] = raw["durationMs"]
         if name == "bash":
@@ -77,6 +86,12 @@ def parse_pi_line(line: str, tools: dict[str, dict] | None = None) -> list[Agent
             data["name"] = name
             event = "tool"
         events.append(AgentEvent(type=event, data=data))
+    elif kind == "message_start":
+        message = raw.get("message")
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            return [activity_start("model")]
+    elif kind == "agent_end" and raw.get("willRetry") is True:
+        return [activity_start("model_retry")]
     elif kind == "message_end":
         message = raw.get("message")
         if not isinstance(message, dict) or message.get("role") != "assistant":

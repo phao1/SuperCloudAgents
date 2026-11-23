@@ -19,10 +19,11 @@ from sca.sandbox._exec import NODE_EXECUTABLE
 def test_parser():
     tools = {}
     events = [e for line in TRANSCRIPT.splitlines() for e in parse_pi_line(line, tools)]
-    assert [e.type for e in events] == ['command', 'file_change', 'message', 'usage']
-    assert events[0].data['command'] == 'pwd'
-    assert events[0].data['duration_ms'] == 3
-    assert events[1].data['changes'] == [{'path': 'app.py', 'kind': 'update'}]
+    assert [e.type for e in events] == ['activity', 'command', 'activity', 'file_change', 'message', 'usage']
+    assert events[0].data == {'operation': 'command', 'status': 'started', 'detail': 'pwd', 'call_id': 'a'}
+    assert events[1].data['command'] == 'pwd'
+    assert events[1].data['duration_ms'] == 3
+    assert events[3].data['changes'] == [{'path': 'app.py', 'kind': 'update'}]
     assert events[-1].data == {'input_tokens': 14, 'output_tokens': 2,
                                     'cached_input_tokens': 3, 'cost': 0.001}
     assert tools == {}

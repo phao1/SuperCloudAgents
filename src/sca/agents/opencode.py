@@ -8,9 +8,11 @@ import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+from sca.agents.live import activity_start, operation_id
 from sca.agents.provider_errors import model_error_event
 from sca.core.errors import AgentTurnError
 from sca.core.interfaces import SandboxProvider, closing_stream
+from sca.core.model_provider import classify_model_error
 from sca.core.models import AgentContext, AgentEvent, ExecExit, Mount, SandboxAdditions, tail
 
 VERSION_PATTERN = r"2\.3\.0-sca\.(0|[1-9][0-9]*)"
@@ -41,6 +43,14 @@ def parse_opencode_line(
     timestamp = timestamp if type(timestamp) is int and timestamp >= 0 else None
     if kind == "step_start" and steps is not None and timestamp is not None:
         steps[step_id] = {"started_at_ms": timestamp}
+    if kind == "step_start":
+        return [activity_start("model")]
+    if kind == "retry":
+        problem = classify_model_error(raw.get("error"))
+        event = activity_start("model_rate_limit" if problem and problem.kind == "rate_limit" else "model_retry")
+        if type(attempt := raw.get("attempt")) is int and attempt > 0:
+            event.data["retry_attempt"] = attempt
+        return [event]
     data = {}
     event = None
     if kind == "text":
@@ -55,6 +65,17 @@ def parse_opencode_line(
         inputs = state.get("input") or {}
         if not isinstance(inputs, dict):
             inputs = {}
+        call_id = part.get("callID") or part.get("id")
+        editing = name in {"edit", "write", "patch", "apply_patch"}
+        if state.get("status") == "pending":
+            return []
+        if state.get("status") == "running":
+            if name == "shell":
+                return [activity_start("command", inputs.get("command"), call_id)]
+            if editing:
+                path = inputs.get("filePath") or inputs.get("path") or inputs.get("file_path")
+                return [activity_start("edit", path, call_id)]
+            return [activity_start("tool", name, call_id)]
         metadata = state.get("metadata") or {}
         metadata = metadata.get("metadata", metadata) if isinstance(metadata, dict) else {}
         if not isinstance(metadata, dict):
@@ -69,7 +90,7 @@ def parse_opencode_line(
                     "output_tail": output,
                 },
             )
-        elif name in {"edit", "write", "patch", "apply_patch"}:
+        elif editing:
             event, data = (
                 "file_change",
                 {
@@ -81,6 +102,10 @@ def parse_opencode_line(
             )
         else:
             event, data = "tool", {"name": name, "input": inputs, "output_tail": output}
+        if id_ := operation_id(call_id):
+            data["call_id"] = id_
+        if state.get("status") == "error":
+            data["is_error"] = True
         timing = state.get("time")
         if isinstance(timing, dict):
             start, end = timing.get("start"), timing.get("end")

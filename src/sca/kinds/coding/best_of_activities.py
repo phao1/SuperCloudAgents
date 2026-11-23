@@ -34,6 +34,7 @@ from sca.kinds.coding.best_of import (
 from sca.kinds.coding.spec import BestOfSpec, CodingSpec
 from sca.kinds.coding.subtask_inputs import SubtaskAgent
 from sca.kinds.coding.subtasks import ChildActivities, ChildStore
+from sca.live_heartbeat import LaneScope
 from sca.workspace.overlay import OverlayWorkspace
 from sca.workspace.snapshots import preparation_key
 
@@ -110,6 +111,9 @@ class AttemptActivities(ChildActivities):
     def __init__(self, coding: CodingActivities, attempt: Attempt) -> None:
         super().__init__(coding, attempt.name)
         self.store = AttemptStore(self.store, attempt)
+
+    def _live_scope(self) -> LaneScope:
+        return self._parent.name if self._parent else "", self.store.attempt.attempt
 
     def _agent_ctx(
         self, task_id: str, spec: ExecutionSpec, champion: dict | None = None,
@@ -193,7 +197,8 @@ class BestOfActivities:
             return await self._for_subtask(inp.subtask, inp.step.agent).step(replace(inp, subtask=None))
         child = AttemptActivities(self.coding, inp.attempt)
         if inp.step.action == "prepare":
-            await self._prepare(child, await self.store.get_task(inp.step.task_id))
+            async with child._live_task(inp.step.task_id, "workspace"):
+                await self._prepare(child, await self.store.get_task(inp.step.task_id))
             return {}
         return await child.run_step(inp.step)
 
