@@ -678,13 +678,13 @@ body[data-trace-expanded] { overflow: hidden; }
           <pre id="task-terminal-output" class="portal-terminal" tabindex="0" aria-label="终端输出"></pre>
         </div>
         <div id="task-run-workbench" class="portal-run-workbench">
-        <section id="task-dag" class="panel task-dag" aria-labelledby="task-dag-title">
+        <section id="task-dag" class="panel task-dag dag-network" aria-labelledby="task-dag-title">
           <div class="panel-head">
-            <h2 id="task-dag-title">执行图 DAG</h2>
+            <h2 id="task-dag-title">任务执行图</h2>
             <div class="dag-controls">
               <div class="dag-orientation" role="group" aria-label="布局方向">
-                <button data-dag-orientation="vertical" type="button" aria-pressed="true">纵向</button>
-                <button data-dag-orientation="horizontal" type="button" aria-pressed="false">横向</button>
+                <button data-dag-orientation="vertical" type="button" aria-pressed="false">纵向</button>
+                <button data-dag-orientation="horizontal" type="button" aria-pressed="true">横向</button>
               </div>
               <button class="dag-zoom-out" type="button" aria-label="缩小执行图">−</button>
               <button class="dag-zoom-in" type="button" aria-label="放大执行图">＋</button>
@@ -1714,7 +1714,7 @@ function refreshTaskDag(id, fromStream=false){
   const panel=$('task-dag');
   panel.hidden=!portalUI.can('history')||typeof SCATaskDAG==='undefined';
   if(panel.hidden)return;
-  taskDag??=SCATaskDAG.create(panel,taskId=>data('/tasks/'+enc(taskId)+'/dag'));
+  taskDag??=SCATaskDAG.create(panel,taskId=>data('/tasks/'+enc(taskId)+'/dag'),{compact:true});
   taskDag.refresh(id,fromStream);
 }
 async function streamTask(taskId){

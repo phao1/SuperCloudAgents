@@ -66,11 +66,11 @@ def demo_dag():
 def test_task_dag_panel_uses_local_assets_and_the_existing_stream():
     page = (STATIC / "portal.html").read_text()
     panel = page[page.index('id="task-dag"'):page.index('id="swimlane"')]
-    assert "执行图 DAG" in panel
+    assert "任务执行图" in panel
     assert 'aria-label="节点详情"' in panel
     assert 'class="dag-fit"' in panel
-    assert 'data-dag-orientation="vertical" type="button" aria-pressed="true"' in panel
-    assert 'data-dag-orientation="horizontal" type="button" aria-pressed="false"' in panel
+    assert 'data-dag-orientation="vertical" type="button" aria-pressed="false"' in panel
+    assert 'data-dag-orientation="horizontal" type="button" aria-pressed="true"' in panel
     assert '<script src="/portal/assets/task-dag.js"></script>' in page
     assert '<link rel="stylesheet" href="/portal/assets/task-dag.css">' in page
     stream = page[page.index("async function streamTask"):page.index("function renderTimeline")]
@@ -170,7 +170,7 @@ for (const orientation of ['vertical', 'horizontal']) {
 """, dag)
 
 
-def test_portal_browser_renders_four_agent_lanes_at_1440(agent_example, tmp_path):
+def test_portal_browser_renders_compact_agent_nodes_at_1440(agent_example, tmp_path):
     owner, dag, rows = agent_example
     task_path = f"/v1/tasks/{owner.id}"
     e = next(node for node in dag["nodes"] if node["kind"] == "subtask" and node["label"] == "E")
@@ -208,17 +208,22 @@ def test_portal_browser_renders_four_agent_lanes_at_1440(agent_example, tmp_path
         page.goto(f"http://portal.test/portal#/tasks/{owner.id}")
         panel = page.locator("#task-dag")
         panel.get_by_text("4 个 agent · 5 个子任务 · 最多并发 2", exact=True).wait_for()
-        lane = panel.locator(".dag-agent-lane")
-        lane.last.wait_for()
-        assert lane.count() == 4
-        assert lane.locator(".dag-agent-chain").all_text_contents() == ["A → E", "B", "C", "D"]
-        assert lane.locator(".dag-agent-status").all_text_contents() == ["运行中", "排队中", "完成", "排队中"]
-        assert lane.first.locator(".dag-agent-backend").text_content() == "DeepSeek Harness"
+        agents = panel.locator('[data-kind="subtask"][data-agent-lane]')
+        agents.last.wait_for()
+        assert agents.count() == 5
+        assert agents.locator(".dag-node-label").all_text_contents() == [
+            "Agent 1", "Agent 2", "Agent 3", "Agent 4", "Agent 1",
+        ]
+        assert agents.locator(".dag-node-state").all_text_contents() == [
+            "A", "B · 待执行", "C", "D · 待执行", "E · 运行中",
+        ]
+        assert "DeepSeek Harness" in agents.first.get_attribute("aria-label")
+        assert panel.locator('[data-dag-orientation="horizontal"]').get_attribute("aria-pressed") == "true"
         chat = page.locator("#task-conversation")
         chip = chat.get_by_text("Agent 1 · DeepSeek Harness · E · 开始", exact=True)
         chip.wait_for()
         panel.evaluate("(node) => node.scrollIntoView({block: 'start'})")
-        page.screenshot(path=tmp_path / "agent-lanes-1440.png", animations="disabled")
+        page.screenshot(path=tmp_path / "agent-network-1440.png", animations="disabled")
         chip.dispatch_event("click")
         assert panel.locator('[data-kind="subtask"][aria-pressed="true"]').get_attribute("data-node") == e["id"]
 
@@ -261,6 +266,16 @@ for (const [direction, along, across, length] of [
   for (const waypoint of skip.route.slice(1,-1)) {
     assert(result.nodes.filter(n => n.layerStart === waypoint.layerStart).every(n =>
       Math.abs(n.cross-waypoint.cross) > n[direction ? 'height' : 'width']/2));
+  }
+  const compact = layout(dag, direction, {compact: true});
+  assert.equal(compact.edges.length, result.edges.length);
+  assert(compact.width < result.width && compact.height < result.height);
+  assert.equal(compact.edges.filter(edge => edge.shortcut).length, 1);
+  assert(compact.edges.find(edge => edge.shortcut).source.node.id === 'root');
+  for (const a of compact.nodes) {
+    for (const b of compact.nodes.filter(n => n !== a)) {
+      assert(a.x+a.width <= b.x || b.x+b.width <= a.x || a.y+a.height <= b.y || b.y+b.height <= a.y);
+    }
   }
 }
 """)

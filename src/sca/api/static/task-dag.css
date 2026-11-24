@@ -101,6 +101,73 @@
 .dag-node[data-path]:not([data-path=""], [aria-pressed="true"], :focus-visible) .dag-node-shape {
   stroke: var(--path-ink); stroke-width: 3;
 }
+
+#task-run-workbench {
+  grid-template-columns: minmax(0, 1fr) clamp(17rem, 24%, 23rem);
+}
+.dag-network .panel-head h2 { font-size: clamp(1.375rem, 2vw, 1.75rem); }
+.dag-network .dag-controls button { min-width: 34px; min-height: 34px; }
+.dag-network-overview {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: 6px 14px; margin-block: 5px 9px;
+}
+.dag-network .dag-parallel, .dag-network .dag-type-legend { margin: 0; }
+.dag-network .dag-type-key { inline-size: 8px; block-size: 8px; border-radius: 50%; background: var(--dag-tone); }
+.dag-network .dag-legend[aria-label="连线类型"] { margin-block-end: 9px; }
+.dag-network .dag-legend i { width: 15px; border-top-width: 1px; }
+.dag-network .dag-legend .dag-edge-dependency i { border-top-style: solid; color: var(--dag-tone); }
+.dag-network .dag-canvas {
+  height: clamp(min(300px, 80vh), var(--dag-height, 300px), 80vh);
+  border-color: light-dark(#e5e9f3, #2b3246);
+  background: radial-gradient(circle, light-dark(#dce3f2, #333c55) .8px, transparent .9px)
+    0 0 / 18px 18px light-dark(#fafbfe, #131a2a);
+}
+.dag-network :is(.dag-tone-task, [data-tone="task"]) { --dag-tone: light-dark(#654bce, #b29bff); }
+.dag-network :is(.dag-tone-plan, [data-tone="plan"]) { --dag-tone: light-dark(#4e79d2, #8baeff); }
+.dag-network :is(.dag-tone-agent, [data-tone="agent"], .dag-legend .dag-edge-dependency) {
+  --dag-tone: light-dark(#25895e, #65cda1);
+}
+.dag-network :is(.dag-tone-merge, [data-tone="merge"]) { --dag-tone: light-dark(#248687, #64c8cc); }
+.dag-network :is(.dag-tone-check, [data-tone="check"]) { --dag-tone: light-dark(#8058c8, #be9bef); }
+.dag-network :is(.dag-tone-neutral, [data-tone="neutral"]) { --dag-tone: light-dark(#6b7895, #9dabcb); }
+.dag-network .dag-tone-failure { --dag-tone: var(--bad); }
+.dag-network .dag-edge[data-path] {
+  stroke: var(--dag-tone); stroke-width: 1.35; stroke-linecap: round; opacity: .9;
+}
+.dag-network .dag-edge-dependency:not([data-shortcut]) { stroke-dasharray: none; }
+.dag-network .dag-edge-spawn { stroke-dasharray: 2 2.5; }
+.dag-network .dag-edge[data-path="failure"] { stroke-width: 1.8; opacity: 1; }
+.dag-network .dag-edge[data-shortcut]:not([data-path="failure"]) { stroke-width: .95; opacity: .16; }
+.dag-network .dag-edge[data-shortcut][data-related="true"] { stroke-width: 1.35; opacity: .92; }
+.dag-network-divider { stroke: light-dark(#d9e1f0, #36415b); stroke-width: 1; stroke-dasharray: 2 5; }
+.dag-network-stage rect { fill: light-dark(#edf0fc, #252e48); }
+.dag-network-stage text { fill: light-dark(#3f4b88, #d5deff); font-size: 13px; font-weight: 620; }
+.dag-network .dag-node { outline: none; }
+.dag-network-hit { fill: transparent; stroke: transparent; }
+.dag-network .dag-node:hover .dag-network-hit { fill: var(--accent-bg); }
+.dag-network .dag-node:is([aria-pressed="true"], :focus-visible) .dag-network-hit {
+  fill: var(--accent-bg); stroke: var(--accent); stroke-width: 1.25;
+}
+.dag-network .dag-network-dot { fill: var(--dag-tone); stroke: var(--panel); stroke-width: 2; }
+.dag-network .dag-node:is([data-status="pending"], [data-status="queued"], [data-status="skipped"]) .dag-network-dot {
+  fill: var(--panel); stroke: var(--muted); stroke-width: 1.5;
+}
+.dag-network .dag-node[data-status="failed"] .dag-network-dot { fill: var(--bad); }
+.dag-network .dag-node:is([data-status="cancelled"], [data-status="stopped"], [data-status="paused"]) .dag-network-dot {
+  fill: var(--warn);
+}
+.dag-network .dag-node-label { font-size: 15px; line-height: 19px; }
+.dag-network .dag-node-state { color: var(--muted); font-size: 12px; line-height: 16px; }
+.dag-network .dag-node:is([data-status="running"], [data-status="failed"]) .dag-node-state { color: var(--node-ink); }
+.dag-network .dag-node-chevron { stroke: var(--muted); stroke-width: 1.25; }
+@media (min-width: 901px) {
+  #task-run-workbench .dag-network { align-self: stretch; display: flex; flex-direction: column; }
+  .dag-network .dag-canvas { flex: 1 0 auto; }
+}
+@media (max-width: 900px) {
+  #task-run-workbench { grid-template-columns: minmax(0, 1fr); }
+}
 @media (max-width: 550px) {
   .dag-controls button { min-height: 44px; }
+  .dag-network .dag-controls button { min-height: 44px; }
 }
